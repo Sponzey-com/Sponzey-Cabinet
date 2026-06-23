@@ -1,0 +1,14 @@
+{
+  "name": "@sponzey-cabinet/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@sponzey-cabinet/client-core": "workspace:*",
+    "@sponzey-cabinet/editor": "workspace:*",
+    "@sponzey-cabinet/ui": "workspace:*",
+    "react": ">=18",
+    "react-dom": ">=18"
+  }
+}

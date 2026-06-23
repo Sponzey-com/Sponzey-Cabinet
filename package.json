@@ -1,0 +1,22 @@
+{
+  "name": "sponzey-cabinet",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "check:frontend-boundaries": "node scripts/check_frontend_boundaries.mjs",
+    "check:ui-shell": "node scripts/check_ui_shell.mjs",
+    "check:editor-integration": "node scripts/check_editor_integration.mjs",
+    "check:wikilink-editor": "node scripts/check_wikilink_editor.mjs",
+    "check:attachment-editor": "node scripts/check_attachment_editor.mjs",
+    "check:current-history-ui": "node scripts/check_current_history_ui.mjs",
+    "check:search-ui": "node scripts/check_search_ui.mjs",
+    "check:link-ui": "node scripts/check_link_ui.mjs",
+    "check:asset-ui": "node scripts/check_asset_ui.mjs",
+    "check:platform-adapter": "node scripts/check_platform_adapter_smoke.mjs"
+  }
+}

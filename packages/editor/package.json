@@ -1,0 +1,15 @@
+{
+  "name": "@sponzey-cabinet/editor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@sponzey-cabinet/client-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@codemirror/lang-markdown": ">=6",
+    "@codemirror/state": ">=6",
+    "@codemirror/view": ">=6"
+  }
+}

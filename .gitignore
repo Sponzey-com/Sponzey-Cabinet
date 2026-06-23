@@ -284,5 +284,12 @@ download-cache/
 !ROADMAP.md
 !RESEARCH.md
 !AGENTS.md
+!.tasks/
+.tasks/*
+!.tasks/plan.md
+!.tasks/task*.md
+!.tasks/phase-gates.md
+!.tasks/decisions/
+!.tasks/decisions/**
 
 .DS_Store

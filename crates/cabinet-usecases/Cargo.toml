@@ -1,0 +1,11 @@
+[package]
+name = "cabinet-usecases"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cabinet-domain = { path = "../cabinet-domain" }
+cabinet-ports = { path = "../cabinet-ports" }
