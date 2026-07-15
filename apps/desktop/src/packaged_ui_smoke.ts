@@ -349,6 +349,7 @@ async function runCanvasActionWorkflow(
   setFailureStage("canvasArrange");
   click(document, '[data-action="auto-arrange-canvas"]');
   await waitUntil(document, () => document.querySelector('[data-exploration-surface="canvas"]')?.getAttribute("data-exploration-state") === "ArrangePreview", delay, timeout);
+  requireVisiblePrimaryButton(document, '[data-action="apply-canvas-arrange"]');
   click(document, '[data-action="apply-canvas-arrange"]');
   revision = await waitForCanvasRevision(document, revision, delay, timeout);
 
@@ -422,6 +423,17 @@ function requireButton(document: SmokeDocument, selector: string): HTMLButtonEle
   const element = requireElement(document, selector);
   if (!(element instanceof HTMLButtonElement)) throw new Error("PACKAGED_UI_REQUIRED_BUTTON_MISSING");
   return element;
+}
+
+function requireVisiblePrimaryButton(document: SmokeDocument, selector: string): HTMLButtonElement {
+  const button = requireButton(document, selector);
+  const bounds = button.getBoundingClientRect();
+  const style = getComputedStyle(button);
+  if (bounds.width <= 0 || bounds.height <= 0 || style.visibility === "hidden" || style.display === "none"
+    || style.opacity === "0" || style.backgroundColor === "transparent" || style.backgroundColor === "rgba(0, 0, 0, 0)") {
+    throw new Error("PACKAGED_UI_PRIMARY_ACTION_HIDDEN");
+  }
+  return button;
 }
 
 function canvasNodeGeometry(node: Element): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } {

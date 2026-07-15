@@ -458,11 +458,13 @@ function DesktopCanvas({
         e("button", { type: "button", "data-action": "remove-canvas-edge", disabled: mutationDisabled || !snapshot.selectedEdgeId, onClick: callbacks.onCanvasRemoveEdge }, "×", e("span", null, "연결 삭제")),
         e("span", { className: "toolbar-divider" }),
         snapshot.state === "ArrangePreview"
-          ? e("button", { type: "button", className: "primary", "data-action": "apply-canvas-arrange", onClick: callbacks.onCanvasApplyArrange }, "✓", e("span", null, "배치 적용"))
+          ? e(
+              "span",
+              { className: "canvas-arrange-actions", role: "group", "aria-label": "자동 정렬 미리보기 작업" },
+              e("button", { type: "button", className: "primary canvas-arrange-apply", "data-action": "apply-canvas-arrange", "aria-label": "자동 정렬 배치 적용", onClick: callbacks.onCanvasApplyArrange }, "✓", e("span", null, "배치 적용")),
+              e("button", { type: "button", className: "canvas-arrange-cancel", "data-action": "cancel-canvas-arrange", "aria-label": "자동 정렬 취소", onClick: callbacks.onCanvasCancelArrange }, "×", e("span", null, "취소")),
+            )
           : e("button", { type: "button", "data-action": "auto-arrange-canvas", disabled: mutationDisabled, onClick: callbacks.onCanvasAutoArrange }, "⌘", e("span", null, "자동 정렬")),
-        snapshot.state === "ArrangePreview"
-          ? e("button", { type: "button", "data-action": "cancel-canvas-arrange", onClick: callbacks.onCanvasCancelArrange }, "×", e("span", null, "취소"))
-          : null,
         e("span", { className: "toolbar-divider" }),
         e("button", { type: "button", "data-action": "rename-canvas", disabled: mutationDisabled, onClick: callbacks.onCanvasRenameRequest }, "✎", e("span", null, "이름 변경")),
         e("button", { type: "button", "data-action": "archive-canvas", disabled: mutationDisabled, onClick: callbacks.onCanvasArchiveRequest }, "□", e("span", null, "보관")),

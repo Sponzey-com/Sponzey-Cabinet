@@ -493,9 +493,23 @@ test("canvas non-button interactions expose visible focus styles", async () => {
 });
 
 test("canvas arrange preview keeps its primary apply action visible", async () => {
+  const snapshot = {
+    state: "ArrangePreview" as const,
+    workspaceId: "workspace-1",
+    canvasId: "canvas-1",
+    generation: 1,
+    selectedNodeIds: [],
+    canvas: durableCanvas(),
+    arrangeBaseCanvas: durableCanvas(),
+  };
+  const html = renderToStaticMarkup(createDesktopCanvasElement(model, snapshot, callbacks));
   const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
-  assert.match(css, /\.canvas-toolbar button\.primary\s*\{[^}]*background:\s*var\(--teal\)/s);
-  assert.match(css, /\.canvas-toolbar button\.primary\s*\{[^}]*color:\s*#fff/s);
+
+  assert.match(html, /class="canvas-arrange-actions"/);
+  assert.match(html, /class="primary canvas-arrange-apply"[^>]*data-action="apply-canvas-arrange"/);
+  assert.match(html, /data-action="apply-canvas-arrange"[^>]*aria-label="자동 정렬 배치 적용"/);
+  assert.match(css, /\.canvas-toolbar \.canvas-arrange-apply\s*\{[^}]*background:\s*#0d9083/s);
+  assert.match(css, /\.canvas-toolbar \.canvas-arrange-apply\s*\{[^}]*color:\s*#fff/s);
 });
 
 test("canvas bounds large durable records to viewport DOM limits", () => {

@@ -368,6 +368,10 @@ button.primary:hover:not(:disabled) { border-color: var(--teal-dark); background
 .canvas-toolbar button.active { border-color: var(--border); background: #f3f7f7; }
 .canvas-toolbar button.primary { border-color: var(--teal); background: var(--teal); color: #fff; }
 .canvas-toolbar button.primary:hover:not(:disabled) { border-color: var(--teal-dark); background: var(--teal-dark); }
+.canvas-arrange-actions { display: inline-flex; align-items: center; gap: 4px; }
+.canvas-toolbar .canvas-arrange-apply { border-color: #0d9083; background: #0d9083; color: #fff; font-weight: 700; }
+.canvas-toolbar .canvas-arrange-apply:hover:not(:disabled) { border-color: #08786d; background: #08786d; }
+.canvas-toolbar .canvas-arrange-cancel { border-color: var(--border); background: #fff; color: var(--ink); }
 .toolbar-divider { width: 1px; height: 22px; margin: 0 5px; background: var(--border); }
 .canvas-stage { position: relative; min-height: 500px; overflow: hidden; }
 .canvas-world { position: absolute; inset: 0; transform-origin: 0 0; }
