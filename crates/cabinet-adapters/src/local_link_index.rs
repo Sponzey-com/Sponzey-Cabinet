@@ -1,13 +1,52 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use cabinet_domain::document::DocumentId;
 use cabinet_domain::link::{Backlink, DocumentLink};
 use cabinet_domain::workspace::WorkspaceId;
-use cabinet_ports::link_index::{LinkIndex, LinkIndexError, LinkProjectionRecord};
+use cabinet_ports::link_index::{
+    BacklinkPage, BacklinkPageReader, BacklinkPageRequest, LinkIndex, LinkIndexError,
+    LinkProjectionRecord,
+};
 
 #[derive(Debug, Default)]
 pub struct LocalLinkIndex {
-    records: HashMap<(String, String), LinkProjectionRecord>,
+    records: BTreeMap<(String, String), LinkProjectionRecord>,
+}
+
+impl BacklinkPageReader for LocalLinkIndex {
+    fn list_backlinks_page(
+        &self,
+        workspace_id: &WorkspaceId,
+        target_document_id: &DocumentId,
+        request: BacklinkPageRequest,
+    ) -> Result<BacklinkPage, LinkIndexError> {
+        let workspace = workspace_id.as_str();
+        let mut matched = 0;
+        let mut records = Vec::with_capacity(request.limit() + 1);
+        'sources: for ((record_workspace, _), record) in &self.records {
+            if record_workspace != workspace {
+                continue;
+            }
+            for backlink in record.backlinks() {
+                if backlink.target_document_id() != target_document_id {
+                    continue;
+                }
+                if matched < request.offset() {
+                    matched += 1;
+                    continue;
+                }
+                records.push(backlink.clone());
+                matched += 1;
+                if records.len() > request.limit() {
+                    break 'sources;
+                }
+            }
+        }
+        let has_more = records.len() > request.limit();
+        records.truncate(request.limit());
+        let next_offset = has_more.then_some(request.offset() + records.len());
+        Ok(BacklinkPage::new(records, next_offset))
+    }
 }
 
 impl LinkIndex for LocalLinkIndex {
@@ -23,6 +62,18 @@ impl LinkIndex for LocalLinkIndex {
             ),
             record,
         );
+        Ok(())
+    }
+
+    fn delete_document_links(
+        &mut self,
+        workspace_id: &WorkspaceId,
+        document_id: &DocumentId,
+    ) -> Result<(), LinkIndexError> {
+        self.records.remove(&(
+            workspace_id.as_str().to_string(),
+            document_id.as_str().to_string(),
+        ));
         Ok(())
     }
 

@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use cabinet_adapters::local_document_asset_repository::LocalDocumentAssetRepository;
 use cabinet_adapters::local_document_repository::LocalDocumentRepository;
+use cabinet_adapters::local_graph_projection::LocalGraphProjectionStore;
 use cabinet_adapters::local_link_index::LocalLinkIndex;
 use cabinet_adapters::local_search_index::LocalSearchIndex;
 use cabinet_adapters::local_version_store::LocalVersionStore;
@@ -18,7 +19,14 @@ use cabinet_domain::document::{
     DocumentBody, DocumentBodyPolicy, DocumentId, DocumentMetadata, DocumentPath, DocumentSlug,
     DocumentTitle,
 };
+use cabinet_domain::graph::{
+    GraphEdge, GraphEdgeKind, GraphNode, GraphProjectionStatus, KnowledgeGraph,
+};
 use cabinet_domain::link::{Backlink, DocumentLink, LinkTarget, SourceRange};
+use cabinet_domain::permission::{
+    AccessResource, Permission, PermissionDecision, PermissionDecisionReason, PolicySource,
+};
+use cabinet_domain::user::UserId;
 use cabinet_domain::version::{
     CurrentDocumentSnapshot, DocumentSnapshotRef, VersionAuthor, VersionEntry, VersionId,
     VersionSummary,
@@ -26,7 +34,9 @@ use cabinet_domain::version::{
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::document_asset_repository::{DocumentAssetRecord, DocumentAssetRepository};
 use cabinet_ports::document_repository::{CurrentDocumentRecord, DocumentRepository};
+use cabinet_ports::graph_projection::{GraphProjectionRecord, GraphProjectionStore};
 use cabinet_ports::link_index::{LinkIndex, LinkProjectionRecord};
+use cabinet_ports::permission_aware_query::{PermissionAwareQueryError, PermissionDecisionPort};
 use cabinet_ports::search_index::{SearchDocumentRecord, SearchIndex};
 use cabinet_ports::version_store::{VersionRecord, VersionSnapshot, VersionStore};
 use cabinet_usecases::document::{
@@ -34,7 +44,10 @@ use cabinet_usecases::document::{
     GetDocumentHistoryUsecase, GetDocumentVersionInput, GetDocumentVersionUsecase,
     ListDocumentAssetsInput, ListDocumentAssetsUsecase,
 };
-use cabinet_usecases::graph::{GraphLiteProjectionInput, GraphLiteProjectionUsecase};
+use cabinet_usecases::graph::{
+    GraphLiteProjectionInput, GraphLiteProjectionUsecase, PermissionAwareGraphInput,
+    PermissionAwareGraphUsecase,
+};
 use cabinet_usecases::search::{SearchDocumentsInput, SearchDocumentsUsecase};
 
 const P95_GOAL_MS: u64 = 300;
@@ -52,6 +65,7 @@ fn local_query_paths_meet_p95_300ms_goal_on_small_fixture() {
     let mut search_index = LocalSearchIndex::default();
     let mut link_index = LocalLinkIndex::default();
     let mut document_assets = LocalDocumentAssetRepository::new(root.join("document-assets"));
+    let mut graph_projection_store = LocalGraphProjectionStore::new();
     let target_document_id = document_id(0);
     let target_version_id = version_id(0, 4);
     let mut document_ids = Vec::new();
@@ -75,6 +89,12 @@ fn local_query_paths_meet_p95_300ms_goal_on_small_fixture() {
         }
     }
     seed_unresolved_link(&mut link_index, &workspace_id, &target_document_id);
+    seed_permission_aware_graph_projection(
+        &mut graph_projection_store,
+        &workspace_id,
+        &target_document_id,
+        &document_ids,
+    );
 
     let known_document_ids = document_ids.iter().map(String::as_str).collect::<Vec<_>>();
     let current = GetCurrentDocumentUsecase::new();
@@ -82,6 +102,8 @@ fn local_query_paths_meet_p95_300ms_goal_on_small_fixture() {
     let version = GetDocumentVersionUsecase::new();
     let search = SearchDocumentsUsecase::new();
     let graph = GraphLiteProjectionUsecase::new();
+    let permission_aware_graph = PermissionAwareGraphUsecase::new();
+    let permission_checker = AllowAllPermissionDecision;
     let assets = ListDocumentAssetsUsecase::new();
     let mut samples = Vec::new();
 
@@ -147,6 +169,23 @@ fn local_query_paths_meet_p95_300ms_goal_on_small_fixture() {
                 )
                 .expect("graph lookup");
         });
+        push_sample(
+            &mut samples,
+            PerformanceTarget::PermissionAwareGraphLookup,
+            || {
+                permission_aware_graph
+                    .execute(
+                        PermissionAwareGraphInput::new(
+                            "workspace-1",
+                            "benchmark-viewer",
+                            target_document_id.as_str(),
+                        ),
+                        &graph_projection_store,
+                        &permission_checker,
+                    )
+                    .expect("permission-aware graph lookup");
+            },
+        );
         push_sample(&mut samples, PerformanceTarget::AssetMetadataLookup, || {
             assets
                 .execute(
@@ -169,6 +208,7 @@ fn local_query_paths_meet_p95_300ms_goal_on_small_fixture() {
         PerformanceTarget::SpecificVersionLookup,
         PerformanceTarget::SearchLookup,
         PerformanceTarget::LinkBacklinkLookup,
+        PerformanceTarget::PermissionAwareGraphLookup,
         PerformanceTarget::AssetMetadataLookup,
     ] {
         assert!(
@@ -179,6 +219,23 @@ fn local_query_paths_meet_p95_300ms_goal_on_small_fixture() {
     }
 
     fs::remove_dir_all(root).ok();
+}
+
+struct AllowAllPermissionDecision;
+
+impl PermissionDecisionPort for AllowAllPermissionDecision {
+    fn check_permission(
+        &self,
+        _actor_user_id: &UserId,
+        _resource: &AccessResource,
+        permission: Permission,
+    ) -> Result<PermissionDecision, PermissionAwareQueryError> {
+        assert_eq!(permission, Permission::Read);
+        Ok(PermissionDecision::allowed(
+            PolicySource::Document,
+            PermissionDecisionReason::RoleAllowsPermission,
+        ))
+    }
 }
 
 fn push_sample(
@@ -296,6 +353,44 @@ fn seed_unresolved_link(
                 .expect("projection"),
         )
         .expect("replace links");
+}
+
+fn seed_permission_aware_graph_projection(
+    graph_projection_store: &mut LocalGraphProjectionStore,
+    workspace_id: &WorkspaceId,
+    center_document_id: &DocumentId,
+    document_ids: &[String],
+) {
+    let mut nodes = vec![GraphNode::new_document(center_document_id.clone())];
+    let mut edges = Vec::new();
+
+    for (index, document_id) in document_ids.iter().skip(1).take(12).enumerate() {
+        let neighbor_id = DocumentId::new(document_id).expect("neighbor document id");
+        nodes.push(GraphNode::new_document(neighbor_id.clone()));
+        edges.push(
+            GraphEdge::new(
+                &format!("graph-edge-{index}"),
+                center_document_id.as_str().to_string(),
+                neighbor_id.as_str().to_string(),
+                GraphEdgeKind::DocumentLink,
+            )
+            .expect("graph edge"),
+        );
+    }
+
+    let graph = KnowledgeGraph::new_with_center(
+        center_document_id.clone(),
+        nodes,
+        edges,
+        GraphProjectionStatus::Clean,
+    )
+    .expect("knowledge graph");
+    graph_projection_store
+        .replace_projection(
+            workspace_id,
+            GraphProjectionRecord::new(graph).expect("graph projection record"),
+        )
+        .expect("replace graph projection");
 }
 
 fn seed_assets(

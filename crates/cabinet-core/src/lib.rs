@@ -5,6 +5,7 @@ pub mod first_run;
 pub mod logging;
 pub mod migration;
 pub mod performance;
+pub mod server_config;
 
 /// Returns the architectural layer name for smoke tests and diagnostics.
 pub const fn layer_name() -> &'static str {

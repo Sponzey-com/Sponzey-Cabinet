@@ -33,6 +33,11 @@ fn version_entry_validates_identity_author_summary_and_snapshot_ref() {
     assert_eq!(entry.snapshot_ref().as_str(), "snapshot-1");
     assert_eq!(entry.author().as_str(), "writer");
     assert_eq!(entry.summary().as_str(), "Initial save");
+    assert_eq!(entry.created_at_epoch_ms(), None);
+    let timestamped = entry
+        .with_created_at_epoch_ms(1_721_000_000_123)
+        .expect("created at");
+    assert_eq!(timestamped.created_at_epoch_ms(), Some(1_721_000_000_123));
     assert_eq!(
         VersionId::new(" ").expect_err("empty version id must fail"),
         VersionError::EmptyVersionId
@@ -40,6 +45,12 @@ fn version_entry_validates_identity_author_summary_and_snapshot_ref() {
     assert_eq!(
         VersionAuthor::new(" ").expect_err("empty author must fail"),
         VersionError::EmptyAuthor
+    );
+    assert_eq!(
+        timestamped
+            .with_created_at_epoch_ms(0)
+            .expect_err("zero timestamp must fail"),
+        VersionError::InvalidCreatedAt
     );
 }
 

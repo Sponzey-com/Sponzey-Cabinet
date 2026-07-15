@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cabinet_adapters::local_atomic_file::{
@@ -72,4 +74,43 @@ fn atomic_write_reports_prepare_failure_when_parent_path_is_file() {
 
     assert_eq!(error, AtomicWriteError::PrepareFailed);
     assert_eq!(error.failed_state(), AtomicWriteState::Failed);
+}
+
+#[test]
+fn concurrent_atomic_writers_do_not_share_or_remove_each_others_temp_file() {
+    let temp = TempRoot::new("concurrent");
+    let target = Arc::new(temp.path.join("projection.work"));
+    let barrier = Arc::new(Barrier::new(8));
+    let writers = (0..8)
+        .map(|index| {
+            let target = Arc::clone(&target);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let content = format!("writer-{index}");
+                barrier.wait();
+                write_bytes_atomically(&target, content.as_bytes()).map(|_| content)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let contents = writers
+        .into_iter()
+        .map(|writer| {
+            writer
+                .join()
+                .expect("writer thread")
+                .expect("atomic writer")
+        })
+        .collect::<Vec<_>>();
+    let final_content = fs::read_to_string(&*target).expect("final content");
+
+    assert!(contents.contains(&final_content));
+    assert_eq!(
+        fs::read_dir(&temp.path)
+            .expect("temp root")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
+            .count(),
+        0
+    );
 }

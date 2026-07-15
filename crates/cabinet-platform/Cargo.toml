@@ -12,3 +12,11 @@ cabinet-core = { path = "../cabinet-core" }
 cabinet-domain = { path = "../cabinet-domain" }
 cabinet-ports = { path = "../cabinet-ports" }
 cabinet-usecases = { path = "../cabinet-usecases" }
+
+[[bin]]
+name = "cabinet-local"
+path = "src/bin/cabinet_local.rs"
+
+[[bin]]
+name = "phase012-query-benchmark"
+path = "src/bin/phase012_query_benchmark.rs"

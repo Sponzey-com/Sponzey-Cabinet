@@ -120,7 +120,13 @@ fn rename_document_keeps_identity_and_body_while_replacing_metadata() {
 
     let output = usecase
         .execute(
-            RenameDocumentInput::new("workspace-1", "doc-1", "New Title", "docs/new.md"),
+            RenameDocumentInput::new(
+                "workspace-1",
+                "doc-1",
+                "version-1",
+                "New Title",
+                "docs/new.md",
+            ),
             &mut documents,
             &mut publisher,
             &mut logger,
@@ -140,6 +146,8 @@ fn rename_document_keeps_identity_and_body_while_replacing_metadata() {
         vec![DocumentChangeEvent::DocumentRenamed {
             workspace_id: "workspace-1".to_string(),
             document_id: "doc-1".to_string(),
+            version_id: "version-1".to_string(),
+            title: "New Title".to_string(),
             old_path: "docs/old.md".to_string(),
             new_path: "docs/new.md".to_string(),
         }]
@@ -165,7 +173,13 @@ fn rename_document_rejects_invalid_path_without_writes() {
 
     let error = usecase
         .execute(
-            RenameDocumentInput::new("workspace-1", "doc-1", "New Title", "/absolute.md"),
+            RenameDocumentInput::new(
+                "workspace-1",
+                "doc-1",
+                "version-1",
+                "New Title",
+                "/absolute.md",
+            ),
             &mut documents,
             &mut publisher,
             &mut logger,
@@ -195,7 +209,13 @@ fn rename_document_reports_not_found_for_missing_current_without_writes() {
 
     let error = usecase
         .execute(
-            RenameDocumentInput::new("workspace-1", "doc-404", "New Title", "docs/new.md"),
+            RenameDocumentInput::new(
+                "workspace-1",
+                "doc-404",
+                "version-1",
+                "New Title",
+                "docs/new.md",
+            ),
             &mut documents,
             &mut publisher,
             &mut logger,

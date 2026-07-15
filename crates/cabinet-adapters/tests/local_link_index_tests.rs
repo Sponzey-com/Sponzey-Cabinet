@@ -2,7 +2,9 @@ use cabinet_adapters::local_link_index::LocalLinkIndex;
 use cabinet_domain::document::{DocumentId, DocumentSlug, DocumentTitle};
 use cabinet_domain::link::{Backlink, DocumentLink, LinkTarget, SourceRange};
 use cabinet_domain::workspace::WorkspaceId;
-use cabinet_ports::link_index::{LinkIndex, LinkProjectionRecord};
+use cabinet_ports::link_index::{
+    BacklinkPageReader, BacklinkPageRequest, LinkIndex, LinkProjectionRecord,
+};
 
 #[test]
 fn local_link_index_replaces_source_projection_and_queries_backlinks() {
@@ -107,6 +109,41 @@ fn local_link_index_queries_unresolved_links_and_orphan_documents() {
 
     assert_eq!(unresolved.len(), 1);
     assert_eq!(orphans, vec![orphan]);
+}
+
+#[test]
+fn local_link_index_pages_backlinks_at_the_port_boundary() {
+    let workspace = workspace_id();
+    let target = document_id("target-doc");
+    let mut index = LocalLinkIndex::default();
+    for source_index in 0..3 {
+        let source = document_id(&format!("source-{source_index}"));
+        let backlinks = (0..3)
+            .map(|offset| {
+                Backlink::new(
+                    source.clone(),
+                    target.clone(),
+                    SourceRange::new(offset, offset + 1).unwrap(),
+                )
+            })
+            .collect();
+        index
+            .replace_document_links(
+                &workspace,
+                LinkProjectionRecord::new(source, backlinks, vec![]).unwrap(),
+            )
+            .unwrap();
+    }
+    let first = index
+        .list_backlinks_page(&workspace, &target, BacklinkPageRequest::new(0, 5).unwrap())
+        .unwrap();
+    assert_eq!(first.records().len(), 5);
+    assert_eq!(first.next_offset(), Some(5));
+    let second = index
+        .list_backlinks_page(&workspace, &target, BacklinkPageRequest::new(5, 5).unwrap())
+        .unwrap();
+    assert_eq!(second.records().len(), 4);
+    assert_eq!(second.next_offset(), None);
 }
 
 fn workspace_id() -> WorkspaceId {

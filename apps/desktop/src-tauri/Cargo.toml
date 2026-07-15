@@ -6,5 +6,22 @@ license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
+base64 = "0.22"
+cabinet-adapters = { path = "../../../crates/cabinet-adapters" }
+cabinet-domain = { path = "../../../crates/cabinet-domain" }
 cabinet-platform = { path = "../../../crates/cabinet-platform" }
+cabinet-ports = { path = "../../../crates/cabinet-ports" }
+cabinet-usecases = { path = "../../../crates/cabinet-usecases" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+
+[dev-dependencies]
+cabinet-core = { path = "../../../crates/cabinet-core" }
+cabinet-domain = { path = "../../../crates/cabinet-domain" }
+cabinet-ports = { path = "../../../crates/cabinet-ports" }
+serde_json = "1"

@@ -1,6 +1,10 @@
 //! Platform shell boundary for desktop, web server, and future mobile adapters.
 
+pub mod document_authoring_command;
+pub mod document_navigator_command;
+pub mod local_desktop_runtime;
 pub mod release_smoke;
+pub mod workspace_home_command;
 
 /// Returns the architectural layer name for smoke tests and diagnostics.
 pub const fn layer_name() -> &'static str {

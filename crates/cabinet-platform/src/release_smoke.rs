@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 
 use cabinet_adapters::local_asset_store::LocalAssetStore;
@@ -7,12 +8,21 @@ use cabinet_adapters::local_first_run::LocalFirstRunStore;
 use cabinet_adapters::local_link_index::LocalLinkIndex;
 use cabinet_adapters::local_markdown_parser::LocalMarkdownParser;
 use cabinet_adapters::local_migration::LocalMigrationStore;
+use cabinet_adapters::local_phase002_migration_fixture::{
+    LocalPhase002FixtureFailure, LocalPhase002MigrationFixtureStore,
+};
 use cabinet_adapters::local_search_index::LocalSearchIndex;
-use cabinet_adapters::local_setup_health::{LocalSetupHealthChecker, LocalSetupHealthStatus};
+use cabinet_adapters::local_setup_health::{
+    LocalSetupHealthChecker, LocalSetupHealthIssueKind, LocalSetupHealthRole,
+    LocalSetupHealthStatus,
+};
 use cabinet_adapters::local_version_store::LocalVersionStore;
 use cabinet_core::config::{AppConfig, ConfigError, ExternalEnvironmentSnapshot};
 use cabinet_core::first_run::{FirstRunInitializationOutcome, FirstRunInitializer, FirstRunState};
-use cabinet_core::migration::{MigrationOutcome, MigrationPlan, MigrationRunner, MigrationState};
+use cabinet_core::migration::{
+    MigrationOutcome, MigrationPlan, MigrationProductEvent, MigrationRunner, MigrationState,
+    Phase002FixtureRecord, Phase002FixtureRecordKind, Phase002MigrationFixture,
+};
 use cabinet_domain::asset::AssetId;
 use cabinet_domain::document::{DocumentBodyPolicy, DocumentId};
 use cabinet_domain::link::Backlink;
@@ -37,9 +47,8 @@ use cabinet_usecases::search::{SearchDocumentsInput, SearchDocumentsUsecase};
 
 const FIXTURE_WORKSPACE_ID: &str = "workspace-1";
 const FIXTURE_DOCUMENT_ID: &str = "doc-0001";
-const FIXTURE_DOCUMENT_TITLE: &str = "Release Smoke Document";
 const FIXTURE_DOCUMENT_PATH: &str = "docs/release-smoke.md";
-const FIXTURE_INITIAL_BODY: &str = "initial release smoke body";
+const FIXTURE_INITIAL_BODY: &str = "# Release Smoke Document\ninitial release smoke body";
 const FIXTURE_UPDATED_BODY: &str = "updated release smoke body with attachment reference";
 const FIXTURE_INITIAL_VERSION_ID: &str = "v-0001";
 const FIXTURE_UPDATED_VERSION_ID: &str = "v-0002";
@@ -54,12 +63,11 @@ const FIXTURE_ASSET_BYTES: &[u8] = b"cabinet fixture asset";
 const E2E_WORKSPACE_ID: &str = "workspace-e2e";
 const E2E_SOURCE_DOCUMENT_ID: &str = "doc-source";
 const E2E_TARGET_DOCUMENT_ID: &str = "doc-target";
-const E2E_SOURCE_TITLE: &str = "Source Document";
 const E2E_TARGET_TITLE: &str = "Target Document";
 const E2E_SOURCE_PATH: &str = "docs/source.md";
 const E2E_TARGET_PATH: &str = "docs/target.md";
-const E2E_INITIAL_BODY: &str = "# Source\ninitial body before restore\n";
-const E2E_TARGET_BODY: &str = "# Target\nlinked target body\n";
+const E2E_INITIAL_BODY: &str = "# Source Document\ninitial body before restore\n";
+const E2E_TARGET_BODY: &str = "# Target Document\nlinked target body\n";
 const E2E_ASSET_ID: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const E2E_ASSET_FILE_NAME: &str = "mvp-e2e.txt";
 const E2E_ASSET_MEDIA_TYPE: &str = "text/plain";
@@ -134,6 +142,50 @@ pub struct DataPreservationSmokeReport {
     product_log_sensitive_data_absent: bool,
     history_entry_count: usize,
     asset_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Phase002MigrationFixtureSmokeInput {
+    app_data_dir: PathBuf,
+}
+
+impl Phase002MigrationFixtureSmokeInput {
+    pub fn new(app_data_dir: PathBuf) -> Self {
+        Self { app_data_dir }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupRepairSmokeInput {
+    app_data_dir: PathBuf,
+}
+
+impl StartupRepairSmokeInput {
+    pub fn new(app_data_dir: PathBuf) -> Self {
+        Self { app_data_dir }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Phase002MigrationFixtureSmokeReport {
+    first_run: FirstRunInitializationOutcome,
+    initial_migration: MigrationOutcome,
+    idempotent_migration: MigrationOutcome,
+    fixture_record_count: usize,
+    required_fixture_records_preserved: bool,
+    migration_failure_preserved_current_fixture: bool,
+    product_log_sensitive_data_absent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupRepairSmokeReport {
+    first_run: FirstRunInitializationOutcome,
+    initial_migration: MigrationOutcome,
+    repair_outcome: StartupRepairOutcome,
+    corruption_detected_before_repair: bool,
+    current_document_preserved: bool,
+    search_result_found: bool,
+    product_log_sensitive_data_absent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +322,153 @@ impl DataPreservationSmokeReport {
     }
 }
 
+impl Phase002MigrationFixtureSmokeReport {
+    pub fn first_run_completed(&self) -> bool {
+        self.first_run.final_state == FirstRunState::Completed
+    }
+
+    pub fn initial_migration_completed(&self) -> bool {
+        self.initial_migration.final_state == MigrationState::Completed
+    }
+
+    pub fn migration_idempotent(&self) -> bool {
+        self.idempotent_migration.final_state == MigrationState::Completed
+            && self.idempotent_migration.applied_versions.is_empty()
+    }
+
+    pub fn fixture_record_count(&self) -> usize {
+        self.fixture_record_count
+    }
+
+    pub fn required_fixture_records_preserved(&self) -> bool {
+        self.required_fixture_records_preserved
+    }
+
+    pub fn migration_failure_preserved_current_fixture(&self) -> bool {
+        self.migration_failure_preserved_current_fixture
+    }
+
+    pub fn product_log_sensitive_data_absent(&self) -> bool {
+        self.product_log_sensitive_data_absent
+    }
+}
+
+impl StartupRepairSmokeReport {
+    pub fn first_run_completed(&self) -> bool {
+        self.first_run.final_state == FirstRunState::Completed
+    }
+
+    pub fn initial_migration_completed(&self) -> bool {
+        self.initial_migration.final_state == MigrationState::Completed
+    }
+
+    pub fn corruption_detected_before_repair(&self) -> bool {
+        self.corruption_detected_before_repair
+    }
+
+    pub fn startup_repair_completed(&self) -> bool {
+        self.repair_outcome.final_state == StartupRepairState::Completed
+    }
+
+    pub fn corrupted_index_rebuilt(&self) -> bool {
+        self.repair_outcome.corrupted_index_rebuilt
+    }
+
+    pub fn current_document_preserved(&self) -> bool {
+        self.current_document_preserved
+    }
+
+    pub fn search_result_found(&self) -> bool {
+        self.search_result_found
+    }
+
+    pub fn product_log_sensitive_data_absent(&self) -> bool {
+        self.product_log_sensitive_data_absent
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupRepairOutcome {
+    final_state: StartupRepairState,
+    corrupted_index_rebuilt: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupRepairState {
+    NotStarted,
+    Inspecting,
+    RepairingIndex,
+    RebuildingProjection,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupRepairEvent {
+    Start,
+    CorruptionDetected,
+    IndexRepaired,
+    ProjectionRebuilt,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupRepairTransition {
+    pub previous_state: StartupRepairState,
+    pub event: StartupRepairEvent,
+    pub next_state: StartupRepairState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupRepairError {
+    InvalidTransition {
+        state: StartupRepairState,
+        event: StartupRepairEvent,
+    },
+}
+
+impl StartupRepairError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidTransition { .. } => "startup_repair.invalid_transition",
+        }
+    }
+}
+
+pub fn transition_startup_repair(
+    state: StartupRepairState,
+    event: StartupRepairEvent,
+) -> Result<StartupRepairTransition, StartupRepairError> {
+    let next_state = match (state, event) {
+        (StartupRepairState::NotStarted, StartupRepairEvent::Start) => {
+            StartupRepairState::Inspecting
+        }
+        (StartupRepairState::Inspecting, StartupRepairEvent::CorruptionDetected) => {
+            StartupRepairState::RepairingIndex
+        }
+        (StartupRepairState::RepairingIndex, StartupRepairEvent::IndexRepaired) => {
+            StartupRepairState::RebuildingProjection
+        }
+        (StartupRepairState::RebuildingProjection, StartupRepairEvent::ProjectionRebuilt) => {
+            StartupRepairState::Completed
+        }
+        (
+            StartupRepairState::NotStarted
+            | StartupRepairState::Inspecting
+            | StartupRepairState::RepairingIndex
+            | StartupRepairState::RebuildingProjection,
+            StartupRepairEvent::Fail,
+        ) => StartupRepairState::Failed,
+        _ => return Err(StartupRepairError::InvalidTransition { state, event }),
+    };
+
+    Ok(StartupRepairTransition {
+        previous_state: state,
+        event,
+        next_state,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseSmokeError {
     NonUtf8Path,
@@ -357,6 +556,152 @@ pub fn run_data_preservation_smoke(
     })
 }
 
+pub fn run_phase002_migration_fixture_smoke(
+    input: Phase002MigrationFixtureSmokeInput,
+) -> Result<Phase002MigrationFixtureSmokeReport, ReleaseSmokeError> {
+    let config = app_config_from_app_data_dir(input.app_data_dir)?;
+    let first_run = run_first_run(&config);
+    if first_run.final_state != FirstRunState::Completed {
+        return Err(ReleaseSmokeError::FirstRunFailed);
+    }
+
+    let initial_migration = run_initial_migration(&config);
+    if initial_migration.final_state != MigrationState::Completed {
+        return Err(ReleaseSmokeError::MigrationFailed);
+    }
+
+    let fixture = Phase002MigrationFixture::self_host_sample();
+    let fixture_store =
+        LocalPhase002MigrationFixtureStore::new(config.local_paths.metadata_dir.clone());
+    fixture_store
+        .save_fixture(&fixture)
+        .map_err(|_| ReleaseSmokeError::DataMismatch("phase002_fixture_save"))?;
+
+    let second_first_run = run_first_run(&config);
+    if second_first_run.final_state != FirstRunState::Completed {
+        return Err(ReleaseSmokeError::FirstRunFailed);
+    }
+
+    let idempotent_migration = run_initial_migration(&config);
+    if idempotent_migration.final_state != MigrationState::Completed {
+        return Err(ReleaseSmokeError::MigrationFailed);
+    }
+
+    let loaded = fixture_store
+        .load_fixture()
+        .map_err(|_| ReleaseSmokeError::DataMismatch("phase002_fixture_load"))?;
+    let required_fixture_records_preserved = loaded == fixture;
+
+    let changed = changed_phase002_fixture();
+    let _ = fixture_store
+        .save_fixture_with_failure_for_test(&changed, LocalPhase002FixtureFailure::BeforeCommit);
+    let after_failure = fixture_store
+        .load_fixture()
+        .map_err(|_| ReleaseSmokeError::DataMismatch("phase002_fixture_after_failure"))?;
+    let migration_failure_preserved_current_fixture = after_failure == fixture;
+
+    let product_log_sensitive_data_absent = phase002_migration_product_log_sensitive_data_absent(
+        &fixture,
+        &[
+            &initial_migration.product_event,
+            &idempotent_migration.product_event,
+        ],
+    );
+
+    let report = Phase002MigrationFixtureSmokeReport {
+        first_run: second_first_run,
+        initial_migration,
+        idempotent_migration,
+        fixture_record_count: loaded.record_count(),
+        required_fixture_records_preserved,
+        migration_failure_preserved_current_fixture,
+        product_log_sensitive_data_absent,
+    };
+
+    if !report.required_fixture_records_preserved {
+        return Err(ReleaseSmokeError::DataMismatch("phase002_fixture_records"));
+    }
+    if !report.migration_failure_preserved_current_fixture {
+        return Err(ReleaseSmokeError::DataMismatch(
+            "phase002_fixture_failure_preservation",
+        ));
+    }
+    if !report.product_log_sensitive_data_absent {
+        return Err(ReleaseSmokeError::DataMismatch(
+            "phase002_fixture_product_log",
+        ));
+    }
+
+    Ok(report)
+}
+
+pub fn run_startup_repair_smoke(
+    input: StartupRepairSmokeInput,
+) -> Result<StartupRepairSmokeReport, ReleaseSmokeError> {
+    let config = app_config_from_app_data_dir(input.app_data_dir)?;
+    let first_run = run_first_run(&config);
+    if first_run.final_state != FirstRunState::Completed {
+        return Err(ReleaseSmokeError::FirstRunFailed);
+    }
+
+    let initial_migration = run_initial_migration(&config);
+    if initial_migration.final_state != MigrationState::Completed {
+        return Err(ReleaseSmokeError::MigrationFailed);
+    }
+
+    let product_log_sensitive_data_absent = seed_preservation_fixture(&config)?;
+    corrupt_search_index_path(&config)?;
+
+    let pre_repair_health = LocalSetupHealthChecker::new(config.local_paths.clone()).check();
+    let corruption_detected_before_repair = pre_repair_health.issues().iter().any(|issue| {
+        issue.role() == LocalSetupHealthRole::SearchIndex
+            && issue.kind() == LocalSetupHealthIssueKind::PathIsNotDirectory
+    });
+    if !corruption_detected_before_repair {
+        return Err(ReleaseSmokeError::DataMismatch(
+            "startup_repair_corruption_detection",
+        ));
+    }
+
+    let (repair_outcome, search_result_found) = run_startup_repair(&config)?;
+    let post_repair_health = LocalSetupHealthChecker::new(config.local_paths.clone()).check();
+    if post_repair_health.status() != LocalSetupHealthStatus::Healthy {
+        return Err(ReleaseSmokeError::DataMismatch("startup_repair_health"));
+    }
+
+    let readback = read_preservation_fixture(&config)?;
+
+    let report = StartupRepairSmokeReport {
+        first_run,
+        initial_migration,
+        repair_outcome,
+        corruption_detected_before_repair,
+        current_document_preserved: readback.current_document_preserved,
+        search_result_found,
+        product_log_sensitive_data_absent,
+    };
+
+    if !report.startup_repair_completed() {
+        return Err(ReleaseSmokeError::DataMismatch("startup_repair_state"));
+    }
+    if !report.corrupted_index_rebuilt() {
+        return Err(ReleaseSmokeError::DataMismatch("startup_repair_index"));
+    }
+    if !report.current_document_preserved {
+        return Err(ReleaseSmokeError::DataMismatch("startup_repair_current"));
+    }
+    if !report.search_result_found {
+        return Err(ReleaseSmokeError::DataMismatch("startup_repair_search"));
+    }
+    if !report.product_log_sensitive_data_absent {
+        return Err(ReleaseSmokeError::DataMismatch(
+            "startup_repair_product_log",
+        ));
+    }
+
+    Ok(report)
+}
+
 pub fn run_mvp_end_to_end_smoke(
     input: MvpEndToEndSmokeInput,
 ) -> Result<MvpEndToEndSmokeReport, ReleaseSmokeError> {
@@ -394,7 +739,6 @@ pub fn run_mvp_end_to_end_smoke(
             CreateDocumentInput::new(
                 E2E_WORKSPACE_ID,
                 E2E_TARGET_DOCUMENT_ID,
-                E2E_TARGET_TITLE,
                 E2E_TARGET_PATH,
                 E2E_TARGET_BODY,
                 E2E_TARGET_VERSION_1,
@@ -414,7 +758,6 @@ pub fn run_mvp_end_to_end_smoke(
             CreateDocumentInput::new(
                 E2E_WORKSPACE_ID,
                 E2E_SOURCE_DOCUMENT_ID,
-                E2E_SOURCE_TITLE,
                 E2E_SOURCE_PATH,
                 E2E_INITIAL_BODY,
                 E2E_SOURCE_VERSION_1,
@@ -455,6 +798,7 @@ pub fn run_mvp_end_to_end_smoke(
             AttachFileToDocumentInput::new(
                 E2E_WORKSPACE_ID,
                 E2E_SOURCE_DOCUMENT_ID,
+                E2E_SOURCE_VERSION_2,
                 E2E_ASSET_ID,
                 E2E_ASSET_FILE_NAME,
                 E2E_ASSET_MEDIA_TYPE,
@@ -668,6 +1012,97 @@ fn run_initial_migration(config: &AppConfig) -> MigrationOutcome {
     ))
 }
 
+fn run_startup_repair(
+    config: &AppConfig,
+) -> Result<(StartupRepairOutcome, bool), ReleaseSmokeError> {
+    let mut state =
+        transition_startup_repair(StartupRepairState::NotStarted, StartupRepairEvent::Start)
+            .map(|transition| transition.next_state)
+            .map_err(|_| ReleaseSmokeError::DataMismatch("startup_repair_transition"))?;
+
+    if config.search.index_dir.is_dir() {
+        return Err(ReleaseSmokeError::DataMismatch(
+            "startup_repair_no_corruption",
+        ));
+    }
+
+    state = transition_startup_repair(state, StartupRepairEvent::CorruptionDetected)
+        .map(|transition| transition.next_state)
+        .map_err(|_| ReleaseSmokeError::DataMismatch("startup_repair_transition"))?;
+    repair_search_index_path(config)?;
+    state = transition_startup_repair(state, StartupRepairEvent::IndexRepaired)
+        .map(|transition| transition.next_state)
+        .map_err(|_| ReleaseSmokeError::DataMismatch("startup_repair_transition"))?;
+
+    let search_result_found = rebuild_fixture_search_projection(config)?;
+    state = transition_startup_repair(state, StartupRepairEvent::ProjectionRebuilt)
+        .map(|transition| transition.next_state)
+        .map_err(|_| ReleaseSmokeError::DataMismatch("startup_repair_transition"))?;
+
+    Ok((
+        StartupRepairOutcome {
+            final_state: state,
+            corrupted_index_rebuilt: config.search.index_dir.is_dir() && search_result_found,
+        },
+        search_result_found,
+    ))
+}
+
+fn corrupt_search_index_path(config: &AppConfig) -> Result<(), ReleaseSmokeError> {
+    if config.search.index_dir.is_dir() {
+        fs::remove_dir_all(&config.search.index_dir)
+            .map_err(|_| ReleaseSmokeError::DataMismatch("startup_repair_corrupt_index"))?;
+    } else if config.search.index_dir.exists() {
+        fs::remove_file(&config.search.index_dir)
+            .map_err(|_| ReleaseSmokeError::DataMismatch("startup_repair_corrupt_index"))?;
+    }
+    fs::write(&config.search.index_dir, b"corrupted index")
+        .map_err(|_| ReleaseSmokeError::DataMismatch("startup_repair_corrupt_index"))
+}
+
+fn repair_search_index_path(config: &AppConfig) -> Result<(), ReleaseSmokeError> {
+    if config.search.index_dir.is_dir() {
+        return Ok(());
+    }
+    if config.search.index_dir.exists() {
+        fs::remove_file(&config.search.index_dir)
+            .map_err(|_| ReleaseSmokeError::DataMismatch("startup_repair_index_remove"))?;
+    }
+    fs::create_dir_all(&config.search.index_dir)
+        .map_err(|_| ReleaseSmokeError::DataMismatch("startup_repair_index_create"))
+}
+
+fn changed_phase002_fixture() -> Phase002MigrationFixture {
+    let mut records = Phase002MigrationFixture::self_host_sample()
+        .records()
+        .to_vec();
+    records.push(
+        Phase002FixtureRecord::new(
+            Phase002FixtureRecordKind::AuditEvent,
+            "audit-after-failure",
+            vec![("event", "fixture.changed")],
+            None,
+        )
+        .expect("changed fixture record"),
+    );
+    Phase002MigrationFixture::new(records).expect("changed fixture")
+}
+
+fn phase002_migration_product_log_sensitive_data_absent(
+    fixture: &Phase002MigrationFixture,
+    events: &[&MigrationProductEvent],
+) -> bool {
+    let rendered = events
+        .iter()
+        .map(|event| format!("{event:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fixture
+        .sensitive_values()
+        .iter()
+        .all(|sensitive| !rendered.contains(sensitive))
+}
+
 fn seed_preservation_fixture(config: &AppConfig) -> Result<bool, ReleaseSmokeError> {
     let body_policy = smoke_body_policy();
     let mut documents = LocalDocumentRepository::with_body_policy(
@@ -689,7 +1124,6 @@ fn seed_preservation_fixture(config: &AppConfig) -> Result<bool, ReleaseSmokeErr
             CreateDocumentInput::new(
                 FIXTURE_WORKSPACE_ID,
                 FIXTURE_DOCUMENT_ID,
-                FIXTURE_DOCUMENT_TITLE,
                 FIXTURE_DOCUMENT_PATH,
                 FIXTURE_INITIAL_BODY,
                 FIXTURE_INITIAL_VERSION_ID,
@@ -727,6 +1161,7 @@ fn seed_preservation_fixture(config: &AppConfig) -> Result<bool, ReleaseSmokeErr
             AttachFileToDocumentInput::new(
                 FIXTURE_WORKSPACE_ID,
                 FIXTURE_DOCUMENT_ID,
+                FIXTURE_UPDATED_VERSION_ID,
                 FIXTURE_ASSET_ID,
                 FIXTURE_ASSET_FILE_NAME,
                 FIXTURE_ASSET_MEDIA_TYPE,
@@ -827,6 +1262,35 @@ fn read_preservation_fixture(
         history_entry_count,
         asset_count,
     })
+}
+
+fn rebuild_fixture_search_projection(config: &AppConfig) -> Result<bool, ReleaseSmokeError> {
+    let body_policy = smoke_body_policy();
+    let documents = LocalDocumentRepository::with_body_policy(
+        config.local_paths.workspace_root.clone(),
+        body_policy,
+    );
+    let mut search_index = LocalSearchIndex::default();
+
+    upsert_current_document_in_search(
+        FIXTURE_WORKSPACE_ID,
+        FIXTURE_DOCUMENT_ID,
+        &documents,
+        &mut search_index,
+    )?;
+
+    let search = SearchDocumentsUsecase::new()
+        .execute(
+            SearchDocumentsInput::new(FIXTURE_WORKSPACE_ID, "attachment", 10),
+            &search_index,
+        )
+        .map_err(|error| ReleaseSmokeError::UsecaseFailed(error.code()))?;
+
+    Ok(search
+        .page()
+        .results()
+        .iter()
+        .any(|result| result.document_id().as_str() == FIXTURE_DOCUMENT_ID))
 }
 
 fn upsert_current_document_in_search(

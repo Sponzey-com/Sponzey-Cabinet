@@ -113,6 +113,66 @@ fn local_version_store_paginates_history_with_cursor() {
 }
 
 #[test]
+fn local_version_store_persists_injected_creation_time_and_reads_legacy_unknown() {
+    let temp = TempVersionRoot::new("created-at");
+    let workspace_id = WorkspaceId::new("workspace-1").expect("workspace id");
+    let document_id = DocumentId::new("doc-1").expect("document id");
+    let policy = DocumentBodyPolicy::new(1024).expect("policy");
+    let mut store = LocalVersionStore::with_body_policy_and_clock(
+        temp.path.clone(),
+        policy,
+        || 1_721_000_000_123,
+    );
+    store
+        .append_version(
+            &workspace_id,
+            version_record("doc-1", "version-1", "snapshot-1", "Version body"),
+        )
+        .expect("append version");
+    drop(store);
+
+    let restarted = LocalVersionStore::with_body_policy_and_clock(
+        temp.path.clone(),
+        policy,
+        || 1_999_000_000_000,
+    );
+    let persisted = restarted
+        .list_history(
+            &workspace_id,
+            &document_id,
+            HistoryPageRequest::first(10).expect("request"),
+        )
+        .expect("history");
+    assert_eq!(
+        persisted.entries()[0].created_at_epoch_ms(),
+        Some(1_721_000_000_123)
+    );
+
+    let entry_path = version_entry_path(
+        &temp,
+        &workspace_id,
+        &document_id,
+        &VersionId::new("version-1").expect("version"),
+    );
+    let legacy = fs::read_to_string(&entry_path)
+        .expect("entry")
+        .lines()
+        .filter(|line| !line.starts_with("created_at_epoch_ms="))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(entry_path, legacy).expect("legacy entry");
+    let legacy_page = restarted
+        .list_history(
+            &workspace_id,
+            &document_id,
+            HistoryPageRequest::first(10).expect("request"),
+        )
+        .expect("legacy history");
+    assert_eq!(legacy_page.entries()[0].created_at_epoch_ms(), None);
+}
+
+#[test]
 fn local_version_store_rejects_duplicate_version_id() {
     let temp = TempVersionRoot::new("duplicate");
     let workspace_id = WorkspaceId::new("workspace-1").expect("workspace id");

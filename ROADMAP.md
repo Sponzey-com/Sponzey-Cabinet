@@ -1,12 +1,15 @@
 # Sponzey Cabinet 단계별 목표와 개발 계획
 
 작성일: 2026-06-22  
+최종 갱신일: 2026-07-15
 문서 성격: `PROJECT.md`의 최종 제품 목표를 단계적으로 구현하기 위한 개발 계획  
 기준 문서: `PROJECT.md`, `AGENTS.md`
 
 ## 계획 수립 원칙
 
-이 계획은 MVP부터 시작해 최종 SaaS/엔터프라이즈 제품까지 이어지는 6단계 개발 흐름이다. 각 단계는 이전 단계의 산출물을 기반으로 다음 단계의 기능을 추가한다. 큰 기능이 갑자기 등장하지 않도록, 핵심 모델, 저장소, 권한, 협업, 그래프, AI, 플러그인, SaaS 기능을 순서대로 누적한다.
+현재 활성 로드맵은 개인 PC에 설치하는 단일 사용자 로컬 지식관리 제품만 다룬다. 아래 6단계 구조 중 self-host, 멀티 사용자, SaaS, 엔터프라이즈에 해당하는 단계는 장기 확장 참고안이며 사용자의 명시적 요구 전까지 활성 개발 순서, task, release gate 또는 기본 UI 범위로 사용하지 않는다.
+
+Phase 001부터 Phase 012까지의 누적 개발은 초기 MVP 범위를 넘어 macOS 개인용 데스크톱 제품의 durable document, Graph, Canvas, Asset, backup/recovery 기준선을 완성했다. Phase 013은 공통 UI, 한국어 사용자 표현, 내부 ID 비노출, 실제 action 연결을 통합했고 후속 hardening은 문서 첫 줄을 제목의 단일 원천으로 확정했다. 다음 단계가 생성되더라도 사용자가 범위를 변경하기 전에는 이 로컬 제품의 사용성, 안정성, 데이터 소유권과 배포 품질만 확장해야 한다.
 
 모든 단계는 다음 기준을 따른다.
 
@@ -20,7 +23,7 @@
 - Git은 Markdown/MDX 원본과 변경 이력 관리를 위한 내부 엔진으로만 사용한다.
 - 사용자는 Git, commit, branch, repository를 몰라도 제품을 사용할 수 있어야 한다.
 - Git provider 연동과 코드 저장소형 리뷰/병합 흐름은 제품 목표에 포함하지 않는다.
-- 공식 대상 플랫폼은 Web, iOS, Android, Windows, macOS, Linux다.
+- 현재 구현 및 인증 플랫폼은 macOS다. Windows/Linux는 공통 아키텍처를 유지하는 차후 데스크톱 인증 대상이고, Web/iOS/Android는 차후 제품 대상이다.
 - 플랫폼별 구현은 공통 도메인/유스케이스를 재사용하고, 플랫폼 차이는 어댑터 계층에서 처리한다.
 - 개인 구축 로컬 설정은 설치 1회로 완료되어야 한다.
 - 로컬 앱은 별도 DB, 검색 서버, Git CLI, Node.js, 환경 변수 편집, 외부 설정 파일 수정을 기본 사용 조건으로 요구하지 않는다.
@@ -29,12 +32,24 @@
 
 | 단계 | 이름                             | 핵심 목표                                                  | 주요 산출물                                                                                                          |
 | -- | ------------------------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| 1  | MVP: 개인 로컬 Knowledge Base Core | 단일 사용자가 Markdown 문서를 만들고, 연결하고, 검색하고, 이력을 복원할 수 있게 한다. | 공통 core, 로컬 워크스페이스, Web 로컬 UI, Windows/macOS/Linux 데스크톱 shell, 문서 CRUD, 내부 Git 기반 이력, 링크/백링크, 로컬 첨부, 기본 검색      |
-| 2  | 개인 호스팅과 팀 협업 기반                | 개인 서버에서 다중 사용자, 권한, 문서 워크플로, 감사 로그를 사용할 수 있게 한다.       | 서버 API, Web self-host UI, 데스크톱 원격 workspace 접속, 사용자/그룹/RBAC, 문서 리뷰/승인, 댓글, 첨부 저장소 추상화, 감사 로그                    |
-| 3  | 지식 그래프와 협업 UX 확장               | 문서 관계를 그래프로 탐색하고, 실시간 협업과 캔버스 기반 지식 맵을 제공한다.           | 전역/로컬 그래프, 관계 인덱스, 실시간 공동 편집, 충돌 처리, Canvas/Edgeless 기본, iOS/Android 기본 클라이언트                                   |
-| 4  | AI와 외부 연동 플랫폼                  | 권한을 지키는 AI 검색/요약과 외부 시스템 연결 기반을 제공한다.                  | Semantic search, permission-aware retrieval, MCP/API, webhook/event stream, Slack/Teams/Jira 기본 연동, 전 플랫폼 AI 질의 |
-| 5  | 플러그인과 업무 객체 플랫폼                | CRM, 고객지원, 프로젝트, 결제 같은 업무 기능을 플러그인으로 확장한다.             | 플러그인 런타임, custom object, custom field, CRM 기본 모듈, workflow hook, extension point, 플랫폼별 플러그인 렌더링 정책              |
-| 6  | SaaS와 엔터프라이즈 운영                | 멀티테넌트 SaaS, 과금, 엔터프라이즈 보안, 운영 가시성을 완성한다.               | 조직/워크스페이스, 구독/과금, SAML/SCIM, 관리자 콘솔, 보존 정책, 운영 관측성, Web/iOS/Android/Windows/macOS/Linux 공식 릴리즈                  |
+| 1  | 개인 로컬 Knowledge Base 제품 | 단일 사용자가 Markdown 문서를 작성하고 관계와 파일을 관리하며 Graph와 Canvas로 지식을 탐색한다. | 공통 core, macOS Tauri 앱, CodeMirror 작성, 첫 줄 기반 문서 제목, durable current/history, 검색/링크 projection, Graph, Canvas, Asset, backup/recovery. Phase 013 구현 기준선 완료, current fingerprint 재검증 진행 |
+| 2  | 개인 호스팅과 팀 협업 기반 | **중지된 차후 목표.** 사용자가 명시적으로 활성화한 뒤에만 계획한다. | 서버 API, RBAC, 댓글, 리뷰와 감사는 현재 구현 범위가 아니다. |
+| 3  | 협업 Graph/Canvas 확장 | **중지된 차후 목표.** 현재 개인용 Graph/Canvas와 실시간 협업을 혼동하지 않는다. | 실시간 공동 편집, 협업 Canvas, 모바일 클라이언트는 현재 구현 범위가 아니다. |
+| 4  | AI와 외부 연동 플랫폼 | 로컬 개인 제품 범위의 AI/연동은 별도 후속 계획으로만 구체화한다. 서버형 integration platform은 중지한다. | provider boundary와 확장성은 유지하되 원격 플랫폼 기능을 현재 완료로 주장하지 않는다. |
+| 5  | 플러그인과 업무 객체 플랫폼 | **중지된 차후 목표.** 사용자의 명시적 범위 변경이 필요하다. | plugin runtime, CRM과 custom object는 현재 구현 범위가 아니다. |
+| 6  | SaaS와 엔터프라이즈 운영 | **중지된 차후 목표.** 사용자의 명시적 범위 변경이 필요하다. | 멀티테넌트, 과금, SSO/SCIM, 관리자 콘솔과 엔터프라이즈 운영은 현재 구현 범위가 아니다. |
+
+## 현재 완료 상태
+
+- Phase 012 archive: `.tasks/phase012/`
+- 최종 gate: `.tasks/phase012/phase012-release-gate-result.md`
+- 검증 범위: macOS 개인용 로컬 데스크톱 앱
+- 요구사항 증거: 33개 requirement가 동일한 current source fingerprint에 연결됨
+- packaged workflow: Home, Document, Graph, Canvas, Assets, Backup/Restore, lifecycle와 recovery를 actual `.app`에서 검증함
+- 성능: current/history/search/link/Graph/Canvas/Asset metadata의 release-mode p95 300ms 기준을 충족함
+- 유예 범위: Windows/Linux native certification, Web/iOS/Android 제품, self-host, SaaS, 멀티 사용자, 실시간 협업, 조직/RBAC UI
+
+이 완료 상태는 task 체크박스만으로 판단하지 않는다. Phase 012의 command summary, requirement evidence matrix, native platform matrix, packaged UI smoke, query performance, visual 및 security artifact를 함께 사용한다.
 
 ## 공통 개발 게이트
 
@@ -87,7 +102,8 @@
 
 ### Platform Gate
 
-- Web, iOS, Android, Windows, macOS, Linux 지원은 공통 도메인/유스케이스 위에 구현되어야 한다.
+- 장기 대상인 Web, iOS, Android, Windows, macOS, Linux는 공통 도메인/유스케이스 위에 구현되어야 한다.
+- 현재 gate는 macOS만 native `passed`를 요구하고 Windows/Linux는 `deferred_future`로 기록한다. Web/iOS/Android 제품 gate는 활성화하지 않는다.
 - 플랫폼별 파일시스템, 알림, 인증, 보안 저장소, 네트워크 상태, 오프라인 캐시는 어댑터로 분리되어야 한다.
 - 플랫폼별 UI가 도메인 규칙을 직접 구현하면 안 된다.
 - 플랫폼별 기능 차이가 생기면 capability matrix에 명시해야 한다.
@@ -105,11 +121,11 @@
 - AI 답변 생성, OCR, embedding, 대용량 export는 비동기로 처리하되, 작업 상태 조회와 캐시된 결과 조회는 300ms 목표를 따라야 한다.
 - 성능 기준을 만족하지 못하는 기능은 index, projection, cache, pagination, async worker 중 하나로 구조를 조정해야 한다.
 
-## 1단계: MVP - 개인 로컬 Knowledge Base Core
+## 1단계: 개인 로컬 Knowledge Base 제품
 
 ### 단계 목표
 
-단일 사용자가 로컬 환경에서 Sponzey Cabinet의 핵심 가치를 경험하게 한다. 이 단계의 제품은 개인 구축 모드의 최소 사용 가능 버전이다. 사용자는 Markdown/MDX 문서를 만들고, 문서 간 링크를 만들고, 백링크를 확인하고, 검색하고, 첨부 파일을 연결하고, 변경 이력을 비교/복원할 수 있어야 한다.
+단일 사용자가 로컬 환경에서 Sponzey Cabinet의 핵심 가치를 일상적으로 사용하게 한다. 사용자는 Markdown 문서를 만들고, 문서 간 링크와 Graph를 탐색하고, Canvas를 구성하고, 첨부 파일을 별도 asset으로 관리하며, 검색하고, 변경 이력을 비교/복원하고, 전체 로컬 데이터를 백업/복원할 수 있어야 한다.
 
 이 단계는 이후 모든 단계의 기반이다. 문서 모델, 링크 모델, 첨부 참조 모델, 내부 버전 관리 모델, 검색 인덱스 모델을 처음부터 깨끗하게 만든다.
 
@@ -127,11 +143,12 @@
 
 - 공통 domain/usecase core
 - 플랫폼 중립 API/서비스 경계
-- Web 기반 로컬 UI
-- Windows/macOS/Linux 데스크톱 shell의 최소 실행 형태
+- React 기반 데스크톱 UI와 개발용 Web preview
+- macOS Tauri 데스크톱 앱. Windows/Linux native 인증은 유예한다.
 - 로컬 워크스페이스 생성
 - Markdown/MDX 문서 생성, 읽기, 수정, 삭제
-- 문서 제목, slug, owner, tags, status, createdAt, updatedAt 메타데이터
+- Markdown 첫 번째 물리적 줄에서 파생되는 문서 제목. 별도 제목 입력과 독립 title mutation은 기본 사용자 흐름에서 제외한다.
+- 제목에서 파생되는 slug와 별도 관리되는 owner, tags, status, createdAt, updatedAt 메타데이터
 - Markdown link와 Wikilink 파싱
 - 문서 간 링크 생성
 - 백링크 조회
@@ -147,6 +164,10 @@
 - 로컬 첨부 파일 등록
 - 문서에서 첨부 파일 참조
 - 첨부 파일 metadata 조회
+- 실제 link/graph projection 기반 local/global Graph
+- durable Canvas 생성, node/edge/geometry/viewport 수정, 보관과 recovery
+- content-addressed Asset 저장, document association과 bounded preview
+- 문서, Canvas와 Asset을 포함하는 package backup/restore
 - 로컬 전체 텍스트 검색
 - Markdown folder import
 - Markdown/HTML/PDF export의 최소 기반
@@ -170,7 +191,6 @@
 - AI 답변 생성
 - 플러그인 런타임
 - CRM 객체
-- Canvas/Edgeless UI
 - 사용자가 DB, Git CLI, 검색 엔진, Node.js, 별도 서버를 직접 설치해야 하는 로컬 실행 방식
 
 ### 아키텍처 산출물
@@ -196,7 +216,8 @@
 - `CreateWorkspace`
 - `CreateDocument`
 - `UpdateDocument`
-- `RenameDocument`
+- `DeriveDocumentTitleFromBody`
+- `UpdateDocument`와 `RestoreDocumentVersion`의 title metadata 동기화
 - `DeleteDocument`
 - `GetDocument`
 - `GetCurrentDocument`
@@ -237,9 +258,9 @@
 - Markdown parser adapter
 - export adapter
 - Web local UI adapter
-- Windows desktop shell adapter
+- Windows desktop shell adapter contract. Native 인증은 차후 수행한다.
 - macOS desktop shell adapter
-- Linux desktop shell adapter
+- Linux desktop shell adapter contract. Native 인증은 차후 수행한다.
 - platform path resolver
 - platform secure storage abstraction
 - first-run initializer
@@ -300,7 +321,7 @@ RestoreApplied -> PersistFailed -> RestoreFailed
 - 로컬 파일 저장소가 문서 원문과 metadata를 보존하는지 검증한다.
 - 내부 Git 기반 version store가 사용자의 Git 지식 없이 history를 제공하는지 검증한다.
 - search index가 제목, 본문, 태그를 검색하는지 검증한다.
-- Windows/macOS/Linux별 앱 데이터 경로와 파일 경로 처리가 동일한 의미를 가지는지 검증한다.
+- macOS 앱 데이터 경로와 파일 경로 adapter를 검증한다. Windows/Linux native path 검증은 해당 플랫폼 인증을 활성화할 때 수행한다.
 - Web 로컬 UI가 공통 유스케이스를 직접 호출하지 않고 adapter를 통해 호출하는지 검증한다.
 - 깨끗한 OS 사용자 프로필에서 앱 최초 실행만으로 기본 workspace 생성까지 완료되는지 검증한다.
 - Git CLI, 외부 DB, 외부 검색 서버, Node.js가 없어도 로컬 MVP가 실행되는지 검증한다.
@@ -317,8 +338,11 @@ RestoreApplied -> PersistFailed -> RestoreFailed
 
 ### 완료 조건
 
+- 신규 생성, 현재 문서 저장과 버전 복원이 모두 첫 줄 제목 규칙을 사용한다.
+- 제목을 바꾼 뒤 durable readback과 projection 처리가 완료되면 Home, Navigator, Search, Graph, Canvas와 Asset 연결 문서 표시에 이전 제목이나 raw ID가 남지 않는다.
+- 별도 문서 제목 입력 control과 create command의 독립 title 필드가 존재하지 않는다.
 - 단일 사용자가 로컬에서 문서를 생성, 수정, 삭제, 검색할 수 있다.
-- Web 로컬 UI와 Windows/macOS/Linux 데스크톱 shell에서 같은 core를 사용한다.
+- macOS 데스크톱 앱과 개발용 Web preview가 같은 core/client contract를 사용한다. Windows/Linux 인증은 `deferred_future`로 유지한다.
 - 앱 설치 1회 후 추가 수동 설정 없이 기본 workspace를 만들고 사용할 수 있다.
 - 외부 DB, 검색 서버, Git CLI, Node.js 없이 로컬 MVP가 동작한다.
 - 최초 실행 초기화와 업그레이드 migration이 테스트된다.
@@ -331,6 +355,10 @@ RestoreApplied -> PersistFailed -> RestoreFailed
 - 설정은 시작 시 1회만 읽힌다.
 - 핵심 도메인/유스케이스 테스트가 존재한다.
 - Product Log에 민감 정보가 남지 않는다.
+- Graph가 실제 durable projection의 node와 edge를 표시한다.
+- Canvas node, edge, geometry와 viewport가 앱 재시작 후 유지된다.
+- Asset metadata/object와 document association이 앱 재시작 후 유지된다.
+- backup/restore가 문서, Canvas와 Asset을 함께 보존한다.
 
 ## 2단계: 개인 호스팅과 팀 협업 기반
 

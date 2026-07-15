@@ -138,7 +138,7 @@ fn create_document_stores_current_snapshot_version_and_change_event() {
 
     let output = usecase
         .execute(
-            valid_input("Hello body"),
+            valid_input("# First-line title\nHello body"),
             &mut documents,
             &mut versions,
             &mut events,
@@ -149,7 +149,10 @@ fn create_document_stores_current_snapshot_version_and_change_event() {
     assert_eq!(output.document_id().as_str(), "doc-1");
     assert_eq!(output.version_id().as_str(), "version-1");
     assert_eq!(versions.records.len(), 1);
-    assert_eq!(versions.records[0].snapshot().body().as_str(), "Hello body");
+    assert_eq!(
+        versions.records[0].snapshot().body().as_str(),
+        "# First-line title\nHello body"
+    );
     assert_eq!(
         documents
             .get_current_by_id(
@@ -160,13 +163,16 @@ fn create_document_stores_current_snapshot_version_and_change_event() {
             .expect("current")
             .body()
             .as_str(),
-        "Hello body"
+        "# First-line title\nHello body"
     );
     assert_eq!(
         events.events,
         vec![DocumentChangeEvent::DocumentCreated {
             workspace_id: "workspace-1".to_string(),
             document_id: "doc-1".to_string(),
+            version_id: "version-1".to_string(),
+            title: "First-line title".to_string(),
+            path: "private/path.md".to_string(),
         }]
     );
     assert_eq!(
@@ -261,7 +267,6 @@ fn valid_input(body: &str) -> CreateDocumentInput {
     CreateDocumentInput::new(
         "workspace-1",
         "doc-1",
-        "Private Title",
         "private/path.md",
         body,
         "version-1",

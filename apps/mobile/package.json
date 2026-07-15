@@ -1,0 +1,10 @@
+{
+  "name": "@sponzey-cabinet/mobile",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@sponzey-cabinet/client-core": "file:../../packages/client-core"
+  }
+}

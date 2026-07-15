@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cabinet_adapters::local_atomic_file::atomic_temp_path;
 use cabinet_adapters::local_first_run::LocalFirstRunStore;
 use cabinet_adapters::local_migration::{
     LocalMigrationStore, MIGRATION_LOCK_FILE, MIGRATION_VERSIONS_FILE,
@@ -9,7 +10,8 @@ use cabinet_adapters::local_migration::{
 use cabinet_core::config::{AppConfig, ExternalEnvironmentSnapshot};
 use cabinet_core::first_run::{FirstRunInitializer, FirstRunState};
 use cabinet_core::migration::{
-    MigrationPlan, MigrationProductEvent, MigrationRunner, MigrationState, MigrationVersion,
+    MigrationErrorCode, MigrationPlan, MigrationProductEvent, MigrationRunner, MigrationState,
+    MigrationStore, MigrationVersion,
 };
 
 struct TempProfile {
@@ -115,5 +117,113 @@ fn local_migration_store_rerun_does_not_duplicate_initial_version() {
         )
         .expect("versions file should exist"),
         "1\n"
+    );
+}
+
+#[test]
+fn local_migration_store_rejects_malformed_duplicate_and_out_of_order_ledgers() {
+    for (name, content) in [
+        ("malformed", "1\nnot-a-version\n"),
+        ("duplicate", "1\n1\n"),
+        ("out-of-order", "2\n1\n"),
+        ("blank-record", "1\n\n2\n"),
+    ] {
+        let profile = TempProfile::new(name);
+        let config = profile.app_config();
+        run_first_run(&config);
+        let ledger = config
+            .local_paths
+            .metadata_dir
+            .join(MIGRATION_VERSIONS_FILE);
+        fs::write(&ledger, content).expect("invalid fixture ledger should be written");
+        let mut store = LocalMigrationStore::new(config.local_paths.metadata_dir.clone());
+
+        assert_eq!(
+            store.applied_versions(),
+            Err(MigrationErrorCode::VersionReadFailed),
+            "{name} ledger must fail closed"
+        );
+        assert_eq!(
+            fs::read_to_string(&ledger).expect("ledger should remain readable"),
+            content,
+            "{name} ledger must not be rewritten"
+        );
+    }
+}
+
+#[test]
+fn local_migration_store_atomically_replaces_valid_ledger_and_discards_stale_staging() {
+    let profile = TempProfile::new("atomic-record");
+    let config = profile.app_config();
+    run_first_run(&config);
+    let ledger = config
+        .local_paths
+        .metadata_dir
+        .join(MIGRATION_VERSIONS_FILE);
+    let staging = atomic_temp_path(&ledger).expect("ledger should have an atomic staging path");
+    fs::write(&ledger, "1\n").expect("initial ledger should be written");
+    fs::write(&staging, "1\n999\n").expect("stale staging should be written");
+    let mut store = LocalMigrationStore::new(config.local_paths.metadata_dir.clone());
+
+    store
+        .record_version(MigrationVersion::new(2))
+        .expect("valid next version should be recorded");
+
+    assert_eq!(
+        fs::read_to_string(&ledger).expect("ledger should remain readable"),
+        "1\n2\n"
+    );
+    assert!(!staging.exists(), "stale staging must not survive commit");
+}
+
+#[test]
+fn local_migration_store_refuses_to_overwrite_invalid_ledger_when_recording() {
+    let profile = TempProfile::new("invalid-record");
+    let config = profile.app_config();
+    run_first_run(&config);
+    let ledger = config
+        .local_paths
+        .metadata_dir
+        .join(MIGRATION_VERSIONS_FILE);
+    fs::write(&ledger, "1\ncorrupt\n").expect("invalid ledger should be written");
+    let mut store = LocalMigrationStore::new(config.local_paths.metadata_dir.clone());
+
+    assert_eq!(
+        store.record_version(MigrationVersion::new(2)),
+        Err(MigrationErrorCode::VersionRecordFailed)
+    );
+    assert_eq!(
+        fs::read_to_string(&ledger).expect("ledger should remain readable"),
+        "1\ncorrupt\n"
+    );
+}
+
+#[test]
+fn local_migration_runner_releases_lock_after_malformed_ledger_failure() {
+    let profile = TempProfile::new("malformed-runner-cleanup");
+    let config = profile.app_config();
+    run_first_run(&config);
+    let ledger = config
+        .local_paths
+        .metadata_dir
+        .join(MIGRATION_VERSIONS_FILE);
+    let lock = config.local_paths.metadata_dir.join(MIGRATION_LOCK_FILE);
+    fs::write(&ledger, "1\ninvalid\n").expect("invalid ledger should be written");
+
+    let outcome = MigrationRunner::new(MigrationPlan::initial()).run(
+        &mut LocalMigrationStore::new(config.local_paths.metadata_dir.clone()),
+    );
+
+    assert_eq!(
+        outcome.final_state,
+        MigrationState::Failed {
+            error_code: MigrationErrorCode::VersionReadFailed,
+            retryable: true,
+        }
+    );
+    assert!(!lock.exists(), "failed migration must release its lock");
+    assert_eq!(
+        fs::read_to_string(ledger).expect("invalid ledger should remain readable"),
+        "1\ninvalid\n"
     );
 }

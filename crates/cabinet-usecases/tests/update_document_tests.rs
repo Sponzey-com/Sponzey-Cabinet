@@ -42,6 +42,16 @@ impl FakeDocumentRepository {
             .as_str()
             .to_string()
     }
+
+    fn current_title(&self, workspace_id: &str, document_id: &str) -> String {
+        self.current
+            .get(&(workspace_id.to_string(), document_id.to_string()))
+            .expect("current document")
+            .metadata()
+            .title()
+            .as_str()
+            .to_string()
+    }
 }
 
 impl DocumentRepository for FakeDocumentRepository {
@@ -166,7 +176,7 @@ fn update_document_appends_version_then_updates_current_and_emits_events() {
             UpdateDocumentInput::new(
                 "workspace-1",
                 "doc-1",
-                "updated\r\nbody",
+                "# 새 문서 제목\r\nbody",
                 "version-2",
                 "snapshot-2",
                 "alice",
@@ -182,12 +192,13 @@ fn update_document_appends_version_then_updates_current_and_emits_events() {
     assert_eq!(output.version_id().as_str(), "version-2");
     assert_eq!(
         documents.current_body("workspace-1", "doc-1"),
-        "updated\nbody"
+        "# 새 문서 제목\nbody"
     );
+    assert_eq!(documents.current_title("workspace-1", "doc-1"), "새 문서 제목");
     assert_eq!(versions.appended.len(), 1);
     assert_eq!(
         versions.appended[0].snapshot().body().as_str(),
-        "updated\nbody"
+        "# 새 문서 제목\nbody"
     );
     assert_eq!(
         publisher.events,

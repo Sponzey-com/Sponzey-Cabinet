@@ -108,6 +108,7 @@ node_modules/
 .rpt2_cache/
 
 # Frontend build outputs
+apps/web/public/app.bundle.js
 dist/
 dist-ssr/
 build/
@@ -140,16 +141,27 @@ junit.xml
 # Tauri
 src-tauri/target/
 src-tauri/gen/
+**/src-tauri/gen/
 src-tauri/.cargo/
+**/src-tauri/.cargo/
 src-tauri/.tauri/
+**/src-tauri/.tauri/
 src-tauri/tauri.conf.*.local.json
+**/src-tauri/tauri.conf.*.local.json
 src-tauri/Info.plist
+**/src-tauri/Info.plist
 src-tauri/Entitlements.plist
+**/src-tauri/Entitlements.plist
 src-tauri/embedded.provisionprofile
+**/src-tauri/embedded.provisionprofile
 src-tauri/icons/*.icns
+**/src-tauri/icons/*.icns
 src-tauri/icons/*.ico
+**/src-tauri/icons/*.ico
 src-tauri/icons/*.png
+**/src-tauri/icons/*.png
 !src-tauri/icons/.gitkeep
+!**/src-tauri/icons/.gitkeep
 
 # Tauri bundles and installers
 src-tauri/target/*/bundle/
@@ -284,12 +296,6 @@ download-cache/
 !ROADMAP.md
 !RESEARCH.md
 !AGENTS.md
-!.tasks/
-.tasks/*
-!.tasks/plan.md
-!.tasks/task*.md
-!.tasks/phase-gates.md
-!.tasks/decisions/
-!.tasks/decisions/**
 
 .DS_Store
+.tasks/

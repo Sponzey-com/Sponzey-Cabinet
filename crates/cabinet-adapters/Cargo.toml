@@ -10,3 +10,4 @@ rust-version.workspace = true
 cabinet-core = { path = "../cabinet-core" }
 cabinet-domain = { path = "../cabinet-domain" }
 cabinet-ports = { path = "../cabinet-ports" }
+sha2 = "0.10"

@@ -32,6 +32,19 @@ impl AppConfig {
     }
 }
 
+pub type LocalDesktopConfig = AppConfig;
+
+pub trait ExternalEnvironmentReader {
+    fn read_environment_snapshot(&mut self) -> ExternalEnvironmentSnapshot;
+}
+
+pub fn bootstrap_local_desktop_config_from_reader<R: ExternalEnvironmentReader>(
+    reader: &mut R,
+) -> Result<LocalDesktopConfig, ConfigError> {
+    let snapshot = reader.read_environment_snapshot();
+    LocalDesktopConfig::from_environment_snapshot(snapshot)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapConfigInput {
     environment: ExternalEnvironmentSnapshot,
@@ -44,6 +57,10 @@ impl BootstrapConfigInput {
 
     pub fn into_app_config(self) -> Result<AppConfig, ConfigError> {
         AppConfig::from_environment_snapshot(self.environment)
+    }
+
+    pub fn into_local_desktop_config(self) -> Result<LocalDesktopConfig, ConfigError> {
+        LocalDesktopConfig::from_environment_snapshot(self.environment)
     }
 }
 

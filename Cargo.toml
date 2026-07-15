@@ -5,6 +5,7 @@ members = [
   "crates/cabinet-usecases",
   "crates/cabinet-core",
   "crates/cabinet-adapters",
+  "crates/cabinet-server",
   "crates/cabinet-platform",
   "apps/desktop/src-tauri",
 ]

@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cabinet_domain::document::{DocumentBody, DocumentBodyPolicy, DocumentId};
 use cabinet_domain::version::{
@@ -21,10 +22,11 @@ pub const VERSION_ENTRY_FILE: &str = "entry.txt";
 pub const VERSION_BODY_FILE: &str = "body.md";
 const DEFAULT_VERSION_BODY_MAX_BYTES: usize = 10 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LocalVersionStore {
     version_store_root: PathBuf,
     body_policy: DocumentBodyPolicy,
+    clock: fn() -> u64,
 }
 
 impl LocalVersionStore {
@@ -33,6 +35,7 @@ impl LocalVersionStore {
             version_store_root,
             body_policy: DocumentBodyPolicy::new(DEFAULT_VERSION_BODY_MAX_BYTES)
                 .expect("default version body policy must be valid"),
+            clock: system_epoch_ms,
         }
     }
 
@@ -40,6 +43,19 @@ impl LocalVersionStore {
         Self {
             version_store_root,
             body_policy,
+            clock: system_epoch_ms,
+        }
+    }
+
+    pub fn with_body_policy_and_clock(
+        version_store_root: PathBuf,
+        body_policy: DocumentBodyPolicy,
+        clock: fn() -> u64,
+    ) -> Self {
+        Self {
+            version_store_root,
+            body_policy,
+            clock,
         }
     }
 
@@ -113,7 +129,7 @@ impl VersionStore for LocalVersionStore {
 
         write_file_atomically(
             self.entry_path(workspace_id, record.document_id(), record.version_id()),
-            entry_content(record.entry()),
+            entry_content(record.entry(), (self.clock)()),
         )?;
         write_file_atomically(
             self.body_path(workspace_id, record.document_id(), record.version_id()),
@@ -195,14 +211,15 @@ impl VersionStore for LocalVersionStore {
     }
 }
 
-fn entry_content(entry: &VersionEntry) -> String {
+fn entry_content(entry: &VersionEntry, created_at_epoch_ms: u64) -> String {
     format!(
-        "version_id={}\ndocument_id={}\nsnapshot_ref={}\nauthor={}\nsummary={}\n",
+        "version_id={}\ndocument_id={}\nsnapshot_ref={}\nauthor={}\nsummary={}\ncreated_at_epoch_ms={}\n",
         entry.version_id().as_str(),
         entry.document_id().as_str(),
         entry.snapshot_ref().as_str(),
         entry.author().as_str(),
-        entry.summary().as_str()
+        entry.summary().as_str(),
+        created_at_epoch_ms,
     )
 }
 
@@ -213,6 +230,7 @@ fn read_entry(path: &Path) -> Result<VersionEntry, VersionStoreError> {
     let mut snapshot_ref = None;
     let mut author = None;
     let mut summary = None;
+    let mut created_at_epoch_ms = None;
 
     for line in content.lines() {
         let (key, value) = line
@@ -224,11 +242,18 @@ fn read_entry(path: &Path) -> Result<VersionEntry, VersionStoreError> {
             "snapshot_ref" => snapshot_ref = Some(value),
             "author" => author = Some(value),
             "summary" => summary = Some(value),
+            "created_at_epoch_ms" => {
+                created_at_epoch_ms = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| VersionStoreError::CorruptedHistory)?,
+                )
+            }
             _ => return Err(VersionStoreError::CorruptedHistory),
         }
     }
 
-    VersionEntry::new(
+    let entry = VersionEntry::new(
         VersionId::new(version_id.ok_or(VersionStoreError::CorruptedHistory)?)
             .map_err(|_| VersionStoreError::CorruptedHistory)?,
         DocumentId::new(document_id.ok_or(VersionStoreError::CorruptedHistory)?)
@@ -240,7 +265,21 @@ fn read_entry(path: &Path) -> Result<VersionEntry, VersionStoreError> {
         VersionSummary::new(summary.ok_or(VersionStoreError::CorruptedHistory)?)
             .map_err(|_| VersionStoreError::CorruptedHistory)?,
     )
-    .map_err(|_| VersionStoreError::CorruptedHistory)
+    .map_err(|_| VersionStoreError::CorruptedHistory)?;
+    match created_at_epoch_ms {
+        Some(value) => entry
+            .with_created_at_epoch_ms(value)
+            .map_err(|_| VersionStoreError::CorruptedHistory),
+        None => Ok(entry),
+    }
+}
+
+fn system_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(1)
+        .max(1)
 }
 
 fn read_body(path: &Path, policy: DocumentBodyPolicy) -> Result<DocumentBody, VersionStoreError> {

@@ -7,8 +7,12 @@ use cabinet_domain::document::{
 };
 use cabinet_domain::version::CurrentDocumentSnapshot;
 use cabinet_domain::workspace::WorkspaceId;
+use cabinet_ports::document_existence::{DocumentExistenceError, DocumentExistenceReader};
 use cabinet_ports::document_repository::{
     CurrentDocumentRecord, DocumentRepository, DocumentRepositoryError,
+};
+use cabinet_ports::document_title_reader::{
+    DocumentTitleLookup, DocumentTitleReader, DocumentTitleReaderError,
 };
 
 use crate::local_atomic_file::write_text_atomically;
@@ -155,6 +159,58 @@ impl DocumentRepository for LocalDocumentRepository {
                 .map_err(|_| DocumentRepositoryError::StorageUnavailable)?;
         }
         Ok(())
+    }
+}
+
+impl DocumentTitleReader for LocalDocumentRepository {
+    fn get_current_title(
+        &self,
+        workspace_id: &WorkspaceId,
+        document_id: &DocumentId,
+    ) -> Result<Option<DocumentTitle>, DocumentTitleReaderError> {
+        let path = self.metadata_path(workspace_id, document_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        read_metadata(&path)
+            .map(|metadata| Some(metadata.title().clone()))
+            .map_err(|error| match error {
+                DocumentRepositoryError::StorageUnavailable => {
+                    DocumentTitleReaderError::StorageUnavailable
+                }
+                _ => DocumentTitleReaderError::CorruptedMetadata,
+            })
+    }
+
+    fn get_current_titles(
+        &self,
+        workspace_id: &WorkspaceId,
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<DocumentTitleLookup>, DocumentTitleReaderError> {
+        document_ids
+            .iter()
+            .map(|document_id| {
+                self.get_current_title(workspace_id, document_id)
+                    .map(|title| DocumentTitleLookup::new(document_id.clone(), title))
+            })
+            .collect()
+    }
+}
+
+impl DocumentExistenceReader for LocalDocumentRepository {
+    fn exists(
+        &self,
+        workspace: &WorkspaceId,
+        document: &DocumentId,
+    ) -> Result<bool, DocumentExistenceError> {
+        self.get_current_by_id(workspace, document)
+            .map(|record| record.is_some())
+            .map_err(|error| match error {
+                DocumentRepositoryError::CorruptedMetadata => {
+                    DocumentExistenceError::CorruptedRecord
+                }
+                _ => DocumentExistenceError::StorageUnavailable,
+            })
     }
 }
 

@@ -1,6 +1,11 @@
 import type { ClientCapabilities } from "@sponzey-cabinet/client-core";
 
-export type EditorOperationKind = "load-document" | "save-document" | "insert-wikilink" | "insert-asset-reference";
+export type EditorOperationKind =
+  | "load-document"
+  | "save-document"
+  | "insert-wikilink"
+  | "insert-asset-reference"
+  | "insert-markdown-table";
 
 export interface EditorOperation {
   readonly kind: EditorOperationKind;
@@ -35,6 +40,14 @@ export interface EditorSaveCommand {
   readonly dirtyState: EditorDirtyState;
 }
 
+export type MarkdownTableSourceAlignment = "left" | "center" | "right" | "default";
+
+export interface InsertMarkdownTableInput {
+  readonly headers: readonly string[];
+  readonly alignments?: readonly MarkdownTableSourceAlignment[];
+  readonly rowCount: number;
+}
+
 export interface WikilinkDecoration {
   readonly target: string;
   readonly label?: string;
@@ -61,6 +74,65 @@ export interface AssetReferenceOpenCommand {
   readonly assetId: string;
   readonly label: string;
   readonly range: EditorSourceRange;
+}
+
+export interface EditorTextChangeDraft {
+  readonly start: number;
+  readonly end: number;
+  readonly insertedText: string;
+}
+
+export interface EditorTransactionDraft {
+  readonly documentId: string;
+  readonly actorUserId: string;
+  readonly operationId: string;
+  readonly baseRevision: number;
+  readonly currentRevision: number;
+  readonly changes: readonly EditorTextChangeDraft[];
+}
+
+export interface EditorCollaborativeEditInput {
+  readonly workspaceId: string;
+  readonly documentId: string;
+  readonly actorUserId: string;
+  readonly operationId: string;
+  readonly baseRevision: number;
+  readonly currentRevision: number;
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly insertedText: string;
+}
+
+export interface EditorSelectionDraft {
+  readonly documentId: string;
+  readonly actorUserId: string;
+  readonly cursorStart: number;
+  readonly cursorEnd: number;
+  readonly selectedText?: string;
+  readonly documentBody?: string;
+  readonly token?: string;
+}
+
+export interface EditorPresenceInput {
+  readonly workspaceId: string;
+  readonly documentId: string;
+  readonly actorUserId: string;
+  readonly cursorStart: number;
+  readonly cursorEnd: number;
+}
+
+export type EditorCollaborationAdapterErrorCode =
+  | "EDITOR_COLLABORATION_MULTI_CHANGE_UNSUPPORTED"
+  | "EDITOR_COLLABORATION_INVALID_RANGE";
+
+export class EditorCollaborationAdapterError extends Error {
+  readonly code: EditorCollaborationAdapterErrorCode;
+
+  constructor(code: EditorCollaborationAdapterErrorCode, message: string) {
+    super(message);
+    this.name = "EditorCollaborationAdapterError";
+    this.code = code;
+  }
 }
 
 export function createEditorBoundaryDescriptor(capabilities: ClientCapabilities): string {
@@ -99,6 +171,147 @@ export function createEditorSaveCommand(session: EditorSessionModel): EditorSave
     documentId: session.documentId,
     body: session.currentBody,
     dirtyState: session.dirtyState,
+  };
+}
+
+export interface RevisionSafeEditorSession {
+  readonly documentId: string;
+  readonly currentBody: string;
+  readonly revision: number;
+  readonly persistedRevision: number;
+  readonly expectedVersionId?: string;
+  readonly inFlightRevision?: number;
+  readonly dirtyState: EditorDirtyState;
+  readonly errorCode?: string;
+}
+
+export interface RevisionSafeSaveCommand {
+  readonly kind: "save-document-revision";
+  readonly documentId: string;
+  readonly body: string;
+  readonly revision: number;
+  readonly expectedVersionId?: string;
+}
+
+export interface RevisionSafeSaveStartResult {
+  readonly started: boolean;
+  readonly session: RevisionSafeEditorSession;
+  readonly command?: RevisionSafeSaveCommand;
+}
+
+export type RevisionSafeSaveCompletion =
+  | {
+      readonly revision: number;
+      readonly status: "succeeded";
+      readonly savedVersionId: string;
+    }
+  | {
+      readonly revision: number;
+      readonly status: "failed";
+      readonly errorCode: string;
+    };
+
+export interface RevisionSafeSaveCompletionResult {
+  readonly ignored: boolean;
+  readonly session: RevisionSafeEditorSession;
+}
+
+export function createRevisionSafeEditorSession(
+  snapshot: EditorDocumentSnapshot,
+): RevisionSafeEditorSession {
+  return {
+    documentId: snapshot.documentId,
+    currentBody: snapshot.body,
+    revision: 0,
+    persistedRevision: 0,
+    expectedVersionId: snapshot.versionId,
+    dirtyState: "clean",
+  };
+}
+
+export function applyRevisionSafeEditorContentChange(
+  session: RevisionSafeEditorSession,
+  nextBody: string,
+): RevisionSafeEditorSession {
+  if (nextBody === session.currentBody) return session;
+  return {
+    ...session,
+    currentBody: nextBody,
+    revision: session.revision + 1,
+    dirtyState: "dirty",
+    errorCode: undefined,
+  };
+}
+
+export function startRevisionSafeEditorSave(
+  session: RevisionSafeEditorSession,
+): RevisionSafeSaveStartResult {
+  if (session.inFlightRevision !== undefined || session.revision <= session.persistedRevision) {
+    return { started: false, session };
+  }
+  const command: RevisionSafeSaveCommand = {
+    kind: "save-document-revision",
+    documentId: session.documentId,
+    body: session.currentBody,
+    revision: session.revision,
+    expectedVersionId: session.expectedVersionId,
+  };
+  return {
+    started: true,
+    session: {
+      ...session,
+      inFlightRevision: session.revision,
+      errorCode: undefined,
+    },
+    command,
+  };
+}
+
+export function completeRevisionSafeEditorSave(
+  session: RevisionSafeEditorSession,
+  completion: RevisionSafeSaveCompletion,
+): RevisionSafeSaveCompletionResult {
+  if (session.inFlightRevision !== completion.revision) {
+    return { ignored: true, session };
+  }
+  if (completion.status === "failed") {
+    return {
+      ignored: false,
+      session: {
+        ...session,
+        inFlightRevision: undefined,
+        dirtyState: "dirty",
+        errorCode: completion.errorCode,
+      },
+    };
+  }
+  return {
+    ignored: false,
+    session: {
+      ...session,
+      persistedRevision: completion.revision,
+      expectedVersionId: completion.savedVersionId,
+      inFlightRevision: undefined,
+      dirtyState: session.revision > completion.revision ? "dirty" : "clean",
+      errorCode: undefined,
+    },
+  };
+}
+
+export function createInsertMarkdownTableOperation(input: InsertMarkdownTableInput): EditorOperation {
+  const headers = input.headers.map((header) => sanitizeMarkdownTableCell(header));
+  const alignments = headers.map((_, index) =>
+    markdownTableAlignmentSource(input.alignments?.[index] ?? "default"),
+  );
+  const emptyRow = `| ${headers.map(() => "").join(" | ")} |`;
+  const rows = Array.from({ length: Math.max(0, input.rowCount) }, () => emptyRow);
+  return {
+    kind: "insert-markdown-table",
+    value: [
+      `| ${headers.join(" | ")} |`,
+      `| ${alignments.join(" | ")} |`,
+      ...rows,
+    ].join("\n"),
   };
 }
 
@@ -168,6 +381,23 @@ function parseWikilinkContent(content: string): { target: string; label?: string
   return label ? { target, label } : { target };
 }
 
+function markdownTableAlignmentSource(alignment: MarkdownTableSourceAlignment): string {
+  if (alignment === "left") {
+    return ":---";
+  }
+  if (alignment === "center") {
+    return ":---:";
+  }
+  if (alignment === "right") {
+    return "---:";
+  }
+  return "---";
+}
+
+function sanitizeMarkdownTableCell(value: string): string {
+  return value.replace(/\|/g, "\\|").trim();
+}
+
 export function findAssetReferenceDecorations(source: string): readonly AssetReferenceDecoration[] {
   const decorations: AssetReferenceDecoration[] = [];
   let cursor = 0;
@@ -217,6 +447,57 @@ export function createOpenAssetReferenceCommand(
     label: decoration.label,
     range: decoration.range,
   };
+}
+
+export function createCollaborativeEditInputFromEditorTransaction(
+  workspaceId: string,
+  transaction: EditorTransactionDraft,
+): EditorCollaborativeEditInput {
+  if (transaction.changes.length !== 1) {
+    throw new EditorCollaborationAdapterError(
+      "EDITOR_COLLABORATION_MULTI_CHANGE_UNSUPPORTED",
+      "Only single text change drafts can be converted to collaborative edit input.",
+    );
+  }
+
+  const change = transaction.changes[0];
+  assertEditorRange(change.start, change.end);
+
+  return {
+    workspaceId,
+    documentId: transaction.documentId,
+    actorUserId: transaction.actorUserId,
+    operationId: transaction.operationId,
+    baseRevision: transaction.baseRevision,
+    currentRevision: transaction.currentRevision,
+    startOffset: change.start,
+    endOffset: change.end,
+    insertedText: change.insertedText,
+  };
+}
+
+export function createPresenceInputFromEditorSelection(
+  workspaceId: string,
+  selection: EditorSelectionDraft,
+): EditorPresenceInput {
+  assertEditorRange(selection.cursorStart, selection.cursorEnd);
+
+  return {
+    workspaceId,
+    documentId: selection.documentId,
+    actorUserId: selection.actorUserId,
+    cursorStart: selection.cursorStart,
+    cursorEnd: selection.cursorEnd,
+  };
+}
+
+function assertEditorRange(start: number, end: number): void {
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) {
+    throw new EditorCollaborationAdapterError(
+      "EDITOR_COLLABORATION_INVALID_RANGE",
+      "Editor collaboration ranges must use non-negative integer offsets with end greater than or equal to start.",
+    );
+  }
 }
 
 function parseAssetReferenceContent(content: string): { assetId: string; label: string } | undefined {

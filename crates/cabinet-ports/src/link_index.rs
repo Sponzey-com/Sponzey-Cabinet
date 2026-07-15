@@ -2,6 +2,68 @@ use cabinet_domain::document::DocumentId;
 use cabinet_domain::link::{Backlink, DocumentLink, LinkStatus};
 use cabinet_domain::workspace::WorkspaceId;
 
+pub const MAX_BACKLINK_PAGE_LIMIT: usize = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BacklinkPageRequest {
+    offset: usize,
+    limit: usize,
+}
+
+impl BacklinkPageRequest {
+    pub fn new(offset: usize, limit: usize) -> Result<Self, BacklinkPageRequestError> {
+        if limit == 0 || limit > MAX_BACKLINK_PAGE_LIMIT {
+            return Err(BacklinkPageRequestError::InvalidLimit);
+        }
+        Ok(Self { offset, limit })
+    }
+
+    pub const fn offset(self) -> usize {
+        self.offset
+    }
+
+    pub const fn limit(self) -> usize {
+        self.limit
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacklinkPageRequestError {
+    InvalidLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklinkPage {
+    records: Vec<Backlink>,
+    next_offset: Option<usize>,
+}
+
+impl BacklinkPage {
+    pub fn new(records: Vec<Backlink>, next_offset: Option<usize>) -> Self {
+        Self {
+            records,
+            next_offset,
+        }
+    }
+
+    pub fn records(&self) -> &[Backlink] {
+        &self.records
+    }
+
+    pub const fn next_offset(&self) -> Option<usize> {
+        self.next_offset
+    }
+}
+
+pub trait BacklinkPageReader {
+    fn list_backlinks_page(
+        &self,
+        workspace_id: &WorkspaceId,
+        target_document_id: &DocumentId,
+        request: BacklinkPageRequest,
+    ) -> Result<BacklinkPage, LinkIndexError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkProjectionRecord {
     source_document_id: DocumentId,
@@ -56,6 +118,14 @@ pub trait LinkIndex {
         workspace_id: &WorkspaceId,
         record: LinkProjectionRecord,
     ) -> Result<(), LinkIndexError>;
+
+    fn delete_document_links(
+        &mut self,
+        _workspace_id: &WorkspaceId,
+        _document_id: &DocumentId,
+    ) -> Result<(), LinkIndexError> {
+        Err(LinkIndexError::StorageUnavailable)
+    }
 
     fn get_document_links(
         &self,

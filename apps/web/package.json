@@ -5,9 +5,11 @@
   "type": "module",
   "main": "src/index.ts",
   "dependencies": {
-    "@sponzey-cabinet/client-core": "workspace:*",
-    "@sponzey-cabinet/editor": "workspace:*",
-    "@sponzey-cabinet/ui": "workspace:*",
+    "@sponzey-cabinet/client-core": "file:../../packages/client-core",
+    "@sponzey-cabinet/editor": "file:../../packages/editor",
+    "@sponzey-cabinet/ui": "file:../../packages/ui",
+    "@codemirror/lang-markdown": "^6.3.2",
+    "codemirror": "^6.0.1",
     "react": ">=18",
     "react-dom": ">=18"
   }

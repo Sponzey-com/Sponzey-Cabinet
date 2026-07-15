@@ -5,7 +5,7 @@
   "type": "module",
   "main": "src/index.ts",
   "dependencies": {
-    "@sponzey-cabinet/client-core": "workspace:*"
+    "@sponzey-cabinet/client-core": "file:../client-core"
   },
   "peerDependencies": {
     "react": ">=18"

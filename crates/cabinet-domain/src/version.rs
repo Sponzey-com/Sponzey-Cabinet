@@ -27,6 +27,7 @@ pub struct VersionEntry {
     snapshot_ref: DocumentSnapshotRef,
     author: VersionAuthor,
     summary: VersionSummary,
+    created_at_epoch_ms: Option<u64>,
 }
 
 impl VersionEntry {
@@ -43,7 +44,16 @@ impl VersionEntry {
             snapshot_ref,
             author,
             summary,
+            created_at_epoch_ms: None,
         })
+    }
+
+    pub fn with_created_at_epoch_ms(mut self, value: u64) -> Result<Self, VersionError> {
+        if value == 0 {
+            return Err(VersionError::InvalidCreatedAt);
+        }
+        self.created_at_epoch_ms = Some(value);
+        Ok(self)
     }
 
     pub fn version_id(&self) -> &VersionId {
@@ -64,6 +74,10 @@ impl VersionEntry {
 
     pub fn summary(&self) -> &VersionSummary {
         &self.summary
+    }
+
+    pub const fn created_at_epoch_ms(&self) -> Option<u64> {
+        self.created_at_epoch_ms
     }
 }
 
@@ -157,4 +171,5 @@ pub enum VersionError {
     EmptySnapshotRef,
     EmptyAuthor,
     EmptySummary,
+    InvalidCreatedAt,
 }

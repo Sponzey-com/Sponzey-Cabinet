@@ -1,5 +1,6 @@
 use cabinet_domain::document::{
-    DocumentError, DocumentId, DocumentMetadata, DocumentPath, DocumentSlug, DocumentTitle,
+    DocumentBody, DocumentBodyPolicy, DocumentError, DocumentId, DocumentMetadata, DocumentPath,
+    DocumentSlug, DocumentTitle,
 };
 
 #[test]
@@ -21,6 +22,29 @@ fn document_id_and_title_validate_stable_values() {
         DocumentTitle::new(&"a".repeat(121)).expect_err("too long title must fail"),
         DocumentError::TitleTooLong { max: 120 }
     );
+}
+
+#[test]
+fn document_title_is_derived_from_the_first_markdown_line() {
+    let policy = DocumentBodyPolicy::new(4096).expect("policy");
+    let heading = DocumentBody::new("# 새로운 제목\n\n본문", policy).expect("body");
+    let plain = DocumentBody::new("일반 첫 줄\n본문", policy).expect("body");
+    let empty = DocumentBody::new("\n본문", policy).expect("body");
+    let punctuation = DocumentBody::new("---\n본문", policy).expect("body");
+
+    assert_eq!(DocumentTitle::from_markdown_body(&heading).as_str(), "새로운 제목");
+    assert_eq!(DocumentTitle::from_markdown_body(&plain).as_str(), "일반 첫 줄");
+    assert_eq!(DocumentTitle::from_markdown_body(&empty).as_str(), "제목 없는 문서");
+    assert_eq!(DocumentTitle::from_markdown_body(&punctuation).as_str(), "제목 없는 문서");
+}
+
+#[test]
+fn derived_document_title_is_bounded_without_rejecting_the_body() {
+    let source = format!("# {}\n본문", "가".repeat(140));
+    let body = DocumentBody::new(&source, DocumentBodyPolicy::new(4096).expect("policy")).expect("body");
+    let title = DocumentTitle::from_markdown_body(&body);
+
+    assert_eq!(title.as_str().chars().count(), 120);
 }
 
 #[test]

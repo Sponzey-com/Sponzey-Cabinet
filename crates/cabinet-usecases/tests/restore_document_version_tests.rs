@@ -45,6 +45,16 @@ impl FakeDocumentRepository {
             .as_str()
             .to_string()
     }
+
+    fn current_title(&self, workspace_id: &str, document_id: &str) -> String {
+        self.current
+            .get(&(workspace_id.to_string(), document_id.to_string()))
+            .expect("current document")
+            .metadata()
+            .title()
+            .as_str()
+            .to_string()
+    }
 }
 
 impl DocumentRepository for FakeDocumentRepository {
@@ -188,7 +198,12 @@ fn restore_document_version_appends_restore_version_updates_current_and_emits_ev
     let mut documents = FakeDocumentRepository::default();
     documents.insert("workspace-1", current_record("doc-1", "current body"));
     let mut versions = FakeVersionStore::default();
-    versions.insert("workspace-1", "doc-1", "version-1", "restored body");
+    versions.insert(
+        "workspace-1",
+        "doc-1",
+        "version-1",
+        "# Restored title\nrestored body",
+    );
     let mut publisher = FakeEventPublisher::default();
     let mut logger = FakeProductLogger::default();
     let usecase = RestoreDocumentVersionUsecase::new();
@@ -215,7 +230,11 @@ fn restore_document_version_appends_restore_version_updates_current_and_emits_ev
     assert_eq!(output.restored_version_id().as_str(), "version-restore-1");
     assert_eq!(
         documents.current_body("workspace-1", "doc-1"),
-        "restored body"
+        "# Restored title\nrestored body"
+    );
+    assert_eq!(
+        documents.current_title("workspace-1", "doc-1"),
+        "Restored title"
     );
     assert_eq!(versions.appended.len(), 1);
     assert_eq!(
@@ -224,7 +243,7 @@ fn restore_document_version_appends_restore_version_updates_current_and_emits_ev
     );
     assert_eq!(
         versions.appended[0].snapshot().body().as_str(),
-        "restored body"
+        "# Restored title\nrestored body"
     );
     assert_eq!(
         publisher.events,

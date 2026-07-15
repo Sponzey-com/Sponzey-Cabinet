@@ -25,7 +25,6 @@ use cabinet_ports::version_store::{
 pub struct CreateDocumentInput {
     workspace_id: String,
     document_id: String,
-    title: String,
     path: String,
     body: String,
     version_id: String,
@@ -39,7 +38,6 @@ impl CreateDocumentInput {
     pub fn new(
         workspace_id: &str,
         document_id: &str,
-        title: &str,
         path: &str,
         body: &str,
         version_id: &str,
@@ -50,7 +48,6 @@ impl CreateDocumentInput {
         Self {
             workspace_id: workspace_id.to_string(),
             document_id: document_id.to_string(),
-            title: title.to_string(),
             path: path.to_string(),
             body: body.to_string(),
             version_id: version_id.to_string(),
@@ -82,6 +79,9 @@ pub enum DocumentChangeEvent {
     DocumentCreated {
         workspace_id: String,
         document_id: String,
+        version_id: String,
+        title: String,
+        path: String,
     },
     DocumentRestored {
         workspace_id: String,
@@ -97,16 +97,20 @@ pub enum DocumentChangeEvent {
     DocumentRenamed {
         workspace_id: String,
         document_id: String,
+        version_id: String,
+        title: String,
         old_path: String,
         new_path: String,
     },
     DocumentDeleted {
         workspace_id: String,
         document_id: String,
+        version_id: String,
     },
     DocumentAssetAttached {
         workspace_id: String,
         document_id: String,
+        version_id: String,
         asset_id: String,
     },
 }
@@ -198,6 +202,19 @@ impl CreateDocumentUsecase {
         event_publisher.publish(DocumentChangeEvent::DocumentCreated {
             workspace_id: command.workspace_id.as_str().to_string(),
             document_id: command.document_id.as_str().to_string(),
+            version_id: command.version_id.as_str().to_string(),
+            title: command
+                .current_record
+                .metadata()
+                .title()
+                .as_str()
+                .to_string(),
+            path: command
+                .current_record
+                .metadata()
+                .path()
+                .as_str()
+                .to_string(),
         });
         product_logger.write_product(CreateDocumentProductEvent::DocumentCreated {
             document_id: command.document_id.as_str().to_string(),
@@ -1165,6 +1182,13 @@ impl RestoreDocumentVersionCommand {
         metadata: DocumentMetadata,
         body: DocumentBody,
     ) -> Result<CurrentDocumentRecord, RestoreDocumentVersionError> {
+        let metadata = metadata
+            .with_title(DocumentTitle::from_markdown_body(&body))
+            .map_err(|_| {
+                RestoreDocumentVersionError::storage_unavailable(
+                    RestoreDocumentVersionState::Failed,
+                )
+            })?;
         let snapshot = CurrentDocumentSnapshot::new(self.document_id.clone(), body);
         CurrentDocumentRecord::new(metadata, snapshot).map_err(|_| {
             RestoreDocumentVersionError::storage_unavailable(RestoreDocumentVersionState::Failed)
@@ -1224,6 +1248,10 @@ impl UpdateDocumentOutput {
     pub fn version_id(&self) -> &VersionId {
         &self.version_id
     }
+
+    pub fn version_id_value(&self) -> &str {
+        self.version_id.as_str()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1234,6 +1262,12 @@ pub struct UpdateDocumentUsecase {
 impl UpdateDocumentUsecase {
     pub const fn new(body_policy: DocumentBodyPolicy) -> Self {
         Self { body_policy }
+    }
+
+    pub fn with_body_limit(max_body_bytes: usize) -> Result<Self, UpdateDocumentError> {
+        DocumentBodyPolicy::new(max_body_bytes)
+            .map(Self::new)
+            .map_err(|_| UpdateDocumentError::InvalidDocumentInput)
     }
 
     pub fn execute(
@@ -1396,6 +1430,9 @@ impl UpdateDocumentCommand {
         &self,
         metadata: DocumentMetadata,
     ) -> Result<CurrentDocumentRecord, UpdateDocumentError> {
+        let metadata = metadata
+            .with_title(DocumentTitle::from_markdown_body(&self.body))
+            .map_err(|_| UpdateDocumentError::InvalidDocumentInput)?;
         let snapshot = CurrentDocumentSnapshot::new(self.document_id.clone(), self.body.clone());
         CurrentDocumentRecord::new(metadata, snapshot)
             .map_err(|_| UpdateDocumentError::InvalidDocumentInput)
@@ -1415,15 +1452,23 @@ fn write_update_failure(
 pub struct RenameDocumentInput {
     workspace_id: String,
     document_id: String,
+    version_id: String,
     title: String,
     path: String,
 }
 
 impl RenameDocumentInput {
-    pub fn new(workspace_id: &str, document_id: &str, title: &str, path: &str) -> Self {
+    pub fn new(
+        workspace_id: &str,
+        document_id: &str,
+        version_id: &str,
+        title: &str,
+        path: &str,
+    ) -> Self {
         Self {
             workspace_id: workspace_id.to_string(),
             document_id: document_id.to_string(),
+            version_id: version_id.to_string(),
             title: title.to_string(),
             path: path.to_string(),
         }
@@ -1507,6 +1552,8 @@ impl RenameDocumentUsecase {
         event_publisher.publish(DocumentChangeEvent::DocumentRenamed {
             workspace_id: command.workspace_id.as_str().to_string(),
             document_id: command.document_id.as_str().to_string(),
+            version_id: command.version_id.as_str().to_string(),
+            title: command.title.as_str().to_string(),
             old_path,
             new_path,
         });
@@ -1552,6 +1599,7 @@ impl RenameDocumentError {
 struct RenameDocumentCommand {
     workspace_id: WorkspaceId,
     document_id: DocumentId,
+    version_id: VersionId,
     title: DocumentTitle,
     path: DocumentPath,
 }
@@ -1562,6 +1610,8 @@ impl RenameDocumentCommand {
             .map_err(|_| RenameDocumentError::InvalidDocumentInput)?;
         let document_id = DocumentId::new(&input.document_id)
             .map_err(|_| RenameDocumentError::InvalidDocumentInput)?;
+        let version_id = VersionId::new(&input.version_id)
+            .map_err(|_| RenameDocumentError::InvalidDocumentInput)?;
         let title = DocumentTitle::new(&input.title)
             .map_err(|_| RenameDocumentError::InvalidDocumentInput)?;
         let path = DocumentPath::new(&input.path)
@@ -1570,6 +1620,7 @@ impl RenameDocumentCommand {
         Ok(Self {
             workspace_id,
             document_id,
+            version_id,
             title,
             path,
         })
@@ -1603,13 +1654,15 @@ fn write_rename_failure(
 pub struct DeleteDocumentInput {
     workspace_id: String,
     document_id: String,
+    version_id: String,
 }
 
 impl DeleteDocumentInput {
-    pub fn new(workspace_id: &str, document_id: &str) -> Self {
+    pub fn new(workspace_id: &str, document_id: &str, version_id: &str) -> Self {
         Self {
             workspace_id: workspace_id.to_string(),
             document_id: document_id.to_string(),
+            version_id: version_id.to_string(),
         }
     }
 }
@@ -1674,6 +1727,7 @@ impl DeleteDocumentUsecase {
         event_publisher.publish(DocumentChangeEvent::DocumentDeleted {
             workspace_id: command.workspace_id.as_str().to_string(),
             document_id: command.document_id.as_str().to_string(),
+            version_id: command.version_id.as_str().to_string(),
         });
         product_logger.write_product(CreateDocumentProductEvent::DocumentDeleted {
             document_id: command.document_id.as_str().to_string(),
@@ -1715,6 +1769,7 @@ impl DeleteDocumentError {
 struct DeleteDocumentCommand {
     workspace_id: WorkspaceId,
     document_id: DocumentId,
+    version_id: VersionId,
 }
 
 impl DeleteDocumentCommand {
@@ -1723,10 +1778,13 @@ impl DeleteDocumentCommand {
             .map_err(|_| DeleteDocumentError::InvalidDocumentInput)?;
         let document_id = DocumentId::new(&input.document_id)
             .map_err(|_| DeleteDocumentError::InvalidDocumentInput)?;
+        let version_id = VersionId::new(&input.version_id)
+            .map_err(|_| DeleteDocumentError::InvalidDocumentInput)?;
 
         Ok(Self {
             workspace_id,
             document_id,
+            version_id,
         })
     }
 }
@@ -1744,6 +1802,7 @@ fn write_delete_failure(
 pub struct AttachFileToDocumentInput {
     workspace_id: String,
     document_id: String,
+    version_id: String,
     asset_id: String,
     file_name: String,
     media_type: String,
@@ -1756,6 +1815,7 @@ impl AttachFileToDocumentInput {
     pub fn new(
         workspace_id: &str,
         document_id: &str,
+        version_id: &str,
         asset_id: &str,
         file_name: &str,
         media_type: &str,
@@ -1765,6 +1825,7 @@ impl AttachFileToDocumentInput {
         Self {
             workspace_id: workspace_id.to_string(),
             document_id: document_id.to_string(),
+            version_id: version_id.to_string(),
             asset_id: asset_id.to_string(),
             file_name: file_name.to_string(),
             media_type: media_type.to_string(),
@@ -1848,6 +1909,7 @@ impl AttachFileToDocumentUsecase {
         event_publisher.publish(DocumentChangeEvent::DocumentAssetAttached {
             workspace_id: command.workspace_id.as_str().to_string(),
             document_id: command.document_id.as_str().to_string(),
+            version_id: command.version_id.as_str().to_string(),
             asset_id: command.asset_id.as_str().to_string(),
         });
         product_logger.write_product(CreateDocumentProductEvent::DocumentAssetAttached {
@@ -1913,6 +1975,7 @@ impl AttachFileToDocumentError {
 struct AttachFileToDocumentCommand {
     workspace_id: WorkspaceId,
     document_id: DocumentId,
+    version_id: VersionId,
     asset_id: AssetId,
     asset_record: AssetRecord,
     document_asset_record: DocumentAssetRecord,
@@ -1923,6 +1986,8 @@ impl AttachFileToDocumentCommand {
         let workspace_id = WorkspaceId::new(&input.workspace_id)
             .map_err(|_| AttachFileToDocumentError::InvalidInput)?;
         let document_id = DocumentId::new(&input.document_id)
+            .map_err(|_| AttachFileToDocumentError::InvalidInput)?;
+        let version_id = VersionId::new(&input.version_id)
             .map_err(|_| AttachFileToDocumentError::InvalidInput)?;
         let asset_id = AssetId::from_sha256_hex(&input.asset_id)
             .map_err(|_| AttachFileToDocumentError::InvalidInput)?;
@@ -1945,6 +2010,7 @@ impl AttachFileToDocumentCommand {
         Ok(Self {
             workspace_id,
             document_id,
+            version_id,
             asset_id,
             asset_record,
             document_asset_record,
@@ -2110,12 +2176,11 @@ impl CreateDocumentCommand {
             .map_err(|_| CreateDocumentError::InvalidDocumentInput)?;
         let document_id = DocumentId::new(&input.document_id)
             .map_err(|_| CreateDocumentError::InvalidDocumentInput)?;
-        let title = DocumentTitle::new(&input.title)
-            .map_err(|_| CreateDocumentError::InvalidDocumentInput)?;
         let path = DocumentPath::new(&input.path)
             .map_err(|_| CreateDocumentError::InvalidDocumentInput)?;
         let body = DocumentBody::new(&input.body, body_policy)
             .map_err(|_| CreateDocumentError::InvalidDocumentInput)?;
+        let title = DocumentTitle::from_markdown_body(&body);
         let version_id = VersionId::new(&input.version_id)
             .map_err(|_| CreateDocumentError::InvalidDocumentInput)?;
         let snapshot_ref = DocumentSnapshotRef::new(&input.snapshot_ref)

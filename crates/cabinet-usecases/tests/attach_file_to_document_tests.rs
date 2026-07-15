@@ -230,6 +230,7 @@ fn attach_file_to_document_stores_asset_and_association_without_changing_documen
         vec![DocumentChangeEvent::DocumentAssetAttached {
             workspace_id: "workspace-1".to_string(),
             document_id: "doc-1".to_string(),
+            version_id: "version-1".to_string(),
             asset_id: HASH_A.to_string(),
         }]
     );
@@ -315,6 +316,7 @@ fn valid_input() -> AttachFileToDocumentInput {
     AttachFileToDocumentInput::new(
         "workspace-1",
         "doc-1",
+        "version-1",
         HASH_A,
         "diagram.png",
         "image/png",

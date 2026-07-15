@@ -4,10 +4,22 @@
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",
+  "scripts": {
+    "run:app": "sh ../../scripts/run_desktop_app.sh",
+    "run:package-smoke": "sh ../../scripts/run_desktop_package_smoke.sh",
+    "run:tauri-build": "sh ../../scripts/run_desktop_tauri_build.sh",
+    "run:packaged-app-smoke": "sh ../../scripts/run_desktop_packaged_app_smoke.sh",
+    "run:packaged-ui-smoke": "sh ../../scripts/run_desktop_packaged_ui_smoke.sh",
+    "run:dist-browser-smoke": "sh ../../scripts/run_desktop_dist_browser_smoke.sh"
+  },
   "dependencies": {
-    "@sponzey-cabinet/client-core": "workspace:*",
-    "@sponzey-cabinet/editor": "workspace:*",
-    "@sponzey-cabinet/ui": "workspace:*",
+    "@codemirror/commands": ">=6",
+    "@codemirror/lang-markdown": ">=6",
+    "@codemirror/state": ">=6",
+    "@codemirror/view": ">=6",
+    "@sponzey-cabinet/client-core": "file:../../packages/client-core",
+    "@sponzey-cabinet/editor": "file:../../packages/editor",
+    "@sponzey-cabinet/ui": "file:../../packages/ui",
     "react": ">=18",
     "react-dom": ">=18"
   }

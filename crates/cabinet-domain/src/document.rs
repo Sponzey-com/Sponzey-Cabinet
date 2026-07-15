@@ -92,6 +92,30 @@ impl DocumentTitle {
     pub fn as_str(&self) -> &str {
         &self.value
     }
+
+    pub fn from_markdown_body(body: &DocumentBody) -> Self {
+        let first_line = body.as_str().lines().next().unwrap_or_default().trim();
+        let without_heading = first_line
+            .trim_start_matches('#')
+            .trim()
+            .trim_end_matches('#')
+            .trim();
+        let sanitized = without_heading
+            .chars()
+            .map(|character| if character.is_control() { ' ' } else { character })
+            .collect::<String>();
+        let bounded = sanitized
+            .trim()
+            .chars()
+            .take(DOCUMENT_TITLE_MAX_LEN)
+            .collect::<String>();
+        let value = if bounded.chars().any(char::is_alphanumeric) {
+            bounded
+        } else {
+            "제목 없는 문서".to_string()
+        };
+        Self { value }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,153 +1,198 @@
-# Sponzey Cabinet MVP Release Notes
+# Sponzey Cabinet Local Desktop Release
 
-This document defines the current MVP release gate for the local single-user Knowledge Base Core.
-It separates end-user local runtime expectations from developer validation requirements.
+최종 갱신일: 2026-07-15
 
-## MVP Scope
+이 문서는 Phase 012에서 보관한 릴리스 증거와 Phase 013 UI 통합 및 후속 제목 hardening이 반영된 개인용 로컬 데스크톱 제품의 실행 방법, 기능 범위와 데이터 경계를 정의한다. 과거 MVP scaffold가 아니라 현재 macOS Tauri 앱을 기준으로 하며, current fingerprint에서 재실행하지 않은 archive evidence는 현재 완료 증거로 간주하지 않는다.
 
-The MVP supports a local personal knowledge base flow:
+## Release Scope
 
-- Create and update Markdown documents.
-- Read the current document without scanning history.
-- Read document history and specific versions through separate query paths.
-- Preview and restore a previous version.
-- Parse Markdown links, Wikilinks, and attachment references.
-- Search documents through the local search index.
-- View backlink projection through the link index.
-- Attach local files as separate assets and list attachment metadata.
-- Initialize local stores on first launch without manual setup.
+- Product scope: `personal_local_macos_desktop`
+- Validated platform: macOS
+- Deferred platforms: Windows, Linux
+- Development preview only: Web
+- Excluded until explicit user request: iOS, Android, self-host, SaaS, multi-user, realtime collaboration, organization/RBAC UI, SSO/SCIM, billing and admin console
 
-The MVP excludes multi-user collaboration, realtime editing, SaaS tenancy, OAuth/SSO, plugin runtime,
-AI answer generation, CRM objects, Canvas/Edgeless UI, iOS app implementation, and Android app
-implementation.
+Windows/Linux용 공통 domain, usecase, port와 adapter 경계는 유지하지만 Phase 012 완료나 현재 릴리스 지원으로 주장하지 않는다.
 
-## Local Data Location
+## User-Visible Capabilities
 
-The local app receives an app data directory once during bootstrap and derives all local paths from
-that validated config object. Internal flows receive those paths through explicit configuration and
-dependency injection. Runtime code must not reread or mutate environment values after startup.
+### Documents
 
-Default local data layout:
+- React와 CodeMirror 기반 Markdown 작성
+- 문서 첫 번째 물리적 줄에서 제목 파생. heading marker를 제거하고 빈 첫 줄은 `제목 없는 문서`로 표시
+- 별도 제목 입력 없이 본문 저장과 버전 복원 시 current title metadata 동기화
+- 새 문서 생성, 편집, 저장 버튼과 `Cmd+S`
+- Markdown preview와 table rendering
+- 현재 문서 조회와 paginated 이력 조회의 분리
+- 특정 버전 비교, 복원 preview와 durable restore
+- Wikilink와 Markdown link parsing
+- 검색, backlink, unresolved link와 orphan 탐색
+- 저장 후 version/readback 및 앱 재시작 확인
+
+### Knowledge Graph
+
+- durable link index와 graph projection 기반 node/edge 조회
+- local/global graph 탐색과 node 선택
+- loading, empty, ready, stale, repairing, failed 상태
+- pan, zoom, reset과 선택 context 유지
+- 문서 생성, 첫 줄 제목 변경을 포함한 저장, 복원, 삭제 뒤 projection 갱신 및 repair action
+
+### Canvas
+
+- Canvas 생성과 조회
+- 문서, 메모, 첨부 target node 추가
+- edge, geometry, viewport와 zoom 저장
+- 이름 변경과 2단계 보관 확인
+- stale revision 충돌 방지
+- 손상 상태 감지와 최신 유효 revision 복구
+- 앱 재시작 뒤 node, edge, 위치와 viewport 복원
+
+### Attachments
+
+- platform file picker를 통한 import
+- staging, content-addressed object store, metadata와 document association 분리
+- 문서별 및 workspace asset metadata 조회
+- 지원 범위 안의 bounded native preview
+- 문서와 Canvas에서 동일 asset identity 참조
+- import 중단, 손상, missing object와 unsupported preview 오류 표시
+
+### Data Ownership And Recovery
+
+- 기본 app data directory 자동 결정과 최초 실행 초기화
+- 외부 DB, 외부 검색 서버, Git CLI, Node.js runtime, 수동 환경 변수나 설정 파일 편집 없는 설치 제품 경계
+- 문서 current/history, Graph/Canvas projection, Asset metadata/object를 포함하는 package backup
+- 명시적 restore confirmation, apply, reopen과 durable readback
+- projection rebuild와 Canvas recovery
+- Product Log, scoped expiring Field Debug Log, production default에서 제외된 Development Log
+
+## Local Data Boundary
+
+bootstrap은 platform app data directory와 외부 환경 값을 시작 시 한 번만 읽고 검증된 immutable config object로 변환한다. 내부 유스케이스에는 생성자 인자, 명시적 context와 dependency injection으로 전달한다. 실행 중 환경 재조회, 전역 config singleton과 동적 설정 변경을 사용하지 않는다.
+
+대표적인 로컬 데이터 범위:
 
 ```text
 app_data_dir/
   metadata/
-    first-run marker
-    migration versions
-    document-asset associations
-  version-store/
-    document version entries
-    version snapshots
-  assets/
-    asset metadata
-    asset object bytes
-  search-index/
-    local search index data
   workspaces/
-    current document metadata and body snapshots
+  version-store/
+  search-index/
+  link-index/
+  graph-projections/
+  canvases/
+  assets/
+  operations/
+  backups/
 ```
 
-The local user must not install or configure an external DB, search server, Git CLI, Node.js runtime,
-or manual config file for the default local flow. Any advanced location change must be an explicit
-settings/import/export action, not a hidden runtime requirement.
+실제 경로와 파일명은 UI, Product Log와 릴리스 증거에 노출하지 않는다. 문서 body, 첨부 bytes와 절대 경로도 릴리스 artifact에 포함하지 않는다.
 
-Git, commit, branch, and repository concepts are not exposed to the user experience. Git provider
-integration is not part of this MVP.
+## Running The Product
 
-## Backup and Export Policy
+개발 환경에서 실제 Tauri UI를 실행한다.
 
-Backup policy:
+```sh
+scripts/run_desktop_app.sh
+```
 
-- Stop the local app before filesystem-level backup.
-- Back up the entire `app_data_dir` as one unit.
-- Treat `metadata`, `version-store`, `assets`, `search-index`, and `workspaces` as one consistency
-  boundary.
-- Do not back up document body without the version store and asset store if restore fidelity matters.
+이 명령은 desktop assets를 빌드하고 개발용 loopback UI server를 시작한 뒤 Tauri 앱을 실행한다. 현재 개발 scaffold에는 Rust, Node.js와 설치된 workspace dependency가 필요하지만, 이는 최종 설치 앱의 사용자 runtime 요구사항이 아니다.
 
-Export policy:
+내부 desktop shell command boundary만 확인한다.
 
-- Markdown export is the primary portable document export path.
-- HTML export is available as a minimum rendering/export foundation.
-- PDF export is represented by an extension boundary and test coverage, not a full production PDF
-  pipeline.
-- Attachment objects remain separate assets and must be exported with their metadata when a complete
-  workspace export is required.
+```sh
+scripts/run_desktop_shell.sh
+```
 
-## Logging Policy
+이 명령은 GUI launcher가 아니라 smoke command다. 화면을 열려면 `scripts/run_desktop_app.sh`를 사용한다.
+
+개발용 Web preview를 실행한다.
+
+```sh
+scripts/run_web_app.sh
+```
+
+Web preview는 UI 개발과 browser verification을 위한 adapter이며 서버 호스팅 제품이나 authoritative persistence boundary가 아니다.
+
+## Package And Verification Commands
+
+macOS debug/no-sign `.app`을 빌드하고 package content와 native bootstrap을 확인한다.
+
+```sh
+scripts/run_desktop_packaged_app_smoke.sh
+```
+
+실제 packaged WebView에서 핵심 사용자 workflow와 durable readback을 확인한다.
+
+```sh
+scripts/run_desktop_packaged_ui_smoke.sh
+```
+
+Phase 012 전체 evidence를 새 source fingerprint에서 다시 생성한다.
+
+```sh
+scripts/run_phase012_release_evidence.sh
+```
+
+이 마지막 명령은 archive/plan/release contract, Rust workspace, desktop TypeScript, native/render 성능, visual, macOS package, packaged UI와 security 검증을 순서대로 수행한다. Phase 012 archive 완료 후 historical plan path가 `.tasks/phase012/plan.md`로 이동했으므로 새 phase에서 그대로 실행하기 전에 validator input path를 해당 archive에 맞춰야 한다.
+
+## Phase 012 Evidence
+
+Authoritative archive는 `.tasks/phase012/`다.
+
+- Final result: `.tasks/phase012/phase012-release-gate-result.md`
+- Archived plan: `.tasks/phase012/plan.md`
+- Archived tasks: `.tasks/phase012/task001.md` through `.tasks/phase012/task126.md`
+- Requirement matrix: `.tasks/phase012/release/requirement-evidence-matrix-phase012.md`
+- Command summary: `.tasks/phase012/release/command-summary-phase012.md`
+- Native platform matrix: `.tasks/phase012/release/native-platform-matrix-phase012.md`
+- Packaged UI smoke: `.tasks/phase012/release/packaged-ui-smoke-phase012.md`
+- Native and rendered query performance: `.tasks/phase012/release/query-performance-phase012.md`, `.tasks/phase012/release/query-render-performance-phase012.md`
+- Visual evidence: `.tasks/phase012/release/exploration-visual-phase012.json`
+- Security/log policy manifest: `.tasks/phase012/release/security-log-policy-manifest-phase012.json`
+
+최종 gate는 다음을 기록한다.
+
+- 33/33 requirements passed
+- 19/19 release commands passed
+- macOS passed
+- Windows/Linux `deferred_future`
+- packaged workflow 91 actions and 33 durable readbacks
+- packaged UI 200 samples, p95 14ms and zero errors
+- current/history/search/link/Graph/Canvas/Asset metadata native query p95 below 300ms
+
+## Current Post-Phase 012 Hardening
+
+- Phase 013에서 공통 앱 셸, `ko-KR` 사용자 표현, 내부 ID 비노출과 visible action 연결을 통합했다.
+- 문서 제목의 단일 원천을 Markdown 첫 줄로 고정하고 create command와 문서 UI의 별도 title 입력을 제거했다.
+- 생성, 수정, 복원, durable readback, projection 처리와 재시작 후 Canvas 표시 제목을 Rust와 desktop 통합 테스트로 검증했다.
+- macOS Tauri debug/no-sign 앱 번들 빌드를 완료했다.
+- 정적 dist browser smoke는 현재 Home 시작 화면에서도 CodeMirror가 즉시 존재한다고 가정하는 기존 조건 때문에 실패한다. 이 항목은 제목 저장 실패가 아니라 smoke 시작 route 계약의 불일치이며, current source fingerprint의 최종 release evidence를 확정하기 전에 수정 또는 기준 갱신이 필요하다.
+
+## Logging And Security
 
 ### Product Log
 
-Product Log is the production-facing minimum log stream. It records user-impacting outcomes,
-stable error codes, major state transitions, and operation success/failure metadata. It must not
-record document body, attachment bytes, secrets, tokens, or full internal object dumps.
-
-MVP smoke tests verify that release smoke product events do not include document body or attachment
-bytes.
+사용자 영향, 주요 상태 전이, 안정적인 error code, retryability와 처리 시간 구간만 기록한다. 문서 body, 첨부 bytes, secret, token, 절대 경로와 전체 객체 dump를 기록하지 않는다.
 
 ### Field Debug Log
 
-Field Debug Log is reserved for scoped operational diagnosis. It must have an activation scope,
-limited retention, and sensitive data masking before it can be used in customer or production
-environments. It is not enabled by default in the MVP.
+workspace/component 범위와 만료 시간이 있는 명시적 session에서만 활성화한다. 식별자는 마스킹하고 원문 콘텐츠는 기록하지 않는다. 활성화와 종료는 Product Log event로 추적한다.
 
 ### Development Log
 
-Development Log is for local development and test diagnosis only. It must not be included in
-production default behavior. Development-only diagnostics remain outside the end-user local runtime
-contract.
-
-## State Machine Evidence
-
-The release gate verifies stateful internal procedures through explicit state results:
-
-- first-run reaches `Completed`.
-- migration reaches `Completed` and rerun is idempotent.
-- restore reaches `Completed`.
-
-Complex flows must remain state-machine driven and testable. They must not be represented by hidden
-flag combinations in UI, adapter, or infrastructure code.
-
-## Performance and Reliability Evidence
-
-The MVP release gate includes:
-
-- p95 300ms benchmark coverage for current document lookup, history list lookup, specific version
-  lookup, search lookup, link/backlink lookup, and asset metadata lookup.
-- clean install smoke validating local first-run without external DB/search/Git CLI/Node.js/manual
-  config.
-- data preservation smoke validating current document, version history, specific version snapshot,
-  asset metadata, asset object bytes, and migration idempotency after reinitialization.
-- MVP end-to-end smoke validating create, edit, Wikilink parsing, attachment reference parsing,
-  search, backlink projection, asset metadata listing, restore preview, restore, and current
-  read-back.
-- architecture boundary checks for layered and clean architecture rules.
-- Git CLI absence check for local runtime behavior.
-
-## Developer Release Gate
-
-Run the MVP developer release gate from the repository root:
-
-```sh
-sh scripts/mvp_release_gate.sh
-```
-
-The developer gate runs Rust tests, formatting checks, architecture boundary checks, no-Git-CLI
-checks, runtime config checks, first-run/migration/logging checks, domain checks, frontend boundary
-checks, editor/UI smoke checks, platform adapter smoke, desktop shell boundary checks, and this
-release documentation check.
-
-Developer validation may require Rust, Node.js, and shell tooling. These are development
-requirements only. They are not end-user local app runtime requirements.
+로컬 개발과 테스트에서만 사용한다. 프로덕션 기본 동작과 package 결과물의 필수 경로에 포함하지 않는다.
 
 ## Known Limitations
 
-- The MVP validates Web and desktop shell contracts, but it does not ship a full production UI
-  automation gate.
-- iOS and Android are official target platforms for the final product, but not implemented in this
-  MVP.
-- Multi-user collaboration, realtime editing, SaaS tenancy, OAuth/SSO, plugin runtime, AI answer
-  generation, CRM objects, and Canvas/Edgeless UI are outside this MVP.
-- Search and link indexes are treated as derived projections. The MVP release smoke verifies their
-  update and query behavior in the local flow; long-term index rebuild and persistence policies need
-  a later dedicated phase.
-- PDF export is an extension boundary in the MVP, not a full production-grade PDF export pipeline.
+- 현재 package evidence는 macOS debug/no-sign 앱을 사용한다. 배포용 서명, notarization, 업데이트 채널과 installer UX는 별도 release hardening 범위다.
+- Windows/Linux package와 native UI는 인증하지 않았다.
+- Markdown table은 preview에서 grid로 렌더링되며 CodeMirror source 자체가 WYSIWYG table widget으로 변환되지는 않는다.
+- 문서 제목은 별도 필드가 아니다. 제목을 바꾸려면 Markdown 본문의 첫 번째 줄을 수정하고 저장해야 한다.
+- native attachment preview는 허용된 형식과 크기로 제한된다. OCR, 대용량 media transcoding과 모든 파일 형식 preview는 제공하지 않는다.
+- Web preview는 데스크톱 UI 개발용이며 로컬 설치 앱의 저장소를 대체하지 않는다.
+- 서버 호스팅, SaaS, 멀티 사용자, 실시간 공동 편집, 조직 관리, SSO/SCIM과 과금은 의도적으로 비활성 범위다.
+- Windows/Linux/Web/iOS/Android 지원을 macOS 결과로 대신 주장하지 않는다.
+
+## Release Rule
+
+기능 완료는 버튼이나 route의 존재, task checkbox 또는 과거 phase marker만으로 판단하지 않는다. 같은 source fingerprint에서 실행된 command result, durable readback, restart/reopen, performance, visual, security와 packaged native evidence를 함께 통과해야 한다.

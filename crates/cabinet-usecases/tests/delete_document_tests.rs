@@ -125,7 +125,7 @@ fn delete_document_removes_current_and_emits_events_without_history_store() {
 
     let output = usecase
         .execute(
-            DeleteDocumentInput::new("workspace-1", "doc-1"),
+            DeleteDocumentInput::new("workspace-1", "doc-1", "version-1"),
             &mut documents,
             &mut publisher,
             &mut logger,
@@ -140,6 +140,7 @@ fn delete_document_removes_current_and_emits_events_without_history_store() {
         vec![DocumentChangeEvent::DocumentDeleted {
             workspace_id: "workspace-1".to_string(),
             document_id: "doc-1".to_string(),
+            version_id: "version-1".to_string(),
         }]
     );
     assert_eq!(
@@ -159,7 +160,7 @@ fn delete_document_reports_not_found_without_delete_call() {
 
     let error = usecase
         .execute(
-            DeleteDocumentInput::new("workspace-1", "doc-404"),
+            DeleteDocumentInput::new("workspace-1", "doc-404", "version-1"),
             &mut documents,
             &mut publisher,
             &mut logger,
@@ -188,7 +189,7 @@ fn delete_document_preserves_current_when_repository_delete_fails() {
 
     let error = usecase
         .execute(
-            DeleteDocumentInput::new("workspace-1", "doc-1"),
+            DeleteDocumentInput::new("workspace-1", "doc-1", "version-1"),
             &mut documents,
             &mut publisher,
             &mut logger,

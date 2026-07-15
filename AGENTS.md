@@ -15,7 +15,11 @@
 - 인터페이스와 구현체를 분리하라.
 - 암묵적 전역 상태, 숨겨진 I/O, 런타임 중간 설정 변경을 금지하라.
 - 변경 이유가 다른 작업을 하나의 변경으로 섞지 마라.
-- 공식 대상 플랫폼은 Web, iOS, Android, Windows, macOS, Linux로 취급하라.
+- 장기 공식 대상 플랫폼은 Web, iOS, Android, Windows, macOS, Linux로 취급하되 현재 구현 및 릴리스 인증 범위와 혼동하지 마라.
+- 현재 구현 및 릴리스 인증 플랫폼은 macOS 개인용 로컬 데스크톱 앱으로 제한하라.
+- Windows/Linux native 인증과 Web/iOS/Android 제품 구현은 사용자의 명시적 요구 전까지 `deferred_future`로 유지하라.
+- 멀티 사용자, self-host, SaaS, 실시간 협업, 조직/RBAC UI, SSO/SCIM, 과금과 관리자 콘솔을 사용자의 명시적 요구 없이 개발 계획, task, release gate 또는 기본 UI에 포함하지 마라.
+- 현재 범위를 제한하더라도 공통 domain/usecase/port를 macOS 전용으로 오염시키지 말고 차후 플랫폼 adapter가 같은 계약을 구현할 수 있게 유지하라.
 - 플랫폼별 차이는 어댑터 계층에서 처리하고 도메인/유스케이스에 누출하지 마라.
 
 ## 2. Architecture Rules
@@ -402,7 +406,9 @@ from Publishing on PublishFailed -> PublishFailed
 - 인프라 테스트는 경계 구현을 검증하고 도메인 규칙을 중복 검증하지 마라.
 - E2E 테스트는 핵심 사용자 흐름과 배포 조합을 검증하되, 단위 테스트를 대체하지 마라.
 - 플랫폼별 테스트는 공통 유스케이스를 중복 검증하지 말고 platform adapter, UI flow, storage/auth/notification/network integration을 검증하라.
-- Web, iOS, Android, Windows, macOS, Linux의 핵심 smoke test는 로그인, 문서 조회, 문서 검색, 댓글, AI 질의 같은 최소 흐름을 검증하라.
+- 현재 활성 플랫폼의 핵심 smoke test는 해당 phase와 `PROJECT.md`가 정의한 개인용 로컬 workflow를 검증하라.
+- 유예 플랫폼의 smoke test를 현재 release gate의 필수 조건으로 만들지 말고 capability matrix에 `deferred_future`로 기록하라.
+- Web/iOS/Android 또는 서버형 로그인, 댓글, 협업, AI 질의 smoke는 해당 제품 범위를 사용자가 명시적으로 활성화한 뒤에만 필수화하라.
 - 문서 현재 조회, 문서 이력 조회, 검색, 링크/백링크 조회, 첨부 metadata 조회는 성능 테스트 대상에 포함하라.
 - 성능 테스트는 p95 300ms 목표를 측정하고, 측정 조건과 데이터 크기를 명시하라.
 - 현재 문서 조회가 version history 전체 스캔에 의존하지 않는지 테스트하라.
