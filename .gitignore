@@ -299,3 +299,6 @@ download-cache/
 
 .DS_Store
 .tasks/
+
+target-confirmed/
+target-upgrade/
