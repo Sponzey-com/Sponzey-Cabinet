@@ -108,6 +108,8 @@ fn create_update_restore_and_rename_events_upsert_current_document_without_body(
             workspace_id: "workspace-1".to_string(),
             document_id: "doc-1".to_string(),
             version_id: "version-2".to_string(),
+            title: "Document".to_string(),
+            path: "document.md".to_string(),
         },
         DocumentChangeEvent::DocumentRestored {
             workspace_id: "workspace-1".to_string(),

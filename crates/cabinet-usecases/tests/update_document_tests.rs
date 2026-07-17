@@ -194,7 +194,10 @@ fn update_document_appends_version_then_updates_current_and_emits_events() {
         documents.current_body("workspace-1", "doc-1"),
         "# 새 문서 제목\nbody"
     );
-    assert_eq!(documents.current_title("workspace-1", "doc-1"), "새 문서 제목");
+    assert_eq!(
+        documents.current_title("workspace-1", "doc-1"),
+        "새 문서 제목"
+    );
     assert_eq!(versions.appended.len(), 1);
     assert_eq!(
         versions.appended[0].snapshot().body().as_str(),
@@ -206,6 +209,8 @@ fn update_document_appends_version_then_updates_current_and_emits_events() {
             workspace_id: "workspace-1".to_string(),
             document_id: "doc-1".to_string(),
             version_id: "version-2".to_string(),
+            title: "새 문서 제목".to_string(),
+            path: "docs/title.md".to_string(),
         }]
     );
     assert_eq!(

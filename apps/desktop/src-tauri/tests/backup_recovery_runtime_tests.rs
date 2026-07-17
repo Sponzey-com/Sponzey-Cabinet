@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use cabinet_adapters::durable_projection_work_repository::DurableProjectionWorkRepository;
 use cabinet_desktop_shell::{
     DesktopBackupPackageRequestDto, DesktopBackupProductEvent, DesktopBackupRecoveryRequestDto,
-    DesktopBackupRecoveryRuntime, DesktopDocumentAuthoringRequestDto,
-    DesktopDocumentAuthoringRuntime, DesktopRestoreCancelRequestDto,
+    DesktopBackupRecoveryRuntime, DesktopDocumentMutationRequestDto,
+    DesktopDocumentMutationRuntime, DesktopRestoreCancelRequestDto,
     DesktopRestoreConfirmRequestDto,
 };
 use cabinet_domain::projection_work::ProjectionChangeKind;
@@ -115,16 +115,14 @@ fn restore_runtime_starts_statuses_and_runs_a_durable_operation() {
     let root = temp_root("async-restore");
     seed_workspace(&root, "workspace-1");
     let runtime = runtime(root.clone());
-    let authoring = DesktopDocumentAuthoringRuntime::new(root.clone(), 1024 * 1024).unwrap();
+    let authoring = DesktopDocumentMutationRuntime::new(root.clone(), 1024 * 1024).unwrap();
     assert!(
         authoring
-            .execute(DesktopDocumentAuthoringRequestDto::Create {
+            .execute(DesktopDocumentMutationRequestDto::Create {
+                operation_id: "document-create".into(),
                 workspace_id: "workspace-1".into(),
                 document_id: "doc-1".into(),
-                path: "restore.md".into(),
                 body: "body".into(),
-                version_id: "v1".into(),
-                snapshot_ref: "snapshot-v1".into(),
                 author: "local-user".into(),
                 summary: "created".into(),
             })
@@ -155,7 +153,11 @@ fn restore_runtime_starts_statuses_and_runs_a_durable_operation() {
     assert_eq!(status.state, "Staging");
     let completed = runtime.run_restore_operation(request);
     assert!(completed.ok);
-    assert_eq!(completed.state, "Completed");
+    assert_eq!(
+        completed.state, "Completed",
+        "restore error={:?}",
+        completed.error_code
+    );
     let works = DurableProjectionWorkRepository::new(root.clone())
         .list_resumable(10)
         .unwrap();
@@ -177,11 +179,14 @@ fn runtime(root: PathBuf) -> DesktopBackupRecoveryRuntime {
 
 fn seed_workspace(root: &Path, workspace: &str) {
     let encoded = hex(workspace);
-    for relative in ["authoring-current", "authoring-versions"] {
+    for relative in ["authoring-current", "document-versions"] {
         let directory = root.join(relative).join(workspace);
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("record.data"), format!("{relative}-data")).unwrap();
     }
+    let pointer_directory = root.join("document-current-pointers").join(&encoded);
+    fs::create_dir_all(&pointer_directory).unwrap();
+    fs::write(pointer_directory.join("record.data"), "pointer-data").unwrap();
     for relative in [
         "canvases",
         "assets/metadata",

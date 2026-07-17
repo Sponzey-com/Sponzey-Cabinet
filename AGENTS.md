@@ -42,6 +42,14 @@
 - 플랫폼별 UI에서 도메인 규칙을 다시 구현하지 마라.
 - 플랫폼 capability 차이는 명시적 capability object 또는 policy object로 표현하라.
 - 문서 현재 조회와 문서 이력 조회는 별도 유스케이스와 query path로 분리하라.
+- 문서 첨부 등록, 문서-asset 연결, 연결 해제와 asset 원본 삭제를 서로 다른 유스케이스로 분리하라.
+- 문서 diff는 현재 대 특정 version과 특정 version 대 특정 version 입력을 명시적으로 구분하라.
+- 문서 줄 diff는 검증된 sequence diff 구현을 사용하고, 한 줄 삽입 때문에 이후 동일한 모든 줄을 삭제/추가로 오인하지 마라.
+- restore preview와 restore command를 분리하고, restore command에는 preview 당시 expected current version을 포함하라.
+- 문서 복원은 과거 snapshot을 덮어쓰지 말고 새 version을 append한 뒤 current를 전환하라.
+- 복원 후 첫 줄 파생 제목, 링크/백링크, 검색/Graph projection과 첨부 association이 같은 version을 가리키게 하라.
+- 첨부 원본은 asset storage port 뒤에 두고 문서에는 stable asset identity와 association만 저장하라.
+- 문서에서 첨부 연결을 해제할 때 다른 문서나 Canvas의 참조가 남은 asset 원본을 삭제하지 마라.
 - 모든 사용자-facing 검색과 조회는 정상적인 인덱스 상태에서 p95 300ms 이내 응답을 목표로 설계하라.
 
 의사코드:
@@ -203,6 +211,8 @@ test:
 - 비밀번호, 토큰, API key, session id
 - 원문 문서 내용
 - 첨부 파일 내용
+- diff hunk 원문
+- 원본 파일명과 절대 파일 경로
 - 개인정보 원문
 - AI prompt 원문과 민감 응답 원문
 - 테스트용 상세 상태
@@ -352,6 +362,12 @@ DEV fake.repository.saved document_id=test-doc-1
 - 상태 전이 실패는 명확한 error code를 반환하라.
 - 상태 전이 함수는 입력 상태와 이벤트가 같으면 동일한 결과를 반환해야 한다.
 - 외부 I/O는 상태 전이 결정 이후 유스케이스가 수행하라.
+- 파일 첨부는 최소한 `Selected -> Validating -> Staging -> Storing -> Associating -> Completed`와 `Failed/Cancelled/RecoveryRequired`를 명시하고, 실패 시 부분 association을 남기지 마라.
+- 문서 복원은 최소한 `Previewing -> PreviewReady -> Applying -> Verifying -> Completed`와 `Conflict/Failed/Cancelled/RecoveryRequired`를 명시하라.
+- 복원 `Applying` 전이에 expected current version guard를 적용하고, 충돌 시 version append와 current mutation을 수행하지 마라.
+- 복원의 `Completed`는 새 version append, current 전환, 파생 projection 요청과 durable readback 검증이 완료된 뒤에만 반환하라.
+- 첨부와 복원 command에 idempotent operation identity를 사용하고 같은 operation 재시도에서 association 또는 version을 중복 생성하지 마라.
+- restore version append 뒤 current 전환이 실패하면 current를 복원 전 상태로 유지하고 operation을 `RecoveryRequired`로 기록하라. 해당 attempt를 성공한 history로 표시하지 마라.
 
 상태머신에 포함할 항목:
 
@@ -410,8 +426,18 @@ from Publishing on PublishFailed -> PublishFailed
 - 유예 플랫폼의 smoke test를 현재 release gate의 필수 조건으로 만들지 말고 capability matrix에 `deferred_future`로 기록하라.
 - Web/iOS/Android 또는 서버형 로그인, 댓글, 협업, AI 질의 smoke는 해당 제품 범위를 사용자가 명시적으로 활성화한 뒤에만 필수화하라.
 - 문서 현재 조회, 문서 이력 조회, 검색, 링크/백링크 조회, 첨부 metadata 조회는 성능 테스트 대상에 포함하라.
+- 표준 크기 문서의 현재 대 version diff, version 대 version diff와 restore preview를 성능 테스트 대상에 포함하라.
 - 성능 테스트는 p95 300ms 목표를 측정하고, 측정 조건과 데이터 크기를 명시하라.
 - 현재 문서 조회가 version history 전체 스캔에 의존하지 않는지 테스트하라.
+- diff가 동일 내용, 빈 문서, 줄 삽입/삭제, 첫 줄 제목 변경, 긴 줄, 한글과 Unicode에서 결정적인 결과를 반환하는지 테스트하라.
+- 문서 중간에 한 줄을 삽입해도 이후 동일한 줄이 변경으로 표시되지 않는지 테스트하라.
+- 첨부 등록 실패가 document association과 고아 metadata를 남기지 않는지 테스트하라.
+- 공유 asset의 한 문서 연결을 해제해도 원본과 다른 참조가 유지되는지 테스트하라.
+- restore preview 이후 current version이 바뀌면 restore가 conflict로 실패하고 current와 history를 변경하지 않는지 테스트하라.
+- restore가 대상 snapshot을 내용으로 하는 새 version을 생성하고 복원 직전 version을 보존하는지 테스트하라.
+- 같은 restore operation 재시도가 version을 중복 생성하지 않는지 테스트하라.
+- restore version append 뒤 current 전환 실패가 current를 보존하고 `RecoveryRequired`로 재개되는지 테스트하라.
+- restore 후 본문, 첫 줄 파생 제목, 첨부 association과 projection이 재시작 뒤에도 같은 version을 가리키는지 테스트하라.
 
 TDD 사이클:
 
@@ -483,6 +509,12 @@ TDD 사이클:
 - 플랫폼 capability 차이가 명시적으로 문서화되고 테스트되는지 확인하라.
 - 플랫폼별 로그, crash report, error report에 민감 정보가 포함되지 않는지 확인하라.
 - 현재 문서 조회와 이력 조회가 분리되어 있는지 확인하라.
+- 문서 diff와 restore preview/command가 별도 유스케이스이며 명시적 입력과 출력을 가지는지 확인하라.
+- restore command가 expected current version을 검증하고 새 version을 append하는지 확인하라.
+- 복원 conflict가 어떤 write도 수행하지 않고, 중간 저장 실패가 current를 보존한 채 idempotent `RecoveryRequired` operation으로 남는지 확인하라.
+- 문서 첨부가 asset 원본, metadata, document association을 분리하고 실패 시 고아 참조를 남기지 않는지 확인하라.
+- 첨부 연결 해제가 공유 asset 원본이나 다른 참조를 삭제하지 않는지 확인하라.
+- 일반 UI와 로그에 document/version/asset 내부 ID, snapshot path, Git 용어, 원본 파일 경로가 노출되지 않는지 확인하라.
 - 검색/조회 경로가 p95 300ms 목표를 만족하도록 index, projection, cache, pagination을 사용하는지 확인하라.
 - 조회 경로가 본문 전체 스캔, version history 전체 스캔, 권한 후처리 전체 스캔에 의존하지 않는지 확인하라.
 
@@ -510,6 +542,17 @@ TDD 사이클:
 - 특정 플랫폼에서만 동작하는 숨겨진 비즈니스 규칙을 만들지 마라.
 - 현재 문서 조회에서 이력 저장소 전체를 스캔하지 마라.
 - 이력 조회 기능이 현재 문서 조회 경로를 느리게 만들게 하지 마라.
+- 과거 version snapshot을 덮어쓰거나 삭제하는 방식으로 문서를 복원하지 마라.
+- restore preview 없이 즉시 current를 변경하지 마라.
+- expected current version 검증 없이 preview 결과를 적용하지 마라.
+- 같은 restore 또는 attachment operation 재시도에서 version이나 association을 중복 생성하지 마라.
+- 복원 성공을 반환한 뒤 제목, 링크, 검색, Graph 또는 첨부 association이 이전 version을 가리키게 두지 마라.
+- 첨부 bytes를 Markdown 본문, metadata store 또는 문서 version record에 직접 저장하지 마라.
+- 문서 연결 해제를 asset 원본 삭제와 같은 명령으로 처리하지 마라.
+- 다른 참조가 남은 asset 원본을 삭제하지 마라.
+- 첨부 실패 후 고아 document association이나 완료된 것으로 보이는 metadata를 남기지 마라.
+- 문서 diff에서 첨부 bytes의 binary diff를 기본 동작으로 수행하지 마라.
+- 일반 사용자 UI에 내부 version ID, document ID, snapshot path, Git commit/branch/repository를 표시하지 마라.
 - 검색/조회 성능 문제를 UI loading spinner만으로 숨기지 마라.
 - 권한 필터링을 전체 결과 조회 후 애플리케이션 메모리에서만 처리하지 마라.
 
@@ -529,6 +572,9 @@ TDD 사이클:
 - 로컬 store 초기화, migration, 손상 복구 경로를 테스트하라.
 - 조회/검색 기능을 추가할 때 p95 300ms 목표와 측정 방법을 함께 정의하라.
 - 조회 기능을 추가할 때 현재 기준 조회인지 이력 기준 조회인지 명확히 분류하라.
+- 문서 첨부 기능을 변경할 때 파일 선택 adapter, asset import, document association과 원본 삭제 생명주기를 구분하라.
+- diff 기능을 변경할 때 현재 대 version, version 대 version, 첨부 association summary의 계약을 각각 검증하라.
+- 복원 기능을 변경할 때 preview, expected current version guard, 새 version append, durable readback과 projection 일관성을 함께 검증하라.
 - 새 로그를 추가할 때 Product Log, Field Debug Log, Development Log 중 하나로 분류하라.
 - 민감 정보가 로그에 들어가지 않게 하라.
 - 상태가 3개 이상이거나 실패/재시도/종료가 있는 흐름은 상태머신으로 표현하라.
@@ -562,5 +608,9 @@ TDD 사이클:
 - 데스크톱 파일 선택이 필요하면, UI adapter에서 파일 선택 결과를 value object로 변환한 뒤 유스케이스에 전달하라.
 - 플랫폼별 기능 지원 범위가 다르면, 조건문을 도메인에 넣지 말고 capability policy를 주입하라.
 - 현재 문서가 필요하면 `GetCurrentDocument` 성격의 유스케이스를 사용하고, 이력 문서가 필요하면 version 전용 유스케이스를 사용하라.
+- 문서에 파일을 첨부하려면 picker 결과를 adapter에서 검증된 입력으로 변환하고, asset import와 document association을 포트 뒤에서 수행하라.
+- 첨부 연결을 해제하려면 association만 제거하고, asset 원본 삭제는 전체 참조 수와 명시적 삭제 정책을 검사하는 별도 유스케이스로 수행하라.
+- 문서를 비교하려면 Markdown 줄 diff와 첨부 association diff를 분리하고, 첨부 bytes를 읽어 binary diff하지 마라.
+- 과거 문서를 복원하려면 preview 당시 current version을 command에 전달하고, 일치할 때만 새 restore version을 append하라.
 - 검색이 필요하면 원본 문서 전체 스캔을 기본값으로 삼지 말고 search index 또는 projection을 사용하라.
 - 300ms 목표를 넘는 조회가 예상되면 동기 API로 만들지 말고 비동기 job, pagination, streaming, cache 중 하나로 설계를 변경하라.

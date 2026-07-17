@@ -260,11 +260,11 @@ impl Fixture {
             b"# current document",
         );
         self.write(
-            &format!("authoring-current-version/{workspace_hex}/doc/current.pointer"),
+            &format!("document-current-pointers/{workspace_hex}/doc/current.pointer"),
             b"schema=1\nversion=7631\n",
         );
         self.write(
-            "authoring-versions/workspace-1/documents/doc/history.txt",
+            "document-versions/workspace-1/documents/doc/history.txt",
             b"version-1",
         );
         self.write(
@@ -310,7 +310,7 @@ impl Fixture {
         let mut values = Vec::new();
         for root in [
             "authoring-current",
-            "authoring-versions",
+            "document-versions",
             "canvases",
             "assets",
         ] {

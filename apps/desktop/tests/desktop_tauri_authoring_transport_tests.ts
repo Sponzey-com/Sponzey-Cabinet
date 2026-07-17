@@ -11,18 +11,18 @@ test("authoring transport maps create current and revision save to tagged native
   const transport = createTauriDocumentAuthoringTransport(async (command, args) => {
     calls.push({ command, args });
     const request = args?.request as { kind?: string };
-    if (request.kind === "get_current") {
+    if (command === "execute_desktop_document_query") {
       return {
         ok: true,
         retryable: false,
         repairRequired: false,
         data: {
           kind: "current",
-          documentId: "doc-1",
-          currentVersionId: "v1",
+          currentVersionToken: "v1",
+          revisionNumber: 1,
           title: "Source",
-          path: "notes/source.md",
           body: "body one",
+          hasMore: false,
         },
       };
     }
@@ -46,23 +46,33 @@ test("authoring transport maps create current and revision save to tagged native
   assert.equal(current.ok && (current.data as { versionId: string }).versionId, "v1");
   assert.equal(saved.ok && (saved.data as { revision: number }).revision, 7);
   assert.deepEqual(calls.map((call) => call.command), [
-    "execute_desktop_document_authoring",
+    "execute_desktop_document_mutation",
     "run_desktop_projection_worker",
-    "execute_desktop_document_authoring",
-    "execute_desktop_document_authoring",
+    "execute_desktop_document_query",
+    "execute_desktop_document_mutation",
     "run_desktop_projection_worker",
   ]);
   assert.equal(calls[1]?.args, undefined);
   assert.equal(calls[4]?.args, undefined);
+  assert.deepEqual(calls[0]?.args, {
+    request: {
+      kind: "create",
+      operationId: "operation-create-1",
+      workspaceId: "workspace-1",
+      documentId: "doc-1",
+      body: "body one",
+      author: "local-user",
+      summary: "Created",
+    },
+  });
   assert.deepEqual(calls[3]?.args, {
     request: {
       kind: "update",
+      operationId: "operation-save-1",
       workspaceId: "workspace-1",
       documentId: "doc-1",
       body: "body two",
-      expectedVersionId: "v1",
-      versionId: "v2",
-      snapshotRef: "snapshot-v2",
+      expectedCurrentVersionId: "v1",
       author: "local-user",
       summary: "Updated",
     },
@@ -159,7 +169,7 @@ test("desktop composite transport routes authoring commands and triggers project
 
   assert.equal(result.ok, true);
   assert.deepEqual(calls, [
-    "execute_desktop_document_authoring",
+    "execute_desktop_document_mutation",
     "run_desktop_projection_worker",
   ]);
 });
@@ -184,42 +194,50 @@ test("projection trigger failure never changes a verified durable save result", 
 
   assert.equal(result.ok, true);
   assert.deepEqual(calls, [
-    "execute_desktop_document_authoring",
+    "execute_desktop_document_mutation",
     "run_desktop_projection_worker",
   ]);
 });
 
 test("authoring transport maps history version preview and guarded restore commands", async () => {
-  const nativeKinds: string[] = [];
-  const transport = createTauriDocumentAuthoringTransport(async (_command, args) => {
+  const nativeCalls: Array<{ command: string; kind: string }> = [];
+  let historyRequest: unknown;
+  let previewRequest: unknown;
+  let restoreRequest: unknown;
+  const transport = createTauriDocumentAuthoringTransport(async (command, args) => {
     const request = args?.request as { kind?: string };
-    nativeKinds.push(String(request.kind));
-    if (request.kind === "get_history") {
+    nativeCalls.push({ command, kind: String(request.kind) });
+    if (request.kind === "history") {
+      historyRequest = request;
       return {
         ok: true,
         retryable: false,
         repairRequired: false,
         data: {
           kind: "history",
-          documentId: "doc-1",
-          entries: [{ versionId: "v1", summary: "Created", author: "local-user", createdAt: "2026-07-13T00:00:00Z" }],
+          entries: [{ revisionNumber: 1, versionToken: "v1", summary: "Created", author: "local-user", createdAtEpochMs: 1783900800000 }],
+          nextCursor: "cursor-1",
+          hasMore: true,
         },
       };
     }
-    if (request.kind === "get_version") {
+    if (request.kind === "version") {
       return {
         ok: true,
         retryable: false,
         repairRequired: false,
         data: {
           kind: "version",
-          documentId: "doc-1",
-          versionId: "v1",
+          versionToken: "v1",
+          revisionNumber: 1,
+          title: "Historical",
           body: "historical body",
+          hasMore: false,
         },
       };
     }
     if (request.kind === "preview_restore") {
+      previewRequest = request;
       return {
         ok: true,
         retryable: false,
@@ -230,10 +248,41 @@ test("authoring transport maps history version preview and guarded restore comma
           targetVersionId: "v1",
           expectedCurrentVersionId: "v2",
           canRestore: true,
+          missingAssetLabels: [],
           lines: [{ kind: "added", text: "sanitized line" }],
+          restoreDiff: {
+            kind: "complete",
+            leftVersionToken: "v2",
+            rightVersionToken: "v1",
+            addedCount: 1,
+            removedCount: 1,
+            attachmentDiff: {
+              kind: "known",
+              added: [],
+              removed: [],
+              relabeled: [],
+              unchangedCount: 0,
+            },
+            titleDelta: {
+              kind: "changed",
+              before: "현재 제목",
+              after: "과거 제목",
+            },
+            hunks: [{
+              oldStartLine: 1,
+              newStartLine: 1,
+              addedCount: 1,
+              removedCount: 1,
+              lines: [
+                { kind: "removed", text: "current", oldLineNumber: 1 },
+                { kind: "added", text: "historical", newLineNumber: 1 },
+              ],
+            }],
+          },
         },
       };
     }
+    restoreRequest = request;
     return {
       ok: true,
       retryable: false,
@@ -243,6 +292,7 @@ test("authoring transport maps history version preview and guarded restore comma
         documentId: "doc-1",
         restoredVersionId: "v3",
         currentVersionId: "v3",
+        revisionNumber: 3,
       },
     };
   });
@@ -252,10 +302,44 @@ test("authoring transport maps history version preview and guarded restore comma
   const preview = await transport(previewEnvelope());
   const restored = await transport(restoreEnvelope());
 
-  assert.deepEqual(nativeKinds, ["get_history", "get_version", "preview_restore", "restore"]);
+  assert.deepEqual(nativeCalls, [
+    { command: "execute_desktop_document_query", kind: "history" },
+    { command: "execute_desktop_document_query", kind: "version" },
+    { command: "execute_desktop_document_authoring", kind: "preview_restore" },
+    { command: "execute_desktop_document_authoring", kind: "restore" },
+  ]);
   assert.equal(history.ok && (history.data as { entries: unknown[] }).entries.length, 1);
+  assert.equal(history.ok && (history.data as { nextCursor?: string }).nextCursor, "cursor-1");
+  assert.deepEqual(historyRequest, {
+    kind: "history",
+    workspaceId: "workspace-1",
+    documentId: "doc-1",
+    cursor: "cursor-0",
+    limit: 20,
+  });
   assert.equal(version.ok && (version.data as { versionId: string }).versionId, "v1");
   assert.equal(preview.ok && (preview.data as { expectedCurrentVersionId: string }).expectedCurrentVersionId, "v2");
+  assert.deepEqual(
+    preview.ok && (preview.data as { missingAssetLabels: readonly string[] }).missingAssetLabels,
+    [],
+  );
+  assert.deepEqual(previewRequest, {
+    kind: "preview_restore",
+    workspaceId: "workspace-1",
+    documentId: "doc-1",
+    targetVersionId: "v1",
+  });
+  assert.equal(preview.ok && (preview.data as { diff: { status: string } }).diff.status, "Complete");
+  assert.deepEqual(restoreRequest, {
+    kind: "restore",
+    operationId: "operation-restore-1",
+    workspaceId: "workspace-1",
+    documentId: "doc-1",
+    targetVersionId: "v1",
+    expectedCurrentVersionId: "v2",
+    author: "local-user",
+    summary: "Restore v1",
+  });
   assert.equal(restored.ok && (restored.data as { currentVersionId: string }).currentVersionId, "v3");
 });
 
@@ -263,12 +347,10 @@ function createEnvelope(): LocalDesktopCommandEnvelope {
   return {
     commandName: "create_document",
     payload: {
+      operationId: "operation-create-1",
       workspaceId: "workspace-1",
       documentId: "doc-1",
-      path: "notes/source.md",
       body: "body one",
-      versionId: "v1",
-      snapshotRef: "snapshot-v1",
       author: "local-user",
       summary: "Created",
     },
@@ -290,12 +372,11 @@ function saveEnvelope(): LocalDesktopCommandEnvelope {
   return {
     commandName: "save_document_revision",
     payload: {
+      operationId: "operation-save-1",
       workspaceId: "workspace-1",
       documentId: "doc-1",
       body: "body two",
       expectedVersionId: "v1",
-      nextVersionId: "v2",
-      snapshotRef: "snapshot-v2",
       author: "local-user",
       summary: "Updated",
       revision: 7,
@@ -310,6 +391,7 @@ function historyEnvelope(): LocalDesktopCommandEnvelope {
       queryName: "get-document-history",
       workspaceId: "workspace-1",
       documentId: "doc-1",
+      cursor: "cursor-0",
       limit: 20,
     },
   };
@@ -335,7 +417,6 @@ function previewEnvelope(): LocalDesktopCommandEnvelope {
       workspaceId: "workspace-1",
       documentId: "doc-1",
       targetVersionId: "v1",
-      expectedCurrentVersionId: "v2",
     },
   };
 }
@@ -345,12 +426,11 @@ function restoreEnvelope(): LocalDesktopCommandEnvelope {
     commandName: "restore_document_version",
     payload: {
       commandName: "restore-document-version",
+      operationId: "operation-restore-1",
       workspaceId: "workspace-1",
       documentId: "doc-1",
       targetVersionId: "v1",
       expectedCurrentVersionId: "v2",
-      restoredVersionId: "v3",
-      restoredSnapshotRef: "snapshot-v3",
       author: "local-user",
       summary: "Restore v1",
     },

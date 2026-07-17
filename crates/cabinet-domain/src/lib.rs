@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod asset;
 pub mod asset_import_operation;
+pub mod attachment_snapshot_mutation;
 pub mod audit;
 pub mod backup;
 pub mod canvas;
@@ -10,7 +11,10 @@ pub mod collaboration;
 pub mod comment;
 pub mod connector;
 pub mod document;
+pub mod document_diff_operation;
+pub mod document_diff_query;
 pub mod document_lock;
+pub mod document_revision;
 pub mod embedding;
 pub mod field_debug;
 pub mod graph;

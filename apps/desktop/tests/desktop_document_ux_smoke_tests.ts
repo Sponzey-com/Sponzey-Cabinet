@@ -41,9 +41,8 @@ test("desktop restore smoke creates preview request and confirmed command withou
   });
   const command = createDesktopRestoreApplyCommand(preview, {
     confirmed: true,
+    operationId: "operation-restore-1",
     expectedCurrentVersionId: "version-current",
-    restoredVersionId: "version-restore-1",
-    restoredSnapshotRef: "snapshot-restore-1",
     author: "local-user",
     summary: "Restore version-1",
   });
@@ -71,9 +70,8 @@ test("desktop restore apply command requires expected current version guard", ()
   });
   const command = createDesktopRestoreApplyCommand(preview, {
     confirmed: true,
+    operationId: "operation-restore-1",
     expectedCurrentVersionId: "",
-    restoredVersionId: "version-restore-1",
-    restoredSnapshotRef: "snapshot-restore-1",
     author: "local-user",
     summary: "Restore version-1",
   });

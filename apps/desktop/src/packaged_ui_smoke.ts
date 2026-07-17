@@ -7,9 +7,11 @@ export const PackagedUiSmokeState = Object.freeze({
   HomeReady: "HomeReady",
   DocumentSaved: "DocumentSaved",
   DocumentReopened: "DocumentReopened",
+  DocumentVersionWorkflowVerified: "DocumentVersionWorkflowVerified",
   GraphActionsVerified: "GraphActionsVerified",
   CanvasMutationsVerified: "CanvasMutationsVerified",
   AssetActionsVerified: "AssetActionsVerified",
+  DocumentAttachmentWorkflowVerified: "DocumentAttachmentWorkflowVerified",
   CrossSurfaceVerified: "CrossSurfaceVerified",
   BackupRestoreVerified: "BackupRestoreVerified",
   CanvasLifecycleVerified: "CanvasLifecycleVerified",
@@ -22,7 +24,7 @@ export const PackagedUiSmokeState = Object.freeze({
 } as const);
 
 export type PackagedUiSmokeStateValue = typeof PackagedUiSmokeState[keyof typeof PackagedUiSmokeState];
-type PackagedUiSmokeEvent = "home_ready" | "document_saved" | "document_reopened" | "graph_actions_verified" | "canvas_mutations_verified" | "asset_actions_verified" | "cross_surface_verified" | "backup_restore_verified" | "canvas_lifecycle_verified" | "canvas_recovery_verified" | "route_ready" | "samples_ready" | "report_ready" | "reported" | "failed";
+type PackagedUiSmokeEvent = "home_ready" | "document_saved" | "document_reopened" | "document_version_verified" | "graph_actions_verified" | "canvas_mutations_verified" | "asset_actions_verified" | "document_attachment_verified" | "cross_surface_verified" | "backup_restore_verified" | "canvas_lifecycle_verified" | "canvas_recovery_verified" | "route_ready" | "samples_ready" | "report_ready" | "reported" | "failed";
 
 export function transitionPackagedUiSmoke(
   state: PackagedUiSmokeStateValue,
@@ -33,10 +35,12 @@ export function transitionPackagedUiSmoke(
     [`${PackagedUiSmokeState.Booting}:home_ready`, PackagedUiSmokeState.HomeReady],
     [`${PackagedUiSmokeState.HomeReady}:document_saved`, PackagedUiSmokeState.DocumentSaved],
     [`${PackagedUiSmokeState.DocumentSaved}:document_reopened`, PackagedUiSmokeState.DocumentReopened],
-    [`${PackagedUiSmokeState.DocumentReopened}:graph_actions_verified`, PackagedUiSmokeState.GraphActionsVerified],
+    [`${PackagedUiSmokeState.DocumentReopened}:document_version_verified`, PackagedUiSmokeState.DocumentVersionWorkflowVerified],
+    [`${PackagedUiSmokeState.DocumentVersionWorkflowVerified}:graph_actions_verified`, PackagedUiSmokeState.GraphActionsVerified],
     [`${PackagedUiSmokeState.GraphActionsVerified}:canvas_mutations_verified`, PackagedUiSmokeState.CanvasMutationsVerified],
     [`${PackagedUiSmokeState.CanvasMutationsVerified}:asset_actions_verified`, PackagedUiSmokeState.AssetActionsVerified],
-    [`${PackagedUiSmokeState.AssetActionsVerified}:cross_surface_verified`, PackagedUiSmokeState.CrossSurfaceVerified],
+    [`${PackagedUiSmokeState.AssetActionsVerified}:document_attachment_verified`, PackagedUiSmokeState.DocumentAttachmentWorkflowVerified],
+    [`${PackagedUiSmokeState.DocumentAttachmentWorkflowVerified}:cross_surface_verified`, PackagedUiSmokeState.CrossSurfaceVerified],
     [`${PackagedUiSmokeState.CrossSurfaceVerified}:backup_restore_verified`, PackagedUiSmokeState.BackupRestoreVerified],
     [`${PackagedUiSmokeState.BackupRestoreVerified}:canvas_lifecycle_verified`, PackagedUiSmokeState.CanvasLifecycleVerified],
     [`${PackagedUiSmokeState.CanvasLifecycleVerified}:canvas_recovery_verified`, PackagedUiSmokeState.CanvasRecoveryVerified],
@@ -57,6 +61,15 @@ export function nearestRankP95(samples: readonly number[]): number {
 interface SmokeDocument {
   querySelector(selector: string): Element | null;
 }
+
+interface KeyboardActivatable {
+  readonly disabled: boolean;
+  focus(): void;
+  click(): void;
+  dispatchEvent(event: Event): boolean;
+}
+
+type KeyboardEventFactory = (key: string, options: KeyboardEventInit) => Event;
 
 interface SmokeOptions {
   readonly invoke: TauriInvoke;
@@ -84,11 +97,14 @@ export async function runPackagedUiSmoke(options: SmokeOptions): Promise<Package
   const warmups = options.warmupCount ?? 30;
   const sampleCount = options.sampleCount ?? 200;
   let state: PackagedUiSmokeStateValue = PackagedUiSmokeState.Booting;
-  let failureStage: "home" | "documentCreate" | "documentEdit" | "documentSave" | "documentReopen" | "graphOpen" | "graphScope" | "graphDepth" | "graphDirection" | "graphUnresolved" | "graphAssets" | "graphZoomIn" | "graphZoomOut" | "graphFitView" | "graphNode" | "graphDocumentRoute" | "canvas" | "canvasOpen" | "canvasCreate" | "canvasNote" | "canvasPan" | "canvasZoom" | "canvasArrange" | "canvasDocument" | "canvasEdge" | "canvasDrag" | "canvasResize" | "canvasReopen" | "canvasRename" | "canvasArchive" | "canvasArchiveReopen" | "canvasRecovery" | "assets" | "assetOpen" | "assetImport" | "assetDetail" | "assetPreview" | "assetUnlink" | "assetLibrary" | "assetDetachedDetail" | "assetRelink" | "assetFilters" | "canvasAsset" | "canvasAssetRoute" | "assetDocumentRoute" | "backupOpen" | "backupCreate" | "restorePreview" | "restoreConfirm" | "restoreReopen" | "measurement" = "home";
+  let failureStage: "home" | "documentCreate" | "documentEdit" | "documentSave" | "documentReopen" | "documentHistoryTab" | "documentHistoryLoad" | "documentHistoryReadback" | "documentDiff" | "documentRestorePreviewAction" | "documentRestorePreviewReadback" | "documentRestoreReview" | "documentRestoreCancel" | "documentRestoreConfirm" | "documentRestoreReadback" | "documentAttachmentTab" | "documentAttachmentOpen" | "documentAttachmentUnlinkRequest" | "documentAttachmentUnlinkCancel" | "graphOpen" | "graphScopeGlobal" | "graphScopeLocal" | "graphDepth" | "graphDirection" | "graphUnresolved" | "graphAssets" | "graphZoomIn" | "graphZoomOut" | "graphFitView" | "graphNode" | "graphDocumentRoute" | "canvas" | "canvasOpen" | "canvasCreate" | "canvasNote" | "canvasPan" | "canvasZoom" | "canvasArrange" | "canvasDocument" | "canvasEdge" | "canvasDrag" | "canvasResize" | "canvasReopen" | "canvasRename" | "canvasArchive" | "canvasArchiveReopen" | "canvasRecovery" | "assets" | "assetOpen" | "assetImport" | "assetDetail" | "assetPreview" | "assetUnlink" | "assetLibrary" | "assetDetachedDetail" | "assetRelink" | "assetFilters" | "assetFilterAll" | "assetFilterImage" | "assetFilterPdf" | "assetFilterDocument" | "assetFilterOther" | "canvasAsset" | "canvasAssetRoute" | "assetDocumentRoute" | "backupOpen" | "backupCreate" | "restorePreview" | "restoreConfirm" | "restoreReopen" | "measurement" = "home";
   const ready = { home: false, graph: false, canvas: false, assets: false };
   const generations = { graph: -1, canvas: -1, assets: -1 };
   let actionCount = 0;
   let durableReadbackCount = 0;
+  let documentVersionWorkflowVerified = false;
+  let documentAttachmentWorkflowVerified = false;
+  let keyboardDocumentWorkflowVerified = false;
 
   try {
     await waitForHome(options.document, delay, timeout);
@@ -103,6 +119,14 @@ export async function runPackagedUiSmoke(options: SmokeOptions): Promise<Package
     durableReadbackCount += documentResult.durableReadbackCount;
     state = transitionPackagedUiSmoke(state, "document_saved");
     state = transitionPackagedUiSmoke(state, "document_reopened");
+
+    const versionResult = await runDocumentVersionWorkflow(options.document, delay, timeout, (stage) => {
+      failureStage = stage;
+    });
+    actionCount += versionResult.actionCount;
+    durableReadbackCount += versionResult.durableReadbackCount;
+    documentVersionWorkflowVerified = true;
+    state = transitionPackagedUiSmoke(state, "document_version_verified");
 
     failureStage = "graphOpen";
     const graphResult = await runGraphActionWorkflow(options.document, generations, documentResult.documentId, delay, timeout, (stage) => {
@@ -130,6 +154,19 @@ export async function runPackagedUiSmoke(options: SmokeOptions): Promise<Package
     durableReadbackCount += assetResult.durableReadbackCount;
     ready.assets = true;
     state = transitionPackagedUiSmoke(state, "asset_actions_verified");
+
+    const documentAttachmentResult = await runDocumentAttachmentWorkflow(
+      options.document,
+      documentResult.documentId,
+      delay,
+      timeout,
+      (stage) => { failureStage = stage; },
+    );
+    actionCount += documentAttachmentResult.actionCount;
+    durableReadbackCount += documentAttachmentResult.durableReadbackCount;
+    documentAttachmentWorkflowVerified = true;
+    keyboardDocumentWorkflowVerified = true;
+    state = transitionPackagedUiSmoke(state, "document_attachment_verified");
 
     const crossSurfaceResult = await runCrossSurfaceWorkflow(
       options.document,
@@ -218,6 +255,9 @@ export async function runPackagedUiSmoke(options: SmokeOptions): Promise<Package
         graphReady: ready.graph,
         canvasReady: ready.canvas,
         assetsReady: ready.assets,
+        documentVersionWorkflowVerified,
+        documentAttachmentWorkflowVerified,
+        keyboardDocumentWorkflowVerified,
         sampleCount: samples.length,
         p95Ms: nearestRankP95(samples),
         errorCount: 0,
@@ -235,6 +275,9 @@ export async function runPackagedUiSmoke(options: SmokeOptions): Promise<Package
         graphReady: ready.graph,
         canvasReady: ready.canvas,
         assetsReady: ready.assets,
+        documentVersionWorkflowVerified,
+        documentAttachmentWorkflowVerified,
+        keyboardDocumentWorkflowVerified,
         sampleCount: 0,
         p95Ms: 0,
         errorCount: 1,
@@ -247,6 +290,87 @@ export async function runPackagedUiSmoke(options: SmokeOptions): Promise<Package
   }
 }
 
+async function runDocumentAttachmentWorkflow(
+  document: SmokeDocument,
+  documentId: string,
+  delay: (milliseconds: number) => Promise<void>,
+  timeout: number,
+  setFailureStage: (stage: "documentAttachmentTab" | "documentAttachmentOpen" | "documentAttachmentUnlinkRequest" | "documentAttachmentUnlinkCancel") => void,
+): Promise<{ readonly actionCount: number; readonly durableReadbackCount: number }> {
+  setFailureStage("documentAttachmentTab");
+  await navigateHome(document, delay, timeout);
+  await reopenDocument(document, documentId, delay, timeout);
+  focusAndClick(document, '[data-action="select-document-inspector-attachments"]');
+  await waitForSelector(document, '[data-document-inspector-tab="attachments"] [data-action="select-document-asset"]', delay, timeout);
+  focusAndClick(document, '[data-action="select-document-asset"]');
+
+  setFailureStage("documentAttachmentOpen");
+  focusAndClick(document, '[data-action="open-document-asset-externally"]');
+  await waitForSelector(document, '[data-document-asset-open-state="Opened"]', delay, timeout);
+
+  setFailureStage("documentAttachmentUnlinkRequest");
+  focusAndClick(document, '[data-action="unlink-document-asset"]');
+  await waitForSelector(document, '[data-document-asset-unlink-state="Confirming"]', delay, timeout);
+
+  setFailureStage("documentAttachmentUnlinkCancel");
+  focusAndClick(document, '[data-action="cancel-document-asset-unlink"]');
+  await waitUntil(document, () => document.querySelector('[data-document-asset-unlink-state]') === null
+    && document.querySelector('[data-action="select-document-asset"]') !== null, delay, timeout);
+  return { actionCount: 7, durableReadbackCount: 2 };
+}
+
+async function runDocumentVersionWorkflow(
+  document: SmokeDocument,
+  delay: (milliseconds: number) => Promise<void>,
+  timeout: number,
+  setFailureStage: (stage: "documentHistoryTab" | "documentHistoryLoad" | "documentHistoryReadback" | "documentDiff" | "documentRestorePreviewAction" | "documentRestorePreviewReadback" | "documentRestoreReview" | "documentRestoreCancel" | "documentRestoreConfirm" | "documentRestoreReadback") => void,
+): Promise<{ readonly actionCount: number; readonly durableReadbackCount: number }> {
+  setFailureStage("documentHistoryTab");
+  focusAndClick(document, '[data-action="select-document-inspector-history"]');
+  await waitForSelector(
+    document,
+    '[data-document-inspector-tab="history"] [data-action="load-history"]',
+    delay,
+    timeout,
+  );
+  setFailureStage("documentHistoryLoad");
+  focusAndClick(document, '[data-action="load-history"]');
+  setFailureStage("documentHistoryReadback");
+  await waitForSelector(document, '.history-list li:nth-child(2)', delay, timeout);
+
+  setFailureStage("documentDiff");
+  focusAndClick(document, '.history-list li:last-child [data-action="compare-current-version"]');
+  await waitForSelector(document, '[data-document-diff-state="Ready"]', delay, timeout);
+  focusAndClick(document, '[data-action="close-document-diff"]');
+  await waitUntil(document, () => document.querySelector('[data-document-diff-state]') === null, delay, timeout);
+
+  setFailureStage("documentRestorePreviewAction");
+  focusAndClick(document, '.history-list li:last-child [data-action="preview-restore"]');
+  setFailureStage("documentRestorePreviewReadback");
+  await waitForSelector(document, '[data-restore-state="PreviewReady"]', delay, timeout);
+  setFailureStage("documentRestoreReview");
+  focusAndClick(document, '[data-action="review-restore"]');
+  await waitForSelector(document, '[data-restore-state="Confirming"]', delay, timeout);
+
+  setFailureStage("documentRestoreCancel");
+  focusAndClick(document, '[data-action="cancel-restore-confirmation"]');
+  await waitForSelector(document, '[data-restore-state="PreviewReady"]', delay, timeout);
+
+  setFailureStage("documentRestoreConfirm");
+  focusAndClick(document, '[data-action="review-restore"]');
+  await waitForSelector(document, '[data-restore-state="Confirming"]', delay, timeout);
+  focusAndClick(document, '[data-action="confirm-restore"]');
+  await waitForSelector(document, '[data-restore-state="Applied"]', delay, timeout);
+
+  setFailureStage("documentRestoreReadback");
+  await waitUntil(document, () => {
+    const root = document.querySelector("[data-cabinet-authoring-state]");
+    return ["Clean", "Saved"].includes(root?.getAttribute("data-cabinet-authoring-state") ?? "")
+      && document.querySelector('.history-list li:nth-child(3)') !== null;
+  }, delay, timeout);
+  return { actionCount: 9, durableReadbackCount: 2 };
+}
+
 async function runDocumentWorkflow(
   document: SmokeDocument,
   delay: (milliseconds: number) => Promise<void>,
@@ -254,7 +378,7 @@ async function runDocumentWorkflow(
   setFailureStage: (stage: "documentCreate" | "documentEdit" | "documentSave" | "documentReopen") => void,
 ): Promise<{ readonly documentId: string; readonly actionCount: number; readonly durableReadbackCount: number }> {
   setFailureStage("documentCreate");
-  click(document, '[data-action="new-document"]');
+  focusAndClick(document, '[data-action="new-document"]');
   await waitUntil(document, () => {
     const root = document.querySelector("[data-cabinet-authoring-state]");
     return Boolean(root?.getAttribute("data-document-id") && ["Clean", "Saved"].includes(root?.getAttribute("data-cabinet-authoring-state") ?? ""));
@@ -267,7 +391,7 @@ async function runDocumentWorkflow(
   requestCodeMirrorDocumentReplacement(editorHost, "# Packaged Workflow\n\nDurable readback marker.\n");
   await waitUntil(document, () => document.querySelector("[data-cabinet-authoring-state]")?.getAttribute("data-cabinet-authoring-state") === "Dirty", delay, timeout);
   setFailureStage("documentSave");
-  click(document, '[data-action="save-document"]');
+  dispatchMacSaveShortcut(editorHost);
   await waitUntil(document, () => {
     const current = document.querySelector("[data-cabinet-authoring-state]");
     return current?.getAttribute("data-cabinet-authoring-state") === "Saved"
@@ -285,13 +409,19 @@ async function runGraphActionWorkflow(
   documentId: string,
   delay: (milliseconds: number) => Promise<void>,
   timeout: number,
-  setFailureStage: (stage: "graphOpen" | "graphScope" | "graphDepth" | "graphDirection" | "graphUnresolved" | "graphAssets" | "graphZoomIn" | "graphZoomOut" | "graphFitView" | "graphNode" | "graphDocumentRoute") => void,
+  setFailureStage: (stage: "graphOpen" | "graphScopeGlobal" | "graphScopeLocal" | "graphDepth" | "graphDirection" | "graphUnresolved" | "graphAssets" | "graphZoomIn" | "graphZoomOut" | "graphFitView" | "graphNode" | "graphDocumentRoute") => void,
 ): Promise<{ readonly actionCount: number; readonly durableReadbackCount: number; readonly canvasRevision: number }> {
   setFailureStage("graphOpen");
   await navigateAndWait(document, "graph", generations, delay, timeout);
   let actionCount = 1;
+  const localScope = requireButton(document, '[data-action="graph-scope-local"]');
+  if (localScope.classList.contains("active")) {
+    setFailureStage("graphScopeGlobal");
+    actionCount += await clickAndWaitGeneration(document, "graph", "graph-scope-global", generations, delay, timeout);
+  }
+  setFailureStage("graphScopeLocal");
+  actionCount += await clickAndWaitGeneration(document, "graph", "graph-scope-local", generations, delay, timeout);
   for (const [action, stage] of [
-    ["graph-scope-local", "graphScope"],
     ["graph-toggle-depth", "graphDepth"],
     ["graph-toggle-direction", "graphDirection"],
     ["graph-toggle-unresolved", "graphUnresolved"],
@@ -451,7 +581,7 @@ async function runAssetActionWorkflow(
   documentId: string,
   delay: (milliseconds: number) => Promise<void>,
   timeout: number,
-  setFailureStage: (stage: "assetOpen" | "assetImport" | "assetDetail" | "assetPreview" | "assetUnlink" | "assetLibrary" | "assetDetachedDetail" | "assetRelink" | "assetFilters") => void,
+  setFailureStage: (stage: "assetOpen" | "assetImport" | "assetDetail" | "assetPreview" | "assetUnlink" | "assetLibrary" | "assetDetachedDetail" | "assetRelink" | "assetFilters" | "assetFilterAll" | "assetFilterImage" | "assetFilterPdf" | "assetFilterDocument" | "assetFilterOther") => void,
 ): Promise<{ readonly assetId: string; readonly actionCount: number; readonly durableReadbackCount: number }> {
   setFailureStage("assetOpen");
   await navigateHome(document, delay, timeout);
@@ -514,10 +644,12 @@ async function runAssetActionWorkflow(
   await waitForAssetDetail(document, 1, delay, timeout);
 
   setFailureStage("assetFilters");
-  for (const filter of ["all", "image", "pdf", "document", "other"]) {
+  for (const [filter, label] of [["all", "전체 파일"], ["image", "이미지"], ["pdf", "PDF"], ["document", "문서"], ["other", "기타"]] as const) {
+    setFailureStage(({ all: "assetFilterAll", image: "assetFilterImage", pdf: "assetFilterPdf", document: "assetFilterDocument", other: "assetFilterOther" } as const)[filter]);
     const selector = `[data-action="filter-assets-${filter}"]`;
     click(document, selector);
-    await waitUntil(document, () => document.querySelector(selector)?.getAttribute("class")?.includes("active") === true, delay, timeout);
+    await waitUntil(document, () => document.querySelector("[data-asset-filter]")?.getAttribute("data-asset-filter") === label
+      && document.querySelector(selector)?.getAttribute("aria-pressed") === "true", delay, timeout);
   }
   return { assetId, actionCount: 17, durableReadbackCount: 5 };
 }
@@ -871,6 +1003,36 @@ function click(document: SmokeDocument, selector: string): void {
   const target = document.querySelector(selector);
   if (!(target instanceof HTMLElement) || target.hasAttribute("disabled")) throw new Error("PACKAGED_UI_ACTION_MISSING");
   target.click();
+}
+
+function focusAndClick(document: SmokeDocument, selector: string): void {
+  const target = document.querySelector(selector);
+  if (!(target instanceof HTMLButtonElement) || target.disabled) throw new Error("PACKAGED_UI_ACTION_MISSING");
+  activateButtonByKeyboard(target, () => document.querySelector(":focus") === target);
+}
+
+export function activateButtonByKeyboard(
+  target: KeyboardActivatable,
+  isFocused: () => boolean,
+  createEvent: KeyboardEventFactory = (key, options) => new KeyboardEvent("keydown", { ...options, key }),
+): void {
+  if (target.disabled) throw new Error("PACKAGED_UI_ACTION_MISSING");
+  target.focus();
+  if (!isFocused()) throw new Error("PACKAGED_UI_FOCUS_FAILED");
+  target.dispatchEvent(createEvent("Enter", { bubbles: true, cancelable: true }));
+  // Synthetic keyboard events do not trigger the browser's trusted default click.
+  target.click();
+}
+
+export function dispatchMacSaveShortcut(
+  target: EventTarget,
+  createEvent: KeyboardEventFactory = (key, options) => new KeyboardEvent("keydown", { ...options, key }),
+): void {
+  target.dispatchEvent(createEvent("s", {
+    bubbles: true,
+    cancelable: true,
+    metaKey: true,
+  }));
 }
 
 function typeTextInput(document: SmokeDocument, selector: string, value: string): void {

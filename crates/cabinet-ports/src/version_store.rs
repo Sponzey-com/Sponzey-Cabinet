@@ -1,5 +1,7 @@
 use cabinet_domain::document::{DocumentBody, DocumentId};
-use cabinet_domain::version::{DocumentSnapshotRef, VersionEntry, VersionId};
+use cabinet_domain::version::{
+    AttachmentSnapshotState, DocumentSnapshotRef, VersionEntry, VersionId,
+};
 use cabinet_domain::workspace::WorkspaceId;
 
 pub const MAX_HISTORY_PAGE_LIMIT: usize = 100;
@@ -9,6 +11,7 @@ pub struct VersionSnapshot {
     document_id: DocumentId,
     snapshot_ref: DocumentSnapshotRef,
     body: DocumentBody,
+    attachment_state: AttachmentSnapshotState,
 }
 
 impl VersionSnapshot {
@@ -17,10 +20,25 @@ impl VersionSnapshot {
         snapshot_ref: DocumentSnapshotRef,
         body: DocumentBody,
     ) -> Self {
+        Self::with_attachment_state(
+            document_id,
+            snapshot_ref,
+            body,
+            AttachmentSnapshotState::legacy_unknown(),
+        )
+    }
+
+    pub fn with_attachment_state(
+        document_id: DocumentId,
+        snapshot_ref: DocumentSnapshotRef,
+        body: DocumentBody,
+        attachment_state: AttachmentSnapshotState,
+    ) -> Self {
         Self {
             document_id,
             snapshot_ref,
             body,
+            attachment_state,
         }
     }
 
@@ -34,6 +52,10 @@ impl VersionSnapshot {
 
     pub fn body(&self) -> &DocumentBody {
         &self.body
+    }
+
+    pub fn attachment_state(&self) -> &AttachmentSnapshotState {
+        &self.attachment_state
     }
 }
 

@@ -14,6 +14,9 @@ use crate::durable_backup_package_store::{
     class_name, validate_payload_against_manifest,
 };
 use crate::local_atomic_file::write_text_atomically;
+use crate::local_create_document_revision_runtime::{
+    LOCAL_DOCUMENT_POINTER_ROOT, LOCAL_DOCUMENT_VERSION_ROOT,
+};
 
 const STATUS_FILE: &str = "status.tsv";
 
@@ -78,7 +81,7 @@ impl LocalBackupRestoreStore {
                     CURRENT_VERSION_POINTERS_PAYLOAD_DIR
                 ),
                 self.app_data_root
-                    .join("authoring-current-version")
+                    .join(LOCAL_DOCUMENT_POINTER_ROOT)
                     .join(&workspace),
             ),
             TargetSlot::replacement(
@@ -90,7 +93,7 @@ impl LocalBackupRestoreStore {
             TargetSlot::replacement(
                 class_name(BackupDataClass::VersionHistory),
                 self.app_data_root
-                    .join("authoring-versions")
+                    .join(LOCAL_DOCUMENT_VERSION_ROOT)
                     .join(&document_workspace),
             ),
             TargetSlot::replacement(
@@ -670,6 +673,7 @@ fn state_name(state: RestoreState) -> &'static str {
         RestoreState::RollbackRequired => "rollback_required",
         RestoreState::RolledBack => "rolled_back",
         RestoreState::Completed => "completed",
+        RestoreState::CleanupRequired => "cleanup_required",
         RestoreState::Cancelled => "cancelled",
         _ => "invalid",
     }
@@ -683,6 +687,7 @@ fn parse_state(value: &str) -> Result<RestoreState, BackupRestoreStoreError> {
         "rollback_required" => Ok(RestoreState::RollbackRequired),
         "rolled_back" => Ok(RestoreState::RolledBack),
         "completed" => Ok(RestoreState::Completed),
+        "cleanup_required" => Ok(RestoreState::CleanupRequired),
         "cancelled" => Ok(RestoreState::Cancelled),
         _ => Err(BackupRestoreStoreError::CorruptedOperation),
     }

@@ -27,15 +27,10 @@ fn create_and_rename_upsert_current_identity_title_and_path() {
 }
 
 #[test]
-fn delete_removes_identity_and_non_catalog_events_are_ignored() {
+fn update_upserts_current_metadata_and_delete_removes_identity() {
     let mut catalog = FakeCatalog::default();
     let usecase = ApplyDocumentLinkCatalogChangeUsecase::new();
     usecase.execute(&created(), &mut catalog).unwrap();
-    assert_eq!(
-        usecase.execute(&deleted(), &mut catalog).unwrap(),
-        DocumentLinkCatalogChangeOutcome::Removed
-    );
-    assert!(catalog.records.is_empty());
     assert_eq!(
         usecase
             .execute(
@@ -43,12 +38,20 @@ fn delete_removes_identity_and_non_catalog_events_are_ignored() {
                     workspace_id: "workspace-1".to_string(),
                     document_id: "doc-1".to_string(),
                     version_id: "version-2".to_string(),
+                    title: "Updated".to_string(),
+                    path: "notes/original.md".to_string(),
                 },
                 &mut catalog,
             )
             .unwrap(),
-        DocumentLinkCatalogChangeOutcome::Ignored
+        DocumentLinkCatalogChangeOutcome::Upserted
     );
+    assert_eq!(catalog.records[0].title().as_str(), "Updated");
+    assert_eq!(
+        usecase.execute(&deleted(), &mut catalog).unwrap(),
+        DocumentLinkCatalogChangeOutcome::Removed
+    );
+    assert!(catalog.records.is_empty());
 }
 
 #[derive(Default)]

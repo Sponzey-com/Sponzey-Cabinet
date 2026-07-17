@@ -18,6 +18,9 @@ use cabinet_ports::asset_metadata_catalog::{AssetMetadataCatalog, AssetMetadataC
 use cabinet_ports::asset_object_publisher::{AssetObjectPublishError, AssetObjectPublisher};
 use cabinet_ports::asset_staging::{AssetStagingError, AssetStagingWriter, StagedAsset};
 use cabinet_ports::document_existence::{DocumentExistenceError, DocumentExistenceReader};
+use cabinet_ports::imported_asset_document_link::{
+    ImportedAssetDocumentLinkError, ImportedAssetDocumentLinkPort,
+};
 
 pub struct StageAssetImportInput {
     workspace_id: WorkspaceId,
@@ -216,7 +219,7 @@ impl ImportAssetUsecase {
         W: AssetStagingWriter,
         P: AssetObjectPublisher,
         M: AssetMetadataCatalog,
-        A: AssetAssociationCatalog,
+        A: ImportedAssetDocumentLinkPort,
         R: AssetImportOperationRepository,
         L: ImportAssetProductLogger,
     {
@@ -348,7 +351,7 @@ impl ImportAssetUsecase {
             &input.label,
         )
         .map_err(|_| ImportAssetError::InvalidInput)?;
-        if let Err(error) = associations.link(&input.workspace_id, association) {
+        if let Err(error) = associations.link_imported_asset(&input.workspace_id, association) {
             return fail(
                 &mut operation,
                 AssetImportEvent::LinkFailed,
@@ -426,7 +429,7 @@ pub enum ImportAssetError {
     Staging(StageAssetImportError),
     Publish(AssetObjectPublishError),
     Metadata(AssetMetadataCatalogError),
-    Association(AssetAssociationCatalogError),
+    Association(ImportedAssetDocumentLinkError),
     Repository(AssetImportOperationRepositoryError),
 }
 impl ImportAssetError {

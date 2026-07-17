@@ -17,6 +17,7 @@ use cabinet_usecases::document::{
     LineDiffKind, PreviewDocumentRestoreError, PreviewDocumentRestoreInput,
     PreviewDocumentRestoreUsecase,
 };
+use cabinet_usecases::document_diff::{DiffPolicy, DocumentLineDiffService, DocumentTitleDelta};
 
 #[derive(Default)]
 struct FakeDocumentRepository {
@@ -137,14 +138,14 @@ fn preview_document_restore_returns_diff_without_writes() {
     let mut documents = FakeDocumentRepository::default();
     documents.insert(
         "workspace-1",
-        current_record("doc-1", "line 1\nline current\n"),
+        current_record("doc-1", "current title\nline current\n"),
     );
     let mut versions = FakeVersionStore::default();
     versions.insert(
         "workspace-1",
         "doc-1",
         "version-1",
-        "line 1\nline restored\n",
+        "target title\nline restored\n",
     );
     let usecase = PreviewDocumentRestoreUsecase::new();
 
@@ -172,6 +173,18 @@ fn preview_document_restore_returns_diff_without_writes() {
     );
     assert_eq!(documents.put_count.get(), 0);
     assert_eq!(versions.append_count.get(), 0);
+    let expected = DocumentLineDiffService::default().compare(
+        "current title\nline current\n",
+        "target title\nline restored\n",
+    );
+    assert_eq!(output.diff(), expected.complete().expect("complete diff"));
+    assert_eq!(
+        output.title_delta(),
+        &DocumentTitleDelta::Changed {
+            before: "current title".to_string(),
+            after: "target title".to_string(),
+        }
+    );
 }
 
 #[test]
@@ -190,6 +203,30 @@ fn preview_document_restore_reports_not_found_for_missing_target() {
         .expect_err("missing target must fail");
 
     assert_eq!(error, PreviewDocumentRestoreError::NotFound);
+}
+
+#[test]
+fn preview_document_restore_maps_sync_limit_to_the_same_stable_error() {
+    let mut documents = FakeDocumentRepository::default();
+    documents.insert("workspace-1", current_record("doc-1", "current body\n"));
+    let mut versions = FakeVersionStore::default();
+    versions.insert("workspace-1", "doc-1", "version-1", "target body\n");
+    let service =
+        DocumentLineDiffService::with_policy(DiffPolicy::new(0, 4, 10, 10).expect("small policy"));
+
+    let error = PreviewDocumentRestoreUsecase::with_diff_service(service)
+        .execute(
+            PreviewDocumentRestoreInput::new("workspace-1", "doc-1", "version-1"),
+            &documents,
+            &versions,
+        )
+        .expect_err("oversized preview");
+
+    assert_eq!(error, PreviewDocumentRestoreError::TooLarge);
+    assert_eq!(error.code(), "document.diff_too_large");
+    assert!(error.retryable());
+    assert_eq!(documents.put_count.get(), 0);
+    assert_eq!(versions.append_count.get(), 0);
 }
 
 fn current_record(document_id: &str, body: &str) -> CurrentDocumentRecord {

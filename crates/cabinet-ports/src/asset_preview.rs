@@ -38,9 +38,19 @@ pub struct AssetPreviewContent {
 
 impl AssetPreviewContent {
     pub fn new(capability: AssetPreviewCapability, media_type: String, bytes: Vec<u8>) -> Self {
-        Self { capability, media_type, bytes }
+        Self {
+            capability,
+            media_type,
+            bytes,
+        }
     }
-    pub fn capability(&self) -> AssetPreviewCapability { self.capability }
-    pub fn media_type(&self) -> &str { &self.media_type }
-    pub fn bytes(&self) -> &[u8] { &self.bytes }
+    pub fn capability(&self) -> AssetPreviewCapability {
+        self.capability
+    }
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }

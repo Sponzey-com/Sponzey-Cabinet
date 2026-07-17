@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::backup_restore::{WorkspaceReopenError, WorkspaceReopener};
 
+use crate::local_create_document_revision_runtime::{
+    LOCAL_DOCUMENT_POINTER_ROOT, LOCAL_DOCUMENT_VERSION_ROOT,
+};
+
 #[derive(Debug, Clone)]
 pub struct LocalWorkspaceReopener {
     app_data_root: PathBuf,
@@ -19,9 +23,24 @@ impl WorkspaceReopener for LocalWorkspaceReopener {
     fn reopen_workspace(&mut self, workspace_id: &WorkspaceId) -> Result<(), WorkspaceReopenError> {
         let workspace = hex(workspace_id.as_str());
         let document_workspace = encode_document_segment(workspace_id.as_str());
-        for relative in ["authoring-current", "authoring-versions"] {
-            validate_directory(&self.app_data_root.join(relative).join(&document_workspace))?;
-        }
+        validate_directory(
+            &self
+                .app_data_root
+                .join("authoring-current")
+                .join(&document_workspace),
+        )?;
+        validate_directory(
+            &self
+                .app_data_root
+                .join(LOCAL_DOCUMENT_VERSION_ROOT)
+                .join(&document_workspace),
+        )?;
+        validate_directory(
+            &self
+                .app_data_root
+                .join(LOCAL_DOCUMENT_POINTER_ROOT)
+                .join(&workspace),
+        )?;
         for relative in [
             "canvases",
             "assets/metadata",

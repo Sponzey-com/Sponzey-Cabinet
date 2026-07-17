@@ -42,6 +42,7 @@ async function main() {
     errorCount: smoke.errorCount,
     actionCount: smoke.actionCount,
     durableReadbackCount: smoke.durableReadbackCount,
+    keyboardDocumentWorkflowVerified: smoke.keyboardDocumentWorkflowVerified,
     diagnostics: "sanitized",
   };
   const validation = validatePhase013PackagedProductReport(report, sourceFingerprint);
@@ -55,6 +56,7 @@ async function main() {
   console.log(`app_fingerprint=${report.appFingerprint}`);
   console.log(`action_count=${report.actionCount}`);
   console.log(`durable_readback_count=${report.durableReadbackCount}`);
+  console.log(`keyboard_document_workflow_verified=${report.keyboardDocumentWorkflowVerified}`);
   console.log(`packaged_route_p95_ms=${report.p95Ms}`);
 }
 
@@ -81,6 +83,7 @@ function renderMarkdown(report) {
     `p95_ms=${report.p95Ms}`,
     `action_count=${report.actionCount}`,
     `durable_readback_count=${report.durableReadbackCount}`,
+    `keyboard_document_workflow_verified=${report.keyboardDocumentWorkflowVerified}`,
     "",
     "The report contains only stable journey names, counts, timings, and fingerprints. User content, filenames, absolute paths, asset bytes, and credentials are excluded.",
     "",

@@ -1,9 +1,11 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
+use cabinet_domain::asset::{AssetId, AssetReference};
 use cabinet_domain::document::{DocumentBody, DocumentBodyPolicy, DocumentId};
 use cabinet_domain::version::{
-    DocumentSnapshotRef, VersionAuthor, VersionEntry, VersionId, VersionSummary,
+    AttachmentSnapshotState, DocumentRevisionNumber, DocumentSnapshotRef, VersionAuthor,
+    VersionEntry, VersionId, VersionSummary,
 };
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::version_store::{
@@ -99,6 +101,62 @@ impl VersionStore for FakeVersionStore {
 }
 
 #[test]
+fn body_only_snapshot_is_explicitly_legacy_unknown() {
+    let snapshot = VersionSnapshot::new(
+        DocumentId::new("doc-legacy").expect("document id"),
+        DocumentSnapshotRef::new("snapshot-legacy").expect("snapshot ref"),
+        document_body("Legacy body"),
+    );
+
+    assert!(snapshot.attachment_state().is_legacy_unknown());
+    assert_eq!(snapshot.attachment_state().references(), None);
+}
+
+#[test]
+fn explicit_known_attachment_snapshot_preserves_empty_and_canonical_references() {
+    let empty = VersionSnapshot::with_attachment_state(
+        DocumentId::new("doc-empty").expect("document id"),
+        DocumentSnapshotRef::new("snapshot-empty").expect("snapshot ref"),
+        document_body("No attachments"),
+        AttachmentSnapshotState::known(Vec::new()).expect("known empty"),
+    );
+    let populated = VersionSnapshot::with_attachment_state(
+        DocumentId::new("doc-known").expect("document id"),
+        DocumentSnapshotRef::new("snapshot-known").expect("snapshot ref"),
+        document_body("Known attachments"),
+        AttachmentSnapshotState::known(vec![
+            asset_reference('b', "Second"),
+            asset_reference('a', "First"),
+        ])
+        .expect("known references"),
+    );
+
+    assert_eq!(empty.attachment_state().references(), Some(&[][..]));
+    let references = populated
+        .attachment_state()
+        .references()
+        .expect("known references");
+    assert_eq!(references[0].label(), "First");
+    assert_eq!(references[1].label(), "Second");
+}
+
+#[test]
+fn version_record_keeps_explicit_attachment_state() {
+    let attachment_state = AttachmentSnapshotState::known(vec![asset_reference('c', "Diagram")])
+        .expect("known attachment");
+    let snapshot = VersionSnapshot::with_attachment_state(
+        DocumentId::new("doc-1").expect("document id"),
+        DocumentSnapshotRef::new("snapshot-1").expect("snapshot ref"),
+        document_body("Body"),
+        attachment_state.clone(),
+    );
+    let record = VersionRecord::new(version_entry("doc-1", "version-1", "snapshot-1"), snapshot)
+        .expect("matching record");
+
+    assert_eq!(record.snapshot().attachment_state(), &attachment_state);
+}
+
+#[test]
 fn version_record_rejects_mismatched_entry_and_snapshot_identity() {
     let entry = version_entry("doc-1", "version-1", "snapshot-1");
     let snapshot = VersionSnapshot::new(
@@ -174,6 +232,43 @@ fn version_store_contract_paginates_history_without_full_history_scan() {
 }
 
 #[test]
+fn history_pagination_preserves_assigned_revision_numbers() {
+    let workspace_id = WorkspaceId::new("workspace-1").expect("workspace id");
+    let document_id = DocumentId::new("doc-1").expect("document id");
+    let entry = version_entry("doc-1", "version-1", "snapshot-1")
+        .with_revision_number(DocumentRevisionNumber::new(1).expect("revision"))
+        .expect("assign revision");
+    let record = VersionRecord::new(
+        entry,
+        VersionSnapshot::new(
+            document_id.clone(),
+            DocumentSnapshotRef::new("snapshot-1").expect("snapshot ref"),
+            document_body("Body"),
+        ),
+    )
+    .expect("record");
+    let mut store = FakeVersionStore::default();
+    store
+        .append_version(&workspace_id, record)
+        .expect("append version");
+
+    let page = store
+        .list_history(
+            &workspace_id,
+            &document_id,
+            HistoryPageRequest::first(1).expect("page request"),
+        )
+        .expect("history page");
+
+    assert_eq!(
+        page.entries()[0]
+            .revision_number()
+            .map(|number| number.value()),
+        Some(1)
+    );
+}
+
+#[test]
 fn history_page_request_rejects_invalid_page_limit() {
     assert_eq!(
         HistoryPageRequest::first(0).expect_err("zero must fail"),
@@ -215,4 +310,10 @@ fn version_entry(document_id: &str, version_id: &str, snapshot_ref: &str) -> Ver
 
 fn document_body(value: &str) -> DocumentBody {
     DocumentBody::new(value, DocumentBodyPolicy::new(1024).expect("policy")).expect("body")
+}
+
+fn asset_reference(hash_character: char, label: &str) -> AssetReference {
+    let hash = hash_character.to_string().repeat(64);
+    AssetReference::new(AssetId::from_sha256_hex(&hash).expect("asset id"), label)
+        .expect("asset reference")
 }

@@ -8,6 +8,9 @@ import {
 } from "./run_phase013_action_geometry_baseline.mjs";
 
 const routes = Object.freeze(["Home", "Search", "Document", "Graph", "Canvas", "Assets", "Backup"]);
+const viewports = Object.freeze([
+  { width: 1440, height: 900 },
+]);
 const captureProfile = Object.freeze({
   marker: "phase013_responsive_stress=recorded",
   fixtureVersion: "phase013-responsive-stress-v1",
@@ -22,11 +25,12 @@ async function main() {
     root,
     chromePath: resolveChromePath(),
     captureProfile,
-    captureViewports: Object.freeze([{ width: 1024, height: 768 }]),
+    captureViewports: viewports,
   });
   const validation = validateResponsiveStressReport(report, {
     fingerprint: report.sourceFingerprint,
     routes,
+    viewports,
   });
   if (!validation.passed) {
     const clipped = report.actions.filter((action) => action.horizontallyClipped);

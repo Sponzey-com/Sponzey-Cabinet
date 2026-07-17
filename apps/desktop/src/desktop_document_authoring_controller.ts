@@ -21,19 +21,12 @@ import {
   type DocumentSaveSideEffectRequest,
 } from "@sponzey-cabinet/ui";
 
-export interface DocumentRevisionMetadataGenerator {
-  next(
-    documentId: string,
-    revision: number,
-  ): { readonly versionId: string; readonly snapshotRef: string };
-}
-
 export interface DesktopDocumentAuthoringControllerOptions {
   readonly client: Pick<
     LocalDesktopCommandClient,
     "getCurrentDocument" | "saveDocumentRevision"
   >;
-  readonly metadataGenerator: DocumentRevisionMetadataGenerator;
+  readonly operationIdSource: () => string;
   readonly author: string;
   readonly summary: string;
   readonly autosaveDelayMs?: number;
@@ -67,7 +60,7 @@ export interface DesktopDocumentMetadataReadbackResult {
 
 export class DesktopDocumentAuthoringController {
   readonly #client: DesktopDocumentAuthoringControllerOptions["client"];
-  readonly #metadataGenerator: DocumentRevisionMetadataGenerator;
+  readonly #operationIdSource: () => string;
   readonly #author: string;
   readonly #summary: string;
   #workspaceId?: string;
@@ -77,10 +70,11 @@ export class DesktopDocumentAuthoringController {
   #coordinator: DocumentSaveCoordinatorSnapshot;
   #retryable?: boolean;
   #repairRequired?: boolean;
+  #saveOperation?: { readonly revision: number; readonly operationId: string };
 
   constructor(options: DesktopDocumentAuthoringControllerOptions) {
     this.#client = options.client;
-    this.#metadataGenerator = options.metadataGenerator;
+    this.#operationIdSource = options.operationIdSource;
     this.#author = options.author;
     this.#summary = options.summary;
     this.#coordinator = createDocumentSaveCoordinator({
@@ -108,6 +102,7 @@ export class DesktopDocumentAuthoringController {
     ).snapshot;
     this.#retryable = undefined;
     this.#repairRequired = undefined;
+    this.#saveOperation = undefined;
     return this.snapshot();
   }
 
@@ -219,6 +214,7 @@ export class DesktopDocumentAuthoringController {
       this.#editor = undefined;
       this.#retryable = undefined;
       this.#repairRequired = undefined;
+      this.#saveOperation = undefined;
     }
     return this.snapshot();
   }
@@ -251,23 +247,18 @@ export class DesktopDocumentAuthoringController {
       type: DocumentSaveCoordinatorEvent.SaveStarted,
       revision: start.command.revision,
     }).snapshot;
-    const metadata = this.#metadataGenerator.next(
-      start.command.documentId,
-      start.command.revision,
-    );
-    const command: SaveDocumentRevisionCommand = {
-      workspaceId: this.#workspaceId,
-      documentId: start.command.documentId,
-      body: start.command.body,
-      expectedVersionId: start.command.expectedVersionId ?? "",
-      nextVersionId: metadata.versionId,
-      snapshotRef: metadata.snapshotRef,
-      author: this.#author,
-      summary: this.#summary,
-      revision: start.command.revision,
-    };
-
     try {
+      const operationId = this.#operationIdForRevision(start.command.revision);
+      const command: SaveDocumentRevisionCommand = {
+        operationId,
+        workspaceId: this.#workspaceId,
+        documentId: start.command.documentId,
+        body: start.command.body,
+        expectedVersionId: start.command.expectedVersionId ?? "",
+        author: this.#author,
+        summary: this.#summary,
+        revision: start.command.revision,
+      };
       const result = await this.#client.saveDocumentRevision(command);
       if (result.revision === start.command.revision) {
         const persisted = await this.#client.getCurrentDocument({
@@ -301,6 +292,9 @@ export class DesktopDocumentAuthoringController {
       this.#coordinator = transition.snapshot;
       this.#retryable = undefined;
       this.#repairRequired = undefined;
+      if (result.revision === start.command.revision) {
+        this.#saveOperation = undefined;
+      }
       await this.#executeSideEffect(transition.sideEffect);
     } catch (error) {
       const mapped = error instanceof LocalDesktopCommandClientError
@@ -329,6 +323,18 @@ export class DesktopDocumentAuthoringController {
         }).snapshot;
       }
     }
+  }
+
+  #operationIdForRevision(revision: number): string {
+    if (this.#saveOperation?.revision === revision) {
+      return this.#saveOperation.operationId;
+    }
+    const operationId = this.#operationIdSource().trim();
+    if (!operationId) {
+      throw new LocalDesktopCommandClientError("DOCUMENT_REVISION_INVALID_INPUT", false);
+    }
+    this.#saveOperation = { revision, operationId };
+    return operationId;
   }
 }
 

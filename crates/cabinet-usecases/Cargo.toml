@@ -9,3 +9,4 @@ rust-version.workspace = true
 [dependencies]
 cabinet-domain = { path = "../cabinet-domain" }
 cabinet-ports = { path = "../cabinet-ports" }
+similar = "=3.1.1"

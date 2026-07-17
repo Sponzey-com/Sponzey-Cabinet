@@ -51,6 +51,13 @@ impl ApplyDocumentLinkCatalogChangeUsecase {
                 path,
                 ..
             } => self.upsert(workspace_id, document_id, title, path, catalog),
+            DocumentChangeEvent::DocumentUpdated {
+                workspace_id,
+                document_id,
+                title,
+                path,
+                ..
+            } => self.upsert(workspace_id, document_id, title, path, catalog),
             DocumentChangeEvent::DocumentRenamed {
                 workspace_id,
                 document_id,

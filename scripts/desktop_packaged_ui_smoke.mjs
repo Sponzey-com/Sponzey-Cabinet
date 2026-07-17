@@ -12,6 +12,9 @@ export const PackagedUiSmokeRunnerErrorCode = Object.freeze({
   PerformanceBudgetExceeded: "PHASE012_PACKAGED_UI_PERFORMANCE_BUDGET_EXCEEDED",
   UiErrorReported: "PHASE012_PACKAGED_UI_ERROR_REPORTED",
   ActionCoverageIncomplete: "PHASE012_PACKAGED_UI_ACTION_COVERAGE_INCOMPLETE",
+  DocumentVersionWorkflowMissing: "PHASE012_PACKAGED_UI_DOCUMENT_VERSION_WORKFLOW_MISSING",
+  DocumentAttachmentWorkflowMissing: "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_WORKFLOW_MISSING",
+  KeyboardDocumentWorkflowMissing: "PHASE012_PACKAGED_UI_KEYBOARD_DOCUMENT_WORKFLOW_MISSING",
 });
 
 export function analyzePackagedUiSmokeOutput(output, exitCode) {
@@ -34,6 +37,15 @@ export function analyzePackagedUiSmokeOutput(output, exitCode) {
   const errorCount = Number(values.get("error_count"));
   const actionCount = Number(values.get("action_count"));
   const durableReadbackCount = Number(values.get("durable_readback_count"));
+  if (values.get("document_version_workflow_verified") !== "true") {
+    return failed(PackagedUiSmokeRunnerErrorCode.DocumentVersionWorkflowMissing);
+  }
+  if (values.get("document_attachment_workflow_verified") !== "true") {
+    return failed(PackagedUiSmokeRunnerErrorCode.DocumentAttachmentWorkflowMissing);
+  }
+  if (values.get("keyboard_document_workflow_verified") !== "true") {
+    return failed(PackagedUiSmokeRunnerErrorCode.KeyboardDocumentWorkflowMissing);
+  }
   if (sampleCount !== 200) return failed(PackagedUiSmokeRunnerErrorCode.SampleCountInvalid);
   if (errorCount !== 0) return failed(PackagedUiSmokeRunnerErrorCode.UiErrorReported);
   if (actionCount < 15 || durableReadbackCount < 4) {
@@ -42,7 +54,15 @@ export function analyzePackagedUiSmokeOutput(output, exitCode) {
   if (!Number.isFinite(p95Ms) || p95Ms > 300) {
     return failed(PackagedUiSmokeRunnerErrorCode.PerformanceBudgetExceeded);
   }
-  return { passed: true, sampleCount, p95Ms, errorCount, actionCount, durableReadbackCount };
+  return {
+    passed: true,
+    sampleCount,
+    p95Ms,
+    errorCount,
+    actionCount,
+    durableReadbackCount,
+    keyboardDocumentWorkflowVerified: true,
+  };
 }
 
 export async function executeWithDeadline(operation, timeoutMs, terminate) {
@@ -125,10 +145,13 @@ async function writeEvidenceAtomically(path, result) {
     `error_count=${result.errorCount}`,
     `action_count=${result.actionCount}`,
     `durable_readback_count=${result.durableReadbackCount}`,
-    "surfaces=home,graph,canvas,assets",
+    "surfaces=home,document-version,document-attachment,graph,canvas,assets",
     "native_query_generation_required=true",
     "document_body_excluded=true",
     "asset_bytes_excluded=true",
+    "document_version_workflow_verified=true",
+    "document_attachment_workflow_verified=true",
+    "keyboard_document_workflow_verified=true",
     "absolute_path_excluded=true",
     "",
   ].join("\n");

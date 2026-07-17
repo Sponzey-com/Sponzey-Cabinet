@@ -306,8 +306,8 @@ impl Fixture {
         let ws = hex("workspace-1");
         for relative in [
             "authoring-current/workspace-1/document.txt".to_string(),
-            format!("authoring-current-version/{ws}/pointer.txt"),
-            "authoring-versions/workspace-1/version.txt".to_string(),
+            format!("document-current-pointers/{ws}/pointer.txt"),
+            "document-versions/workspace-1/version.txt".to_string(),
             format!("canvases/{ws}/canvas.txt"),
             format!("assets/metadata/{ws}/asset.asset"),
             format!("assets/objects/{ws}/asset.bin"),
@@ -325,8 +325,8 @@ impl Fixture {
         let ws = hex("workspace-1");
         [
             "authoring-current/workspace-1/document.txt".to_string(),
-            format!("authoring-current-version/{ws}/pointer.txt"),
-            "authoring-versions/workspace-1/version.txt".to_string(),
+            format!("document-current-pointers/{ws}/pointer.txt"),
+            "document-versions/workspace-1/version.txt".to_string(),
             format!("canvases/{ws}/canvas.txt"),
             format!("assets/metadata/{ws}/asset.asset"),
             format!("assets/objects/{ws}/asset.bin"),

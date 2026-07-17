@@ -16,11 +16,10 @@ import {
 
 const routes = Object.freeze(["Home", "Search", "Document", "Graph", "Canvas", "Assets", "Backup"]);
 const viewports = Object.freeze([
-  { width: 1024, height: 768 },
-  { width: 1280, height: 800 },
   { width: 1440, height: 900 },
-  { width: 1728, height: 1117 },
-  { width: 1920, height: 1080 },
+  { width: 1180, height: 800 },
+  { width: 960, height: 720 },
+  { width: 760, height: 640 },
 ]);
 
 export async function runPhase013ActionGeometryBaseline({

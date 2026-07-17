@@ -18,7 +18,7 @@ fn catalog_lists_stable_document_and_current_version_identities() {
         )
         .unwrap();
         let pointer = root
-            .join("authoring-current-version")
+            .join("document-current-pointers")
             .join(&workspace)
             .join(hex(document))
             .join("current.pointer");

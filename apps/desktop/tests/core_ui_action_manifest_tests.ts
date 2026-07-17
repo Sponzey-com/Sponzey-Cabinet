@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import React from "react";
 
@@ -20,6 +21,16 @@ test("core action manifest has unique complete contracts and explicit hidden fut
     assert.equal(entry?.availability, "hidden_out_of_scope");
     assert.match(entry?.hiddenReasonKey ?? "", /^[A-Z0-9_]+$/);
   }
+  assert.equal(
+    CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "load-more-history")?.durability,
+    "readback",
+  );
+  assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "select-history-version")?.boundary, "view_state");
+  assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "previous-history-window")?.boundary, "view_state");
+  assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "next-history-window")?.boundary, "view_state");
+  assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "compare-selected-versions")?.durability, "readback");
+  assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "cancel-background-document-diff")?.boundary, "native_command");
+  assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "retry-background-document-diff")?.durability, "readback");
 });
 
 test("React action collector records callback and disabled state and flags missing action identity", () => {
@@ -40,4 +51,25 @@ test("React action collector records callback and disabled state and flags missi
       .map((issue) => issue.code),
     ["RENDERED_CONTROL_ACTION_ID_MISSING"],
   );
+});
+
+test("core manifest classifies every document attachment action", async () => {
+  const source = await readFile(new URL("../src/react_document_attachment_panel.ts", import.meta.url), "utf8");
+  const rendered = [...source.matchAll(/"data-action": "([a-z0-9-]+)"/g)].map((match) => match[1]);
+  const byId = new Map(CORE_UI_ACTION_MANIFEST.map((entry) => [entry.actionId, entry]));
+
+  assert.deepEqual([...new Set(rendered)].filter((actionId) => !byId.has(actionId)), []);
+  assert.equal(byId.get("open-document-asset-library")?.boundary, "route");
+  assert.equal(byId.get("close-document-asset-preview")?.boundary, "view_state");
+  assert.equal(byId.get("import-document-asset")?.durability, "reopen");
+  assert.equal(byId.get("unlink-document-asset")?.boundary, "view_state");
+  assert.equal(byId.get("confirm-document-asset-unlink")?.durability, "reopen");
+  assert.equal(byId.get("preview-document-asset")?.durability, "readback");
+  for (const actionId of [
+    "select-document-inspector-links",
+    "select-document-inspector-attachments",
+    "select-document-inspector-history",
+    "cancel-document-asset-unlink",
+    "confirm-document-asset-unlink",
+  ]) assert.ok(byId.has(actionId), actionId);
 });

@@ -5,18 +5,28 @@ const routeActions = [
   "navigate-assets", "navigate-backup", "open-sidebar-document", "open-recent-document",
   "home-open-all-documents", "home-open-graph", "open-navigator-document", "authoring-home",
   "open-authoring-graph", "open-linked-authoring-document",
+  "open-document-asset-library",
 ] as const;
 const viewActions = [
   "navigator-search-field", "navigator-view-tree", "navigator-view-collection", "navigator-view-tag",
   "navigator-view-recent", "navigator-view-favorite", "authoring-mode-source",
   "edit-document-body", "authoring-mode-split", "authoring-mode-preview", "cancel-backup", "cancel-backup-restore",
   "cancel-authoring-recovery",
+  "close-document-asset-preview", "select-document-inspector-links",
+  "select-document-inspector-attachments", "select-document-inspector-history",
+  "unlink-document-asset", "cancel-document-asset-unlink", "select-history-version",
+  "previous-history-window", "next-history-window",
 ] as const;
 const commandActions = [
-  "new-document", "retry-workspace-home", "retry-navigator", "save-document", "load-history",
+  "new-document", "retry-workspace-home", "retry-navigator", "save-document", "load-history", "load-more-history", "compare-selected-versions",
   "preview-restore", "apply-restore", "create-backup", "retry-backup-recovery",
   "preview-backup-restore", "confirm-backup-restore", "retry-authoring-save",
   "discard-authoring-changes",
+  "import-document-asset", "retry-document-asset-import", "cancel-document-asset-import",
+  "retry-document-assets", "select-document-asset", "preview-document-asset",
+  "retry-document-asset-preview", "confirm-document-asset-unlink",
+  "open-document-asset-externally",
+  "cancel-background-document-diff", "retry-background-document-diff",
 ] as const;
 
 export const CORE_UI_ACTION_MANIFEST: readonly UiActionContract[] = Object.freeze([
@@ -66,7 +76,7 @@ function hidden(actionId: string): UiActionContract {
 }
 
 function mutationDurability(actionId: string): UiActionDurability {
-  if (["new-document", "save-document", "apply-restore", "create-backup", "confirm-backup-restore"].includes(actionId)) return "reopen";
-  if (["load-history", "preview-restore", "preview-backup-restore"].includes(actionId)) return "readback";
+  if (["new-document", "save-document", "apply-restore", "create-backup", "confirm-backup-restore", "import-document-asset", "confirm-document-asset-unlink"].includes(actionId)) return "reopen";
+  if (["load-history", "load-more-history", "compare-selected-versions", "preview-restore", "preview-backup-restore", "retry-document-assets", "select-document-asset", "preview-document-asset", "retry-document-asset-preview", "open-document-asset-externally", "retry-background-document-diff"].includes(actionId)) return "readback";
   return "none";
 }

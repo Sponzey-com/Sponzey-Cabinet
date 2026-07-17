@@ -94,7 +94,11 @@ impl DocumentTitle {
     }
 
     pub fn from_markdown_body(body: &DocumentBody) -> Self {
-        let first_line = body.as_str().lines().next().unwrap_or_default().trim();
+        Self::from_markdown_text(body.as_str())
+    }
+
+    pub fn from_markdown_text(markdown: &str) -> Self {
+        let first_line = markdown.lines().next().unwrap_or_default().trim();
         let without_heading = first_line
             .trim_start_matches('#')
             .trim()
@@ -102,7 +106,13 @@ impl DocumentTitle {
             .trim();
         let sanitized = without_heading
             .chars()
-            .map(|character| if character.is_control() { ' ' } else { character })
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
             .collect::<String>();
         let bounded = sanitized
             .trim()

@@ -15,10 +15,16 @@ export function presentDocumentHistory(
 ): readonly DocumentHistoryEntryDisplay[] {
   return entries.map((entry, index) => ({
     versionId: entry.versionId,
-    versionLabel: `버전 ${index + 1}`,
+    versionLabel: `버전 ${presentRevisionNumber(entry.revisionNumber, index)}`,
     createdAtLabel: presentCreatedAt(entry.createdAt, formatDate),
     summaryLabel: presentSummary(entry.summary),
   }));
+}
+
+function presentRevisionNumber(revisionNumber: number | undefined, index: number): number {
+  return Number.isSafeInteger(revisionNumber) && (revisionNumber ?? 0) > 0
+    ? revisionNumber as number
+    : index + 1;
 }
 
 export function createKoKrHistoryDateFormatter(): DocumentHistoryDateFormatter {

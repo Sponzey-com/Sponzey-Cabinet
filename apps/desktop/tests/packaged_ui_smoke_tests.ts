@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   PackagedUiSmokeState,
+  activateButtonByKeyboard,
+  dispatchMacSaveShortcut,
   nearestRankP95,
   runPackagedUiSmoke,
   transitionPackagedUiSmoke,
@@ -30,6 +32,41 @@ test("packaged document input crosses the CodeMirror transaction event boundary"
   assert.deepEqual(received, { body: "# Durable packaged content" });
 });
 
+test("packaged keyboard helpers require focus and emit the macOS save shortcut", () => {
+  const events: Array<{ readonly key: string; readonly metaKey: boolean }> = [];
+  let focused = false;
+  let clicked = 0;
+  const createEvent = (key: string, options: KeyboardEventInit) => Object.assign(
+    new Event("keydown", { bubbles: options.bubbles, cancelable: options.cancelable }),
+    { key, metaKey: options.metaKey ?? false },
+  );
+  const button = {
+    disabled: false,
+    focus() { focused = true; },
+    click() { clicked += 1; },
+    dispatchEvent(event: Event) {
+      events.push({ key: (event as KeyboardEvent).key, metaKey: (event as KeyboardEvent).metaKey });
+      return true;
+    },
+  };
+  activateButtonByKeyboard(button, () => focused, createEvent);
+  const shortcutTarget = new EventTarget();
+  shortcutTarget.addEventListener("keydown", (event) => {
+    events.push({ key: (event as KeyboardEvent).key, metaKey: (event as KeyboardEvent).metaKey });
+  });
+  dispatchMacSaveShortcut(shortcutTarget, createEvent);
+  assert.equal(clicked, 1);
+  assert.deepEqual(events, [
+    { key: "Enter", metaKey: false },
+    { key: "s", metaKey: true },
+  ]);
+
+  assert.throws(
+    () => activateButtonByKeyboard(button, () => false, createEvent),
+    /PACKAGED_UI_FOCUS_FAILED/,
+  );
+});
+
 test("document reopen waits for the asynchronously refreshed recent-document action", async () => {
   let attempts = 0;
   await waitForSelector(
@@ -55,12 +92,16 @@ test("packaged smoke follows the explicit terminal state sequence", () => {
   assert.equal(state, PackagedUiSmokeState.DocumentSaved);
   state = transitionPackagedUiSmoke(state, "document_reopened");
   assert.equal(state, PackagedUiSmokeState.DocumentReopened);
+  state = transitionPackagedUiSmoke(state, "document_version_verified");
+  assert.equal(state, PackagedUiSmokeState.DocumentVersionWorkflowVerified);
   state = transitionPackagedUiSmoke(state, "graph_actions_verified");
   assert.equal(state, PackagedUiSmokeState.GraphActionsVerified);
   state = transitionPackagedUiSmoke(state, "canvas_mutations_verified");
   assert.equal(state, PackagedUiSmokeState.CanvasMutationsVerified);
   state = transitionPackagedUiSmoke(state, "asset_actions_verified");
   assert.equal(state, PackagedUiSmokeState.AssetActionsVerified);
+  state = transitionPackagedUiSmoke(state, "document_attachment_verified");
+  assert.equal(state, PackagedUiSmokeState.DocumentAttachmentWorkflowVerified);
   state = transitionPackagedUiSmoke(state, "cross_surface_verified");
   assert.equal(state, PackagedUiSmokeState.CrossSurfaceVerified);
   state = transitionPackagedUiSmoke(state, "backup_restore_verified");

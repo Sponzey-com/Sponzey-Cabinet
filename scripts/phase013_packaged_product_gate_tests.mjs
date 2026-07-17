@@ -9,6 +9,15 @@ test("complete clean-profile packaged journey passes", () => {
   assert.deepEqual(validatePhase013PackagedProductReport(validReport(), fingerprint), { passed: true, findingIds: [] });
 });
 
+test("keyboard document workflow evidence is mandatory", () => {
+  const missing = validReport();
+  delete missing.keyboardDocumentWorkflowVerified;
+  assert.ok(validatePhase013PackagedProductReport(missing, fingerprint).findingIds.includes("keyboard_document_workflow"));
+  const failed = validReport();
+  failed.keyboardDocumentWorkflowVerified = false;
+  assert.ok(validatePhase013PackagedProductReport(failed, fingerprint).findingIds.includes("keyboard_document_workflow"));
+});
+
 test("stale incomplete slow and sensitive packaged evidence fails", () => {
   const report = validReport();
   report.sourceFingerprint = "b".repeat(64);
@@ -34,6 +43,7 @@ function validReport() {
     errorCount: 0,
     actionCount: 40,
     durableReadbackCount: 12,
+    keyboardDocumentWorkflowVerified: true,
     diagnostics: "sanitized",
   };
 }

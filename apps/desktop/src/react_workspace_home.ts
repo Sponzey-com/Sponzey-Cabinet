@@ -11,6 +11,7 @@ export interface DesktopWorkspaceHomeElementOptions {
   readonly onRetry?: () => void;
   readonly onCreateDocument?: () => void;
   readonly onOpenNavigator?: () => void;
+  readonly onResumeDocument?: () => void;
   readonly onOpenGraph?: () => void;
   readonly onOpenCanvas?: () => void;
   readonly onOpenAssets?: () => void;
@@ -28,7 +29,7 @@ export function createDesktopWorkspaceHomeElement(
   return createWorkspaceShellElement({
     model: createWorkspaceShellModel({ route: "Home", availableActions: shellRoutes, messages: KO_KR_MESSAGES }),
     messages: KO_KR_MESSAGES,
-    routeActions: { Search: options.onOpenNavigator, Document: options.onOpenNavigator, Graph: options.onOpenGraph, Canvas: options.onOpenCanvas, Assets: options.onOpenAssets, Backup: options.onOpenBackup },
+    routeActions: { Search: options.onOpenNavigator, Document: options.onResumeDocument, Graph: options.onOpenGraph, Canvas: options.onOpenCanvas, Assets: options.onOpenAssets, Backup: options.onOpenBackup },
     rootAttributes: { "data-cabinet-home-state": model.displayState },
     onCreateDocument: options.onCreateDocument,
     onSearch: options.onOpenNavigator,

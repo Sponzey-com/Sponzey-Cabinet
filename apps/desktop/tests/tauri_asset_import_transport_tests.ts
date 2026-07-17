@@ -45,29 +45,61 @@ test("asset import transport invokes typed path-free command and validates compl
     documentId: "doc-1",
     handle: "picker:1",
     label: "Design",
+    attachmentOperationId: "attachment-import-1",
+    expectedCurrentVersionToken: "version-current",
   });
 
   assert.equal(result.state, "completed");
   assert.deepEqual(received, {
     commandName: "import_desktop_asset",
-    request: { request: { workspaceId: "workspace-1", documentId: "doc-1", handle: "picker:1", label: "Design" } },
+    request: { request: { workspaceId: "workspace-1", documentId: "doc-1", handle: "picker:1", label: "Design", attachmentOperationId: "attachment-import-1", expectedCurrentVersionToken: "version-current" } },
   });
   assert.equal(JSON.stringify(received).includes("path"), false);
 });
 
 test("asset import transport rejects malformed and native failure responses safely", async () => {
-  const failed = createTauriAssetImportTransport(async () => ({ ok: false, state: "failed", errorCode: "asset_import.read_unavailable", retryable: true }));
+  const failed = createTauriAssetImportTransport(async () => ({
+    ok: false,
+    state: "failed",
+    errorCode: "asset_import.read_unavailable",
+    retryable: true,
+    repairRequired: true,
+  }));
   await assert.rejects(
-    () => failed.importFile({ workspaceId: "workspace-1", documentId: "doc-1", handle: "picker:1", label: "File" }),
+    () => failed.importFile({ workspaceId: "workspace-1", documentId: "doc-1", handle: "picker:1", label: "File", attachmentOperationId: "attachment-import-2", expectedCurrentVersionToken: "version-current" }),
     (error: unknown) => error instanceof DesktopAssetImportTransportError
-      && error.code === "asset_import.read_unavailable" && error.retryable,
+      && error.code === "asset_import.read_unavailable" && error.retryable && error.repairRequired,
   );
 
   const malformed = createTauriAssetImportTransport(async () => ({ ok: true, operationId: "operation", assetId: "/private/source.pdf", state: "completed" }));
   await assert.rejects(
-    () => malformed.importFile({ workspaceId: "workspace-1", documentId: "doc-1", handle: "picker:1", label: "File" }),
+    () => malformed.importFile({ workspaceId: "workspace-1", documentId: "doc-1", handle: "picker:1", label: "File", attachmentOperationId: "attachment-import-3", expectedCurrentVersionToken: "version-current" }),
     (error: unknown) => error instanceof DesktopAssetImportTransportError
       && error.code === "COMMAND_BRIDGE_FAILED" && !String(error).includes("/private"),
+  );
+});
+
+test("asset attachment mutation transport preserves native recovery flags", async () => {
+  const client = createTauriAssetImportTransport(async () => ({
+    ok: false,
+    errorCode: "attachment_projection_recovery_required",
+    retryable: true,
+    repairRequired: true,
+  }));
+
+  await assert.rejects(
+    () => client.link({
+      workspaceId: "workspace-1",
+      documentId: "doc-1",
+      assetId: "a".repeat(64),
+      label: "Spec",
+      operationId: "link-1",
+      expectedCurrentVersionToken: "current-version",
+    }),
+    (error: unknown) => error instanceof DesktopAssetImportTransportError
+      && error.code === "attachment_projection_recovery_required"
+      && error.retryable
+      && error.repairRequired,
   );
 });
 
@@ -80,14 +112,14 @@ test("asset lifecycle transport maps detail and unlink without object path or by
       data: { assetId: "a".repeat(64), fileName: "spec.pdf", mediaType: "application/pdf", byteSize: 42, version: 1, previewCapability: "pdf", extractionStatus: "not_requested", referenceCount: 1, linkedDocumentIds: ["doc-1"] },
       retryable: false,
     };
-    return { ok: true, removed: true, remainingReferences: 0, retryable: false };
+    return { ok: true, outcome: "fresh", delta: "unlinked", revisionNumber: 2, retryable: false, repairRequired: false };
   });
 
   const detail = await client.getDetail({ workspaceId: "workspace-1", assetId: "a".repeat(64) });
-  const unlink = await client.unlink({ workspaceId: "workspace-1", documentId: "doc-1", assetId: "a".repeat(64) });
+  const unlink = await client.unlink({ workspaceId: "workspace-1", documentId: "doc-1", assetId: "a".repeat(64), operationId: "unlink-1", expectedCurrentVersionToken: "version-current" });
 
   assert.equal(detail.previewCapability, "pdf");
-  assert.equal(unlink.removed, true);
+  assert.equal(unlink.delta, "unlinked");
   assert.deepEqual(commands, ["get_desktop_asset_detail", "unlink_desktop_asset"]);
   assert.equal(JSON.stringify({ detail, unlink }).includes("path"), false);
 });
@@ -97,7 +129,7 @@ test("asset import transport accepts immediate operation and reads durable statu
     ? { ok: true, operationId: "operation-1", state: "selected", retryable: false }
     : { ok: true, operationId: "operation-1", state: "completed", retryable: false });
 
-  const started = await client.importFile({ workspaceId: "workspace-1", documentId: "doc-1", handle: "picker:1", label: "File" });
+  const started = await client.importFile({ workspaceId: "workspace-1", documentId: "doc-1", handle: "picker:1", label: "File", attachmentOperationId: "attachment-import-4", expectedCurrentVersionToken: "version-current" });
   const status = await client.getImportStatus({ workspaceId: "workspace-1", operationId: started.operationId });
 
   assert.equal(started.state, "selected");
@@ -117,15 +149,15 @@ test("asset transport maps workspace page and existing link through typed comman
       },
       retryable: false,
     };
-    return { ok: true, linked: true, referenceCount: 2, retryable: false };
+    return { ok: true, outcome: "fresh", delta: "linked", revisionNumber: 2, retryable: false, repairRequired: false };
   });
 
   const page = await client.listWorkspaceAssets({ workspaceId: "workspace-1", limit: 50 });
-  const linked = await client.link({ workspaceId: "workspace-1", documentId: "doc-2", assetId: "a".repeat(64), label: "Spec" });
+  const linked = await client.link({ workspaceId: "workspace-1", documentId: "doc-2", assetId: "a".repeat(64), label: "Spec", operationId: "link-1", expectedCurrentVersionToken: "version-current" });
 
   assert.equal(page.assets[0]?.fileName, "spec.pdf");
   assert.equal(page.nextCursor, "b".repeat(64));
-  assert.equal(linked.referenceCount, 2);
+  assert.equal(linked.revisionNumber, 2);
   assert.deepEqual(commands, ["get_desktop_workspace_assets", "link_desktop_asset"]);
   assert.equal(JSON.stringify({ page, linked }).includes("path"), false);
 });
@@ -155,4 +187,32 @@ test("asset preview transport accepts bounded presentation and rejects path-bear
 
   const unsafe = createTauriAssetImportTransport(async () => ({ ok: true, data: { assetId, capability: "text", mediaType: "text/plain", presentation: "text", content: "preview", path: "/private/file" } }));
   await assert.rejects(() => unsafe.getPreview({ workspaceId: "workspace-1", assetId }), (error: unknown) => error instanceof DesktopAssetImportTransportError && !String(error).includes("/private"));
+});
+
+test("asset external open transport uses a path-free command and rejects unsafe responses", async () => {
+  const assetId = "a".repeat(64);
+  let received: unknown;
+  const client = createTauriAssetImportTransport(async (command, payload) => {
+    received = { command, payload };
+    return { ok: true, opened: true, retryable: false };
+  });
+
+  assert.deepEqual(await client.openExternal({ workspaceId: "workspace-1", assetId }), { opened: true });
+  assert.deepEqual(received, {
+    command: "open_desktop_asset_externally",
+    payload: { request: { workspaceId: "workspace-1", assetId } },
+  });
+  assert.equal(JSON.stringify(received).includes("path"), false);
+
+  const unsafe = createTauriAssetImportTransport(async () => ({
+    ok: true,
+    opened: true,
+    path: "/private/object.bin",
+  }));
+  await assert.rejects(
+    () => unsafe.openExternal({ workspaceId: "workspace-1", assetId }),
+    (error: unknown) => error instanceof DesktopAssetImportTransportError
+      && error.code === "COMMAND_BRIDGE_FAILED"
+      && !String(error).includes("/private"),
+  );
 });

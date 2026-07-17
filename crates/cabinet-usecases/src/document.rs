@@ -1,9 +1,15 @@
+use crate::document_diff::{DiffComputation, DocumentLineDiffService};
+pub use crate::document_diff::{
+    DiffHunk, DocumentDiffResult, DocumentTitleDelta, LineDiff, LineDiffKind,
+};
+use crate::document_diff_query::{ExecuteDocumentDiffQueryError, ExecuteDocumentDiffQueryUsecase};
 use cabinet_domain::asset::{
     AssetFileName, AssetId, AssetMediaType, AssetMetadata, AssetReference,
 };
 use cabinet_domain::document::{
     DocumentBody, DocumentBodyPolicy, DocumentId, DocumentMetadata, DocumentPath, DocumentTitle,
 };
+use cabinet_domain::document_diff_query::DocumentDiffQueryTarget;
 use cabinet_domain::version::{
     CurrentDocumentSnapshot, DocumentSnapshotRef, VersionAuthor, VersionEntry, VersionId,
     VersionSummary,
@@ -93,6 +99,8 @@ pub enum DocumentChangeEvent {
         workspace_id: String,
         document_id: String,
         version_id: String,
+        title: String,
+        path: String,
     },
     DocumentRenamed {
         workspace_id: String,
@@ -571,48 +579,71 @@ impl CompareDocumentVersionsInput {
             right_version_id: right_version_id.to_string(),
         }
     }
+
+    fn into_target(self) -> Result<DocumentDiffQueryTarget, CompareDocumentVersionsError> {
+        match self {
+            Self::CurrentToVersion {
+                workspace_id,
+                document_id,
+                version_id,
+            } => DocumentDiffQueryTarget::current_to_version(
+                &workspace_id,
+                &document_id,
+                &version_id,
+            ),
+            Self::Versions {
+                workspace_id,
+                document_id,
+                left_version_id,
+                right_version_id,
+            } => DocumentDiffQueryTarget::versions(
+                &workspace_id,
+                &document_id,
+                &left_version_id,
+                &right_version_id,
+            ),
+        }
+        .map_err(|_| CompareDocumentVersionsError::InvalidInput)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompareDocumentVersionsOutput {
-    lines: Vec<LineDiff>,
+    diff: DocumentDiffResult,
 }
 
 impl CompareDocumentVersionsOutput {
     pub fn lines(&self) -> &[LineDiff] {
-        &self.lines
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LineDiff {
-    kind: LineDiffKind,
-    text: String,
-}
-
-impl LineDiff {
-    pub fn kind(&self) -> LineDiffKind {
-        self.kind
+        self.diff.lines()
     }
 
-    pub fn text(&self) -> &str {
-        &self.text
+    pub fn hunks(&self) -> &[DiffHunk] {
+        self.diff.hunks()
+    }
+
+    pub fn diff(&self) -> &DocumentDiffResult {
+        &self.diff
+    }
+
+    pub fn title_delta(&self) -> &DocumentTitleDelta {
+        self.diff.title_delta()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineDiffKind {
-    Equal,
-    Added,
-    Removed,
+pub struct CompareDocumentVersionsUsecase {
+    executor: ExecuteDocumentDiffQueryUsecase,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CompareDocumentVersionsUsecase;
 
 impl CompareDocumentVersionsUsecase {
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self::with_diff_service(DocumentLineDiffService::default())
+    }
+
+    pub const fn with_diff_service(diff_service: DocumentLineDiffService) -> Self {
+        Self {
+            executor: ExecuteDocumentDiffQueryUsecase::with_diff_service(diff_service),
+        }
     }
 
     pub fn execute(
@@ -621,64 +652,15 @@ impl CompareDocumentVersionsUsecase {
         document_repository: &impl DocumentRepository,
         version_store: &impl VersionStore,
     ) -> Result<CompareDocumentVersionsOutput, CompareDocumentVersionsError> {
-        let (left_body, right_body) = match input {
-            CompareDocumentVersionsInput::CurrentToVersion {
-                workspace_id,
-                document_id,
-                version_id,
-            } => {
-                let workspace_id = WorkspaceId::new(&workspace_id)
-                    .map_err(|_| CompareDocumentVersionsError::InvalidInput)?;
-                let document_id = DocumentId::new(&document_id)
-                    .map_err(|_| CompareDocumentVersionsError::InvalidInput)?;
-                let version_id = VersionId::new(&version_id)
-                    .map_err(|_| CompareDocumentVersionsError::InvalidInput)?;
-
-                let current = document_repository
-                    .get_current_by_id(&workspace_id, &document_id)
-                    .map_err(CompareDocumentVersionsError::from_document_repository_error)?
-                    .ok_or(CompareDocumentVersionsError::NotFound)?;
-                let version = version_store
-                    .get_version_snapshot(&workspace_id, &document_id, &version_id)
-                    .map_err(CompareDocumentVersionsError::from_version_store_error)?
-                    .ok_or(CompareDocumentVersionsError::NotFound)?;
-                (
-                    current.body().as_str().to_string(),
-                    version.body().as_str().to_string(),
-                )
-            }
-            CompareDocumentVersionsInput::Versions {
-                workspace_id,
-                document_id,
-                left_version_id,
-                right_version_id,
-            } => {
-                let workspace_id = WorkspaceId::new(&workspace_id)
-                    .map_err(|_| CompareDocumentVersionsError::InvalidInput)?;
-                let document_id = DocumentId::new(&document_id)
-                    .map_err(|_| CompareDocumentVersionsError::InvalidInput)?;
-                let left_version_id = VersionId::new(&left_version_id)
-                    .map_err(|_| CompareDocumentVersionsError::InvalidInput)?;
-                let right_version_id = VersionId::new(&right_version_id)
-                    .map_err(|_| CompareDocumentVersionsError::InvalidInput)?;
-                let left = version_store
-                    .get_version_snapshot(&workspace_id, &document_id, &left_version_id)
-                    .map_err(CompareDocumentVersionsError::from_version_store_error)?
-                    .ok_or(CompareDocumentVersionsError::NotFound)?;
-                let right = version_store
-                    .get_version_snapshot(&workspace_id, &document_id, &right_version_id)
-                    .map_err(CompareDocumentVersionsError::from_version_store_error)?
-                    .ok_or(CompareDocumentVersionsError::NotFound)?;
-                (
-                    left.body().as_str().to_string(),
-                    right.body().as_str().to_string(),
-                )
-            }
-        };
-
-        Ok(CompareDocumentVersionsOutput {
-            lines: line_diff(&left_body, &right_body),
-        })
+        let target = input.into_target()?;
+        match self
+            .executor
+            .execute(&target, document_repository, version_store)
+            .map_err(CompareDocumentVersionsError::from_executor_error)?
+        {
+            DiffComputation::Complete(diff) => Ok(CompareDocumentVersionsOutput { diff }),
+            DiffComputation::TooLarge(_) => Err(CompareDocumentVersionsError::TooLarge),
+        }
     }
 }
 
@@ -692,6 +674,7 @@ impl Default for CompareDocumentVersionsUsecase {
 pub enum CompareDocumentVersionsError {
     InvalidInput,
     NotFound,
+    TooLarge,
     StorageUnavailable,
 }
 
@@ -700,72 +683,21 @@ impl CompareDocumentVersionsError {
         match self {
             Self::InvalidInput => "document.invalid_input",
             Self::NotFound => "document.diff_target_not_found",
+            Self::TooLarge => "document.diff_too_large",
             Self::StorageUnavailable => "document.storage_unavailable",
         }
     }
 
-    fn from_document_repository_error(error: DocumentRepositoryError) -> Self {
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::TooLarge | Self::StorageUnavailable)
+    }
+
+    fn from_executor_error(error: ExecuteDocumentDiffQueryError) -> Self {
         match error {
-            DocumentRepositoryError::StorageUnavailable
-            | DocumentRepositoryError::CorruptedMetadata
-            | DocumentRepositoryError::MismatchedDocumentIdentity
-            | DocumentRepositoryError::Conflict => Self::StorageUnavailable,
+            ExecuteDocumentDiffQueryError::NotFound => Self::NotFound,
+            ExecuteDocumentDiffQueryError::StorageUnavailable => Self::StorageUnavailable,
         }
     }
-
-    fn from_version_store_error(error: VersionStoreError) -> Self {
-        match error {
-            VersionStoreError::StorageUnavailable
-            | VersionStoreError::CorruptedHistory
-            | VersionStoreError::InvalidHistoryCursor
-            | VersionStoreError::InvalidHistoryPageLimit
-            | VersionStoreError::MismatchedVersionSnapshot
-            | VersionStoreError::Conflict => Self::StorageUnavailable,
-        }
-    }
-}
-
-fn line_diff(left: &str, right: &str) -> Vec<LineDiff> {
-    let left_lines: Vec<&str> = left.lines().collect();
-    let right_lines: Vec<&str> = right.lines().collect();
-    let mut lines = Vec::new();
-    let max_len = usize::max(left_lines.len(), right_lines.len());
-
-    for index in 0..max_len {
-        match (left_lines.get(index), right_lines.get(index)) {
-            (Some(left_line), Some(right_line)) if left_line == right_line => {
-                lines.push(LineDiff {
-                    kind: LineDiffKind::Equal,
-                    text: (*left_line).to_string(),
-                });
-            }
-            (Some(left_line), Some(right_line)) => {
-                lines.push(LineDiff {
-                    kind: LineDiffKind::Removed,
-                    text: (*left_line).to_string(),
-                });
-                lines.push(LineDiff {
-                    kind: LineDiffKind::Added,
-                    text: (*right_line).to_string(),
-                });
-            }
-            (Some(left_line), None) => {
-                lines.push(LineDiff {
-                    kind: LineDiffKind::Removed,
-                    text: (*left_line).to_string(),
-                });
-            }
-            (None, Some(right_line)) => {
-                lines.push(LineDiff {
-                    kind: LineDiffKind::Added,
-                    text: (*right_line).to_string(),
-                });
-            }
-            (None, None) => {}
-        }
-    }
-
-    lines
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -789,7 +721,7 @@ impl PreviewDocumentRestoreInput {
 pub struct PreviewDocumentRestoreOutput {
     target_version_id: VersionId,
     can_restore: bool,
-    lines: Vec<LineDiff>,
+    diff: DocumentDiffResult,
 }
 
 impl PreviewDocumentRestoreOutput {
@@ -802,16 +734,34 @@ impl PreviewDocumentRestoreOutput {
     }
 
     pub fn lines(&self) -> &[LineDiff] {
-        &self.lines
+        self.diff.lines()
+    }
+
+    pub fn hunks(&self) -> &[DiffHunk] {
+        self.diff.hunks()
+    }
+
+    pub fn diff(&self) -> &DocumentDiffResult {
+        &self.diff
+    }
+
+    pub fn title_delta(&self) -> &DocumentTitleDelta {
+        self.diff.title_delta()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PreviewDocumentRestoreUsecase;
+pub struct PreviewDocumentRestoreUsecase {
+    diff_service: DocumentLineDiffService,
+}
 
 impl PreviewDocumentRestoreUsecase {
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self::with_diff_service(DocumentLineDiffService::default())
+    }
+
+    pub const fn with_diff_service(diff_service: DocumentLineDiffService) -> Self {
+        Self { diff_service }
     }
 
     pub fn execute(
@@ -836,11 +786,17 @@ impl PreviewDocumentRestoreUsecase {
             .map_err(PreviewDocumentRestoreError::from_version_store_error)?
             .ok_or(PreviewDocumentRestoreError::NotFound)?;
 
-        Ok(PreviewDocumentRestoreOutput {
-            target_version_id,
-            can_restore: true,
-            lines: line_diff(current.body().as_str(), target.body().as_str()),
-        })
+        match self
+            .diff_service
+            .compare(current.body().as_str(), target.body().as_str())
+        {
+            DiffComputation::Complete(diff) => Ok(PreviewDocumentRestoreOutput {
+                target_version_id,
+                can_restore: true,
+                diff,
+            }),
+            DiffComputation::TooLarge(_) => Err(PreviewDocumentRestoreError::TooLarge),
+        }
     }
 }
 
@@ -854,6 +810,7 @@ impl Default for PreviewDocumentRestoreUsecase {
 pub enum PreviewDocumentRestoreError {
     InvalidInput,
     NotFound,
+    TooLarge,
     StorageUnavailable,
 }
 
@@ -862,8 +819,13 @@ impl PreviewDocumentRestoreError {
         match self {
             Self::InvalidInput => "document.invalid_input",
             Self::NotFound => "document.restore_target_not_found",
+            Self::TooLarge => "document.diff_too_large",
             Self::StorageUnavailable => "document.storage_unavailable",
         }
+    }
+
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::TooLarge | Self::StorageUnavailable)
     }
 
     fn from_document_repository_error(error: DocumentRepositoryError) -> Self {
@@ -1314,6 +1276,8 @@ impl UpdateDocumentUsecase {
                     write_update_failure(product_logger, error);
                     error
                 })?;
+        let updated_title = current_record.metadata().title().as_str().to_string();
+        let updated_path = current_record.path().as_str().to_string();
         document_repository
             .put_current(&command.workspace_id, current_record)
             .map_err(UpdateDocumentError::from_document_repository_error)
@@ -1326,6 +1290,8 @@ impl UpdateDocumentUsecase {
             workspace_id: command.workspace_id.as_str().to_string(),
             document_id: command.document_id.as_str().to_string(),
             version_id: command.version_id.as_str().to_string(),
+            title: updated_title,
+            path: updated_path,
         });
         product_logger.write_product(CreateDocumentProductEvent::DocumentUpdated {
             document_id: command.document_id.as_str().to_string(),

@@ -11,8 +11,8 @@ use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::asset_metadata_catalog::{
     AssetMetadataCatalog, AssetMetadataCatalogError, AssetMetadataPage, AssetMetadataPutOutcome,
 };
-use cabinet_ports::document_title_reader::{DocumentTitleReader, DocumentTitleReaderError};
 use cabinet_ports::document_title_reader::DocumentTitleLookup;
+use cabinet_ports::document_title_reader::{DocumentTitleReader, DocumentTitleReaderError};
 use cabinet_usecases::canvas_target_presentation::{
     CanvasTargetStatus, ResolveCanvasTargetPresentationsInput,
     ResolveCanvasTargetPresentationsUsecase,
@@ -64,20 +64,35 @@ fn presentations_use_one_batch_current_label_lookup_without_exposing_missing_ide
         CanvasTargetStatus::Available
     );
     assert_eq!(output.presentations()[1].target_id(), "doc-missing");
-    assert_eq!(output.presentations()[1].display_label(), "찾을 수 없는 문서");
-    assert_ne!(output.presentations()[1].display_label(), output.presentations()[1].target_id());
+    assert_eq!(
+        output.presentations()[1].display_label(),
+        "찾을 수 없는 문서"
+    );
+    assert_ne!(
+        output.presentations()[1].display_label(),
+        output.presentations()[1].target_id()
+    );
     assert_eq!(
         output.presentations()[1].status(),
         CanvasTargetStatus::Missing
     );
-    assert_eq!(output.presentations()[2].display_label(), "Renamed document");
+    assert_eq!(
+        output.presentations()[2].display_label(),
+        "Renamed document"
+    );
     assert_eq!(output.presentations()[3].display_label(), "design.pdf");
     assert_eq!(
         output.presentations()[4].status(),
         CanvasTargetStatus::Missing
     );
-    assert_eq!(output.presentations()[4].display_label(), "찾을 수 없는 첨부 파일");
-    assert_ne!(output.presentations()[4].display_label(), output.presentations()[4].target_id());
+    assert_eq!(
+        output.presentations()[4].display_label(),
+        "찾을 수 없는 첨부 파일"
+    );
+    assert_ne!(
+        output.presentations()[4].display_label(),
+        output.presentations()[4].target_id()
+    );
     assert_eq!(output.presentations()[5].display_label(), "Memo");
 }
 
@@ -110,11 +125,19 @@ impl DocumentTitleReader for Titles {
         _: &WorkspaceId,
         documents: &[DocumentId],
     ) -> Result<Vec<DocumentTitleLookup>, DocumentTitleReaderError> {
-        assert_eq!(documents.iter().map(DocumentId::as_str).collect::<Vec<_>>(), vec!["doc-1", "doc-missing"]);
-        Ok(documents.iter().cloned().map(|document| {
-            let title = (document.as_str() == "doc-1").then(|| DocumentTitle::new("Renamed document").unwrap());
-            DocumentTitleLookup::new(document, title)
-        }).collect())
+        assert_eq!(
+            documents.iter().map(DocumentId::as_str).collect::<Vec<_>>(),
+            vec!["doc-1", "doc-missing"]
+        );
+        Ok(documents
+            .iter()
+            .cloned()
+            .map(|document| {
+                let title = (document.as_str() == "doc-1")
+                    .then(|| DocumentTitle::new("Renamed document").unwrap());
+                DocumentTitleLookup::new(document, title)
+            })
+            .collect())
     }
 }
 

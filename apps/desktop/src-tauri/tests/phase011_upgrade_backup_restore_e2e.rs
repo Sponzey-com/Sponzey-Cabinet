@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cabinet_adapters::durable_projection_work_repository::DurableProjectionWorkRepository;
+use cabinet_adapters::local_document_store_migration::LocalDocumentStoreMigration;
 use cabinet_adapters::local_migration::LocalMigrationStore;
 use cabinet_core::migration::{MigrationPlan, MigrationRunner, MigrationState};
 use cabinet_desktop_shell::{
@@ -10,8 +11,9 @@ use cabinet_desktop_shell::{
     DesktopBackupOperationRequestDto, DesktopBackupPackageRequestDto, DesktopBackupRecoveryRuntime,
     DesktopCanvasRequestDto, DesktopCanvasRuntime, DesktopDocumentAssetsRuntime,
     DesktopDocumentAuthoringRequestDto, DesktopDocumentAuthoringRuntime,
-    DesktopRestoreConfirmRequestDto,
+    DesktopDocumentQueryRequestDto, DesktopDocumentQueryRuntime, DesktopRestoreConfirmRequestDto,
 };
+use cabinet_domain::document::DocumentBodyPolicy;
 use cabinet_domain::projection_work::ProjectionChangeKind;
 use cabinet_ports::projection_work::ProjectionWorkRepository;
 
@@ -36,10 +38,16 @@ fn phase011_fixture_upgrades_extends_backs_up_restores_and_reopens() {
     assert_eq!(first_migration.final_state, MigrationState::Completed);
     assert_eq!(repeated_migration.final_state, MigrationState::Completed);
     assert!(repeated_migration.applied_versions.is_empty());
+    LocalDocumentStoreMigration::new(
+        runtime_root.path.clone(),
+        DocumentBodyPolicy::new(BODY_LIMIT).expect("body policy"),
+    )
+    .execute()
+    .expect("authoritative document migration");
 
-    let authoring = DesktopDocumentAuthoringRuntime::new(runtime_root.path.clone(), BODY_LIMIT)
-        .expect("authoring runtime");
-    let current = authoring.execute(DesktopDocumentAuthoringRequestDto::GetCurrent {
+    let query = DesktopDocumentQueryRuntime::new(runtime_root.path.clone(), BODY_LIMIT)
+        .expect("document query runtime");
+    let current = query.execute(DesktopDocumentQueryRequestDto::Current {
         workspace_id: WORKSPACE.into(),
         document_id: DOCUMENT.into(),
     });
@@ -48,12 +56,13 @@ fn phase011_fixture_upgrades_extends_backs_up_restores_and_reopens() {
         current
             .data
             .as_ref()
-            .map(|data| data.current_version_id.as_str()),
+            .and_then(|data| data.current_version_token.as_deref()),
         Some("phase011-v2")
     );
-    let history = authoring.execute(DesktopDocumentAuthoringRequestDto::GetHistory {
+    let history = query.execute(DesktopDocumentQueryRequestDto::History {
         workspace_id: WORKSPACE.into(),
         document_id: DOCUMENT.into(),
+        cursor: None,
         limit: 10,
     });
     assert!(history.ok, "history error={:?}", history.error_code);
@@ -148,9 +157,9 @@ fn phase011_fixture_upgrades_extends_backs_up_restores_and_reopens() {
 
     remove_authoritative_workspace_data(&runtime_root.path);
     assert!(
-        !DesktopDocumentAuthoringRuntime::new(runtime_root.path.clone(), BODY_LIMIT)
-            .expect("mutated authoring")
-            .execute(DesktopDocumentAuthoringRequestDto::GetCurrent {
+        !DesktopDocumentQueryRuntime::new(runtime_root.path.clone(), BODY_LIMIT)
+            .expect("mutated query")
+            .execute(DesktopDocumentQueryRequestDto::Current {
                 workspace_id: WORKSPACE.into(),
                 document_id: DOCUMENT.into(),
             })
@@ -171,28 +180,26 @@ fn phase011_fixture_upgrades_extends_backs_up_restores_and_reopens() {
     assert!(restored.ok, "restore error={:?}", restored.error_code);
     assert_eq!(restored.state, "Completed");
 
-    let reopened_authoring =
-        DesktopDocumentAuthoringRuntime::new(runtime_root.path.clone(), BODY_LIMIT)
-            .expect("reopened authoring");
-    let reopened_current =
-        reopened_authoring.execute(DesktopDocumentAuthoringRequestDto::GetCurrent {
-            workspace_id: WORKSPACE.into(),
-            document_id: DOCUMENT.into(),
-        });
+    let reopened_query = DesktopDocumentQueryRuntime::new(runtime_root.path.clone(), BODY_LIMIT)
+        .expect("reopened query");
+    let reopened_current = reopened_query.execute(DesktopDocumentQueryRequestDto::Current {
+        workspace_id: WORKSPACE.into(),
+        document_id: DOCUMENT.into(),
+    });
     assert!(reopened_current.ok);
     assert_eq!(
         reopened_current
             .data
             .as_ref()
-            .map(|data| data.current_version_id.as_str()),
+            .and_then(|data| data.current_version_token.as_deref()),
         Some("phase011-v2")
     );
-    let reopened_history =
-        reopened_authoring.execute(DesktopDocumentAuthoringRequestDto::GetHistory {
-            workspace_id: WORKSPACE.into(),
-            document_id: DOCUMENT.into(),
-            limit: 10,
-        });
+    let reopened_history = reopened_query.execute(DesktopDocumentQueryRequestDto::History {
+        workspace_id: WORKSPACE.into(),
+        document_id: DOCUMENT.into(),
+        cursor: None,
+        limit: 10,
+    });
     assert_eq!(
         reopened_history
             .data
@@ -293,8 +300,8 @@ fn remove_authoritative_workspace_data(root: &Path) {
     let workspace_hex = hex(WORKSPACE);
     for path in [
         root.join("authoring-current").join(WORKSPACE),
-        root.join("authoring-current-version").join(&workspace_hex),
-        root.join("authoring-versions").join(WORKSPACE),
+        root.join("document-current-pointers").join(&workspace_hex),
+        root.join("document-versions").join(WORKSPACE),
         root.join("canvases").join(&workspace_hex),
         root.join("assets/metadata").join(&workspace_hex),
         root.join("assets/objects").join(&workspace_hex),

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -25,8 +26,12 @@ test("shared shell renders one frame and the contract navigation", () => {
   assert.match(markup, /data-action="navigate-search"[^>]*aria-current="page"[^>]*disabled/);
   assert.match(markup, /data-action="navigate-assets"[^>]*disabled/);
   assert.match(markup, /data-test-state="Ready"/);
-  assert.match(markup, /<kbd>⌘K<\/kbd>/);
-  assert.doesNotMatch(markup, /Ctrl K/);
+  for (const icon of ["plus", "search", "chevron-down", "chevron-right"]) {
+    assert.match(markup, new RegExp(`lucide-${icon}`));
+  }
+  assert.doesNotMatch(markup, /<kbd>|⌘K|⌄|›/);
+  assert.doesNotMatch(markup, /tone-(?:teal|blue|amber|rose|slate)/);
+  assert.match(markup, /class="nav-marker"/);
 });
 
 test("shared shell renders a custom presentation topbar without domain knowledge", () => {
@@ -62,9 +67,22 @@ test("shared shell renders visible and accessible chrome through the injected ca
     routeActions: {},
     content: React.createElement("section", null, "content"),
   }));
-  for (const key of ["shell.local", "shell.newDocument", "shell.cabinet", "shell.saved", "shell.navigationLabel", "shell.documentTreeLabel"]) {
+  for (const key of ["shell.brand", "shell.local", "shell.newDocument", "shell.cabinet", "shell.saved", "shell.navigationLabel", "shell.documentTreeLabel"]) {
     assert.match(markup, new RegExp(`fixture:${key}`));
   }
   assert.doesNotMatch(markup, /data-action="(?:open-settings|toggle-theme|open-ai)"/);
   assert.doesNotMatch(markup, />Light</);
+});
+
+test("shared shell uses the fixed icon dependency and one route-neutral navigation marker", async () => {
+  const [source, manifest] = await Promise.all([
+    readFile(new URL("../src/react_workspace_shell.ts", import.meta.url), "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+  ]);
+  assert.match(source, /from "lucide-react"/);
+  for (const icon of ["Plus", "Search", "ChevronDown", "ChevronRight"]) {
+    assert.match(source, new RegExp(`\\b${icon}\\b`));
+  }
+  assert.doesNotMatch(source, /const tones|tone-\$\{/);
+  assert.equal(typeof JSON.parse(manifest).dependencies["lucide-react"], "string");
 });

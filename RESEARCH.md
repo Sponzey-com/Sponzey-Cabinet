@@ -1,8 +1,20 @@
 # 지식관리 솔루션 리서치
 
 조사일: 2026-06-22  
+제품 반영 검토일: 2026-07-16
 범위: 사내 위키, 문서 협업, AI 검색/답변, 고객지원 지식베이스, 엔지니어링 Q&A, 자체호스팅 옵션  
 주의: 가격은 공식 페이지에 노출된 공개 가격 기준이며, 지역, 연간/월간 결제, 할인, 엔터프라이즈 계약에 따라 달라질 수 있다.
+
+## Sponzey Cabinet 반영 결정
+
+이 문서는 시장과 OSS 후보를 비교한 조사 기록이며, 제품 요구사항의 최종 기준은 `PROJECT.md`다. 기존 조사 결과와 프로젝트 목표는 유지하고, 참고 제품의 attachment, page history, diff와 revert 경험을 현재 macOS 개인용 로컬 제품에 다음과 같이 반영한다.
+
+- 사용자는 문서 화면에서 파일을 첨부한다. 파일 원본은 Markdown과 분리된 asset store에 두고 문서는 stable association으로 참조한다.
+- 사용자는 현재 문서와 과거 version 또는 두 과거 version을 문서별로 비교한다. Markdown 줄 변경과 첨부 association 변경을 구분하고 파일 bytes의 binary diff는 기본 범위에서 제외한다.
+- 사용자는 diff preview를 확인한 뒤 과거 version으로 복원한다. 복원은 과거 이력을 덮어쓰지 않고 대상 snapshot을 내용으로 하는 새 version을 생성한다.
+- preview 이후 current version이 변경되면 쓰기 전에 복원을 거부하고, 첨부 실패나 복원 중간 실패는 current document와 기존 참조를 훼손하지 않으며 idempotent operation으로 재개한다.
+- 내부 document/version/asset ID, 파일 경로와 Git 용어는 일반 사용자 UI에서 숨긴다.
+- 서버 호스팅, SaaS와 멀티 사용자 기능은 비교 대상으로만 유지하며 사용자의 명시적 요구 전까지 현재 개발 범위로 전환하지 않는다.
 
 ## 요약 추천
 

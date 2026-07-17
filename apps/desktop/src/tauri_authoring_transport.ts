@@ -11,25 +11,27 @@ import type {
   LocalDesktopCommandErrorCode,
   LocalDesktopCommandResponse,
   LocalDesktopCommandTransport,
+  RenameLocalDocumentCommand,
+  RenameLocalDocumentResult,
   RestoreDocumentVersionCommand,
   RestoreDocumentVersionResult,
   RestorePreviewQuery,
   RestorePreviewResult,
-  RenameLocalDocumentCommand,
-  RenameLocalDocumentResult,
   SaveDocumentRevisionCommand,
   SaveDocumentRevisionResult,
 } from "@sponzey-cabinet/client-core";
 
 import type { TauriInvoke } from "./tauri_home_transport.ts";
+import { mapNativeDocumentDiffPayload } from "./tauri_document_diff_transport.ts";
 
-const authoringCommands = new Set([
-  "create_document",
-  "rename_document",
+const mutationCommands = new Set(["create_document", "save_document_revision"]);
+const queryCommands = new Set([
   "get_current_document",
-  "save_document_revision",
   "get_document_history",
   "get_document_version",
+]);
+const legacyAuthoringCommands = new Set([
+  "rename_document",
   "preview_document_restore",
   "restore_document_version",
 ]);
@@ -40,12 +42,12 @@ export function createTauriDocumentAuthoringTransport(
   return async <TData>(
     envelope: LocalDesktopCommandEnvelope,
   ): Promise<LocalDesktopCommandResponse<TData>> => {
-    if (!authoringCommands.has(envelope.commandName)) return bridgeFailure();
     const request = toNativeRequest(envelope);
-    if (!request) return bridgeFailure();
+    const nativeCommand = nativeCommandFor(envelope.commandName);
+    if (!request || !nativeCommand) return bridgeFailure();
 
     try {
-      const response = await invoke("execute_desktop_document_authoring", { request });
+      const response = await invoke(nativeCommand, { request });
       const mapped = mapNativeResponse(envelope, response) as LocalDesktopCommandResponse<TData>;
       if (mapped.ok && triggersProjection(envelope.commandName)) {
         await invoke("run_desktop_projection_worker").catch(() => undefined);
@@ -57,6 +59,13 @@ export function createTauriDocumentAuthoringTransport(
   };
 }
 
+function nativeCommandFor(commandName: string): string | undefined {
+  if (mutationCommands.has(commandName)) return "execute_desktop_document_mutation";
+  if (queryCommands.has(commandName)) return "execute_desktop_document_query";
+  if (legacyAuthoringCommands.has(commandName)) return "execute_desktop_document_authoring";
+  return undefined;
+}
+
 function triggersProjection(commandName: string): boolean {
   return commandName === "create_document" ||
     commandName === "rename_document" ||
@@ -64,58 +73,65 @@ function triggersProjection(commandName: string): boolean {
     commandName === "restore_document_version";
 }
 
-function toNativeRequest(envelope: LocalDesktopCommandEnvelope): Record<string, unknown> | undefined {
+function toNativeRequest(
+  envelope: LocalDesktopCommandEnvelope,
+): Record<string, unknown> | undefined {
   const payload = envelope.payload;
   if (envelope.commandName === "create_document" && isCreateCommand(payload)) {
     return {
       kind: "create",
+      operationId: payload.operationId,
       workspaceId: payload.workspaceId,
       documentId: payload.documentId,
-      path: payload.path,
       body: payload.body,
-      versionId: payload.versionId,
-      snapshotRef: payload.snapshotRef,
+      author: payload.author,
+      summary: payload.summary,
+    };
+  }
+  if (envelope.commandName === "save_document_revision" && isSaveRevisionCommand(payload)) {
+    return {
+      kind: "update",
+      operationId: payload.operationId,
+      workspaceId: payload.workspaceId,
+      documentId: payload.documentId,
+      expectedCurrentVersionId: payload.expectedVersionId,
+      body: payload.body,
       author: payload.author,
       summary: payload.summary,
     };
   }
   if (envelope.commandName === "get_current_document" && isCurrentQuery(payload)) {
     return {
-      kind: "get_current",
+      kind: "current",
       workspaceId: payload.workspaceId,
       documentId: payload.documentId,
-    };
-  }
-  if (envelope.commandName === "rename_document" && isRenameCommand(payload)) {
-    return { kind: "rename", workspaceId: payload.workspaceId, documentId: payload.documentId, currentVersionId: payload.currentVersionId, title: payload.title, path: payload.path };
-  }
-  if (envelope.commandName === "save_document_revision" && isSaveRevisionCommand(payload)) {
-    return {
-      kind: "update",
-      workspaceId: payload.workspaceId,
-      documentId: payload.documentId,
-      body: payload.body,
-      expectedVersionId: payload.expectedVersionId,
-      versionId: payload.nextVersionId,
-      snapshotRef: payload.snapshotRef,
-      author: payload.author,
-      summary: payload.summary,
     };
   }
   if (envelope.commandName === "get_document_history" && isHistoryQuery(payload)) {
     return {
-      kind: "get_history",
+      kind: "history",
       workspaceId: payload.workspaceId,
       documentId: payload.documentId,
+      cursor: payload.cursor,
       limit: payload.limit,
     };
   }
   if (envelope.commandName === "get_document_version" && isVersionQuery(payload)) {
     return {
-      kind: "get_version",
+      kind: "version",
       workspaceId: payload.workspaceId,
       documentId: payload.documentId,
-      versionId: payload.versionId,
+      versionToken: payload.versionId,
+    };
+  }
+  if (envelope.commandName === "rename_document" && isRenameCommand(payload)) {
+    return {
+      kind: "rename",
+      workspaceId: payload.workspaceId,
+      documentId: payload.documentId,
+      currentVersionId: payload.currentVersionId,
+      title: payload.title,
+      path: payload.path,
     };
   }
   if (envelope.commandName === "preview_document_restore" && isRestorePreviewQuery(payload)) {
@@ -124,18 +140,16 @@ function toNativeRequest(envelope: LocalDesktopCommandEnvelope): Record<string, 
       workspaceId: payload.workspaceId,
       documentId: payload.documentId,
       targetVersionId: payload.targetVersionId,
-      expectedCurrentVersionId: payload.expectedCurrentVersionId,
     };
   }
   if (envelope.commandName === "restore_document_version" && isRestoreCommand(payload)) {
     return {
       kind: "restore",
+      operationId: payload.operationId,
       workspaceId: payload.workspaceId,
       documentId: payload.documentId,
       targetVersionId: payload.targetVersionId,
       expectedCurrentVersionId: payload.expectedCurrentVersionId,
-      restoredVersionId: payload.restoredVersionId,
-      restoredSnapshotRef: payload.restoredSnapshotRef,
       author: payload.author,
       summary: payload.summary,
     };
@@ -143,10 +157,7 @@ function toNativeRequest(envelope: LocalDesktopCommandEnvelope): Record<string, 
   return undefined;
 }
 
-function mapNativeResponse(
-  envelope: LocalDesktopCommandEnvelope,
-  response: unknown,
-): LocalDesktopCommandResponse<
+type AuthoringResponseData =
   | CreateLocalDocumentResult
   | CurrentDocumentView
   | SaveDocumentRevisionResult
@@ -154,130 +165,165 @@ function mapNativeResponse(
   | DocumentVersionView
   | RestorePreviewResult
   | RestoreDocumentVersionResult
-  | RenameLocalDocumentResult
-> {
+  | RenameLocalDocumentResult;
+
+function mapNativeResponse(
+  envelope: LocalDesktopCommandEnvelope,
+  response: unknown,
+): LocalDesktopCommandResponse<AuthoringResponseData> {
   if (!isRecord(response) || typeof response.ok !== "boolean") return bridgeFailure();
   if (!response.ok) return mapNativeFailure(response);
-  if (!isNativeData(response.data)) return bridgeFailure();
+  if (!isRecord(response.data)) return bridgeFailure();
 
   const payload = envelope.payload;
-  if (
-    envelope.commandName === "rename_document" &&
-    isRenameCommand(payload) &&
-    response.data.kind === "renamed" &&
-    typeof response.data.currentVersionId === "string" &&
-    typeof response.data.title === "string" &&
-    typeof response.data.path === "string"
-  ) {
-    return { ok: true, data: { workspaceId: payload.workspaceId, documentId: response.data.documentId, currentVersionId: response.data.currentVersionId, title: response.data.title, path: response.data.path } };
-  }
+  const data = response.data;
   if (
     envelope.commandName === "create_document" &&
     isCreateCommand(payload) &&
-    response.data.kind === "created"
+    data.kind === "created" &&
+    typeof data.documentId === "string" &&
+    typeof data.currentVersionId === "string"
   ) {
     return {
       ok: true,
       data: {
         workspaceId: payload.workspaceId,
-        documentId: response.data.documentId,
-        currentVersionId: response.data.currentVersionId,
-      },
-    };
-  }
-  if (
-    envelope.commandName === "get_current_document" &&
-    isCurrentQuery(payload) &&
-    isNativeCurrentData(response.data)
-  ) {
-    return {
-      ok: true,
-      data: {
-        workspaceId: payload.workspaceId,
-        documentId: response.data.documentId,
-        title: response.data.title,
-        path: response.data.path,
-        body: response.data.body,
-        versionId: response.data.currentVersionId,
+        documentId: data.documentId,
+        currentVersionId: data.currentVersionId,
       },
     };
   }
   if (
     envelope.commandName === "save_document_revision" &&
     isSaveRevisionCommand(payload) &&
-    response.data.kind === "updated"
+    data.kind === "updated" &&
+    typeof data.documentId === "string" &&
+    typeof data.currentVersionId === "string"
   ) {
     return {
       ok: true,
       data: {
         status: "saved-local",
         workspaceId: payload.workspaceId,
-        documentId: response.data.documentId,
-        currentVersionId: response.data.currentVersionId,
+        documentId: data.documentId,
+        currentVersionId: data.currentVersionId,
         versionAppended: true,
         revision: payload.revision,
       },
     };
   }
   if (
-    envelope.commandName === "get_document_history" &&
-    isHistoryQuery(payload) &&
-    isNativeHistoryData(response.data)
+    envelope.commandName === "get_current_document" &&
+    isCurrentQuery(payload) &&
+    isNativeCurrentData(data)
   ) {
     return {
       ok: true,
       data: {
         workspaceId: payload.workspaceId,
         documentId: payload.documentId,
-        entries: response.data.entries,
-        nextCursor: response.data.nextCursor,
+        title: data.title,
+        body: data.body,
+        versionId: data.currentVersionToken,
+      },
+    };
+  }
+  if (
+    envelope.commandName === "get_document_history" &&
+    isHistoryQuery(payload) &&
+    isNativeHistoryData(data)
+  ) {
+    return {
+      ok: true,
+      data: {
+        workspaceId: payload.workspaceId,
+        documentId: payload.documentId,
+        entries: data.entries.map((entry) => ({
+          versionId: entry.versionToken,
+          revisionNumber: entry.revisionNumber,
+          summary: entry.summary,
+          author: entry.author,
+          createdAt: entry.createdAtEpochMs === undefined
+            ? ""
+            : new Date(entry.createdAtEpochMs).toISOString(),
+        })),
+        nextCursor: data.nextCursor,
       },
     };
   }
   if (
     envelope.commandName === "get_document_version" &&
     isVersionQuery(payload) &&
-    isNativeVersionData(response.data)
+    isNativeVersionData(data)
   ) {
     return {
       ok: true,
       data: {
         workspaceId: payload.workspaceId,
-        documentId: response.data.documentId,
-        versionId: response.data.versionId,
-        body: response.data.body,
+        documentId: payload.documentId,
+        versionId: data.versionToken,
+        body: data.body,
+      },
+    };
+  }
+  if (
+    envelope.commandName === "rename_document" &&
+    isRenameCommand(payload) &&
+    data.kind === "renamed" &&
+    typeof data.documentId === "string" &&
+    typeof data.currentVersionId === "string" &&
+    typeof data.title === "string" &&
+    typeof data.path === "string"
+  ) {
+    return {
+      ok: true,
+      data: {
+        workspaceId: payload.workspaceId,
+        documentId: data.documentId,
+        currentVersionId: data.currentVersionId,
+        title: data.title,
+        path: data.path,
       },
     };
   }
   if (
     envelope.commandName === "preview_document_restore" &&
     isRestorePreviewQuery(payload) &&
-    isNativeRestorePreviewData(response.data)
+    isNativeRestorePreviewData(data)
   ) {
+    const diff = mapNativeDocumentDiffPayload(
+      data.restoreDiff,
+      payload.workspaceId,
+      payload.documentId,
+    );
+    if (!diff) return bridgeFailure();
     return {
       ok: true,
       data: {
         workspaceId: payload.workspaceId,
-        documentId: response.data.documentId,
-        targetVersionId: response.data.targetVersionId,
-        expectedCurrentVersionId: response.data.expectedCurrentVersionId,
-        canRestore: response.data.canRestore,
-        lines: response.data.lines,
+        documentId: data.documentId,
+        targetVersionId: data.targetVersionId,
+        expectedCurrentVersionId: data.expectedCurrentVersionId,
+        canRestore: data.canRestore,
+        missingAssetLabels: data.missingAssetLabels,
+        diff,
+        lines: data.lines,
       },
     };
   }
   if (
     envelope.commandName === "restore_document_version" &&
     isRestoreCommand(payload) &&
-    isNativeRestoredData(response.data)
+    isNativeRestoredData(data)
   ) {
     return {
       ok: true,
       data: {
         workspaceId: payload.workspaceId,
-        documentId: response.data.documentId,
-        restoredVersionId: response.data.restoredVersionId,
-        currentVersionId: response.data.currentVersionId,
+        documentId: data.documentId,
+        restoredVersionId: data.restoredVersionId,
+        currentVersionId: data.currentVersionId,
+        revisionNumber: data.revisionNumber,
         finalState: "Completed",
       },
     };
@@ -307,15 +353,28 @@ function isCreateCommand(
   value: Record<string, unknown>,
 ): value is CreateLocalDocumentCommand & Record<string, unknown> {
   return hasStringFields(value, [
+    "operationId",
     "workspaceId",
     "documentId",
-    "path",
     "body",
-    "versionId",
-    "snapshotRef",
     "author",
     "summary",
   ]);
+}
+
+function isSaveRevisionCommand(
+  value: Record<string, unknown>,
+): value is SaveDocumentRevisionCommand & Record<string, unknown> {
+  return hasStringFields(value, [
+    "operationId",
+    "workspaceId",
+    "documentId",
+    "body",
+    "expectedVersionId",
+    "author",
+    "summary",
+  ]) && typeof value.revision === "number" && Number.isInteger(value.revision) &&
+    value.revision >= 0;
 }
 
 function isCurrentQuery(
@@ -324,45 +383,31 @@ function isCurrentQuery(
   return hasStringFields(value, ["workspaceId", "documentId"]);
 }
 
-function isSaveRevisionCommand(
-  value: Record<string, unknown>,
-): value is SaveDocumentRevisionCommand & Record<string, unknown> {
-  return (
-    hasStringFields(value, [
-      "workspaceId",
-      "documentId",
-      "body",
-      "expectedVersionId",
-      "nextVersionId",
-      "snapshotRef",
-      "author",
-      "summary",
-    ]) &&
-    typeof value.revision === "number" &&
-    Number.isInteger(value.revision) &&
-    value.revision >= 0
-  );
-}
-
-function isRenameCommand(value: Record<string, unknown>): value is RenameLocalDocumentCommand & Record<string, unknown> {
-  return hasStringFields(value, ["workspaceId", "documentId", "currentVersionId", "title", "path"]);
-}
-
 function isHistoryQuery(
   value: Record<string, unknown>,
 ): value is DocumentHistoryQuery & Record<string, unknown> {
-  return (
-    hasStringFields(value, ["workspaceId", "documentId"]) &&
-    typeof value.limit === "number" &&
-    Number.isInteger(value.limit) &&
-    value.limit > 0
-  );
+  return hasStringFields(value, ["workspaceId", "documentId"]) &&
+    (value.cursor === undefined || typeof value.cursor === "string") &&
+    typeof value.limit === "number" && Number.isInteger(value.limit) && value.limit > 0 &&
+    value.limit <= 100;
 }
 
 function isVersionQuery(
   value: Record<string, unknown>,
 ): value is DocumentVersionQuery & Record<string, unknown> {
   return hasStringFields(value, ["workspaceId", "documentId", "versionId"]);
+}
+
+function isRenameCommand(
+  value: Record<string, unknown>,
+): value is RenameLocalDocumentCommand & Record<string, unknown> {
+  return hasStringFields(value, [
+    "workspaceId",
+    "documentId",
+    "currentVersionId",
+    "title",
+    "path",
+  ]);
 }
 
 function isRestorePreviewQuery(
@@ -372,7 +417,6 @@ function isRestorePreviewQuery(
     "workspaceId",
     "documentId",
     "targetVersionId",
-    "expectedCurrentVersionId",
   ]);
 }
 
@@ -382,106 +426,93 @@ function isRestoreCommand(
   return hasStringFields(value, [
     "workspaceId",
     "documentId",
+    "operationId",
     "targetVersionId",
     "expectedCurrentVersionId",
-    "restoredVersionId",
-    "restoredSnapshotRef",
     "author",
     "summary",
   ]);
 }
 
-function isNativeData(value: unknown): value is {
-  kind: string;
-  documentId: string;
-  currentVersionId?: string;
-  title?: unknown;
-  path?: unknown;
-  body?: unknown;
-} {
-  return (
-    isRecord(value) &&
-    [
-      "created",
-      "updated",
-      "renamed",
-      "current",
-      "history",
-      "version",
-      "restore_preview",
-      "restored",
-    ].includes(String(value.kind)) &&
-    typeof value.documentId === "string"
-  );
-}
-
 function isNativeCurrentData(
-  value: ReturnTypeData,
-): value is ReturnTypeData & { title: string; path: string; body: string } {
-  return (
-    value.kind === "current" &&
-    typeof value.currentVersionId === "string" &&
-    typeof value.title === "string" &&
-    typeof value.path === "string" &&
-    typeof value.body === "string"
-  );
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & {
+  currentVersionToken: string;
+  title: string;
+  body: string;
+} {
+  return value.kind === "current" && typeof value.currentVersionToken === "string" &&
+    typeof value.title === "string" && typeof value.body === "string";
 }
 
-function isNativeHistoryData(value: ReturnTypeData): value is ReturnTypeData & {
-  entries: DocumentHistoryPage["entries"];
+type NativeHistoryEntry = {
+  versionToken: string;
+  revisionNumber: number;
+  summary: string;
+  author: string;
+  createdAtEpochMs?: number;
+};
+
+function isNativeHistoryData(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & {
+  entries: NativeHistoryEntry[];
   nextCursor?: string;
 } {
-  return value.kind === "history" && Array.isArray(value.entries);
+  return value.kind === "history" && Array.isArray(value.entries) &&
+    value.entries.every(isNativeHistoryEntry) &&
+    (value.nextCursor === undefined || typeof value.nextCursor === "string");
+}
+
+function isNativeHistoryEntry(value: unknown): value is NativeHistoryEntry {
+  return isRecord(value) && typeof value.versionToken === "string" &&
+    typeof value.revisionNumber === "number" && Number.isInteger(value.revisionNumber) &&
+    typeof value.summary === "string" && typeof value.author === "string" &&
+    (value.createdAtEpochMs === undefined ||
+      (typeof value.createdAtEpochMs === "number" && Number.isSafeInteger(value.createdAtEpochMs) &&
+        value.createdAtEpochMs >= 0));
 }
 
 function isNativeVersionData(
-  value: ReturnTypeData,
-): value is ReturnTypeData & { versionId: string; body: string } {
-  return value.kind === "version" && typeof value.versionId === "string" && typeof value.body === "string";
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & { versionToken: string; body: string } {
+  return value.kind === "version" && typeof value.versionToken === "string" &&
+    typeof value.body === "string";
 }
 
-function isNativeRestorePreviewData(value: ReturnTypeData): value is ReturnTypeData & {
+function isNativeRestorePreviewData(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & {
+  documentId: string;
   targetVersionId: string;
   expectedCurrentVersionId: string;
   canRestore: boolean;
+  missingAssetLabels: string[];
+  restoreDiff: unknown;
   lines: RestorePreviewResult["lines"];
 } {
-  return (
-    value.kind === "restore_preview" &&
+  return value.kind === "restore_preview" && typeof value.documentId === "string" &&
     typeof value.targetVersionId === "string" &&
     typeof value.expectedCurrentVersionId === "string" &&
-    typeof value.canRestore === "boolean" &&
-    Array.isArray(value.lines)
-  );
+    typeof value.canRestore === "boolean" && Array.isArray(value.missingAssetLabels) &&
+    value.missingAssetLabels.every((label) => typeof label === "string") &&
+    value.restoreDiff !== undefined &&
+    Array.isArray(value.lines);
 }
 
-function isNativeRestoredData(value: ReturnTypeData): value is ReturnTypeData & {
+function isNativeRestoredData(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & {
+  documentId: string;
   restoredVersionId: string;
   currentVersionId: string;
+  revisionNumber: number;
 } {
-  return (
-    value.kind === "restored" &&
-    typeof value.restoredVersionId === "string" &&
-    typeof value.currentVersionId === "string"
-  );
+  return value.kind === "restored" && typeof value.documentId === "string" &&
+    typeof value.restoredVersionId === "string" && typeof value.currentVersionId === "string" &&
+    typeof value.revisionNumber === "number" && Number.isSafeInteger(value.revisionNumber) &&
+    value.revisionNumber > 0;
 }
-
-type ReturnTypeData = {
-  kind: string;
-  documentId: string;
-  currentVersionId?: string;
-  title?: unknown;
-  path?: unknown;
-  body?: unknown;
-  versionId?: unknown;
-  targetVersionId?: unknown;
-  expectedCurrentVersionId?: unknown;
-  canRestore?: unknown;
-  lines?: unknown;
-  restoredVersionId?: unknown;
-  entries?: unknown;
-  nextCursor?: unknown;
-};
 
 function hasStringFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
   return fields.every((field) => typeof value[field] === "string");

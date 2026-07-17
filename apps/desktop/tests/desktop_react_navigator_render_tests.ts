@@ -113,6 +113,7 @@ function callbacks() {
   return {
     onCreateDocument() {},
     onHome() {},
+    onDocument() {},
     onView() {},
     onFilter() {},
     onRetry() {},

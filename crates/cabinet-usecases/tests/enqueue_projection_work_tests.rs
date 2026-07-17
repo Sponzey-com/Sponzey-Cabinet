@@ -84,6 +84,8 @@ fn projection_enqueue_rejects_invalid_identity_without_writes() {
             workspace_id: " ".to_string(),
             document_id: "doc-1".to_string(),
             version_id: "version-1".to_string(),
+            title: "Document".to_string(),
+            path: "document.md".to_string(),
         },
         &mut repository,
     );
@@ -150,6 +152,8 @@ fn updated() -> DocumentChangeEvent {
         workspace_id: "workspace-1".to_string(),
         document_id: "doc-1".to_string(),
         version_id: "version-1".to_string(),
+        title: "Document".to_string(),
+        path: "document.md".to_string(),
     }
 }
 

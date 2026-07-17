@@ -586,6 +586,10 @@ test("attachments renders durable DTO metadata without a fake browser file impor
   assert.match(html, /파일 추가/);
   assert.match(html, /data-action="unlink-asset"/);
   assert.match(html, /data-action="open-asset-library"/);
+  assert.match(html, /data-asset-filter="전체 파일"/);
+  assert.match(html, /aria-label="파일 형식 필터"/);
+  assert.match(html, /data-action="filter-assets-all"[^>]*aria-pressed="true"/);
+  assert.match(html, /data-action="filter-assets-pdf"[^>]*aria-pressed="false"/);
 });
 
 test("attachments renders bounded linked document actions and opens the exact document identity", () => {

@@ -146,7 +146,7 @@ const benchmarks = [
           },
           async saveDocumentRevision() { throw new Error("unused"); },
         },
-        metadataGenerator: { next: () => ({ versionId: "next", snapshotRef: "snapshot" }) },
+        operationIdSource: () => "benchmark-save-operation",
         author: "fixture", summary: "fixture",
       });
       const snapshot = await controller.open({ queryName: "get-current-document", workspaceId: "workspace-performance", documentId: "doc-target" });
@@ -156,11 +156,12 @@ const benchmarks = [
   {
     queryId: "history_page", standardFixtureCount: 1_000, boundedResultCount: 50,
     marker: 'data-history-restore-state="Ready"',
-    countToken: "data-version-id=",
+    countToken: 'data-history-entry="visible"',
     execute: async () => {
       const page = await Promise.resolve({ entries: rows.map((index) => ({ versionId: `version-${index}`, summary: `Revision ${index}` })) });
       return renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(documentSnapshot, authoringCallbacks, {
         history: { status: "Ready", entries: page.entries },
+        inspector: { tab: "history", unlink: { status: "Closed" } },
       }));
     },
   },

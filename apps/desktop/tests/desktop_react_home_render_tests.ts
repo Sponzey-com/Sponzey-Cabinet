@@ -122,6 +122,7 @@ test("React desktop home follows the Penpot 20260713 workspace composition", () 
       {
         onCreateDocument() {},
         onOpenNavigator() {},
+        onResumeDocument() {},
         onOpenDocument() {},
       },
     ),

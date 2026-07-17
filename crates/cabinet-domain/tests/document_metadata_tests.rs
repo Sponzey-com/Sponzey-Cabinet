@@ -32,16 +32,43 @@ fn document_title_is_derived_from_the_first_markdown_line() {
     let empty = DocumentBody::new("\n본문", policy).expect("body");
     let punctuation = DocumentBody::new("---\n본문", policy).expect("body");
 
-    assert_eq!(DocumentTitle::from_markdown_body(&heading).as_str(), "새로운 제목");
-    assert_eq!(DocumentTitle::from_markdown_body(&plain).as_str(), "일반 첫 줄");
-    assert_eq!(DocumentTitle::from_markdown_body(&empty).as_str(), "제목 없는 문서");
-    assert_eq!(DocumentTitle::from_markdown_body(&punctuation).as_str(), "제목 없는 문서");
+    assert_eq!(
+        DocumentTitle::from_markdown_body(&heading).as_str(),
+        "새로운 제목"
+    );
+    assert_eq!(
+        DocumentTitle::from_markdown_body(&plain).as_str(),
+        "일반 첫 줄"
+    );
+    assert_eq!(
+        DocumentTitle::from_markdown_body(&empty).as_str(),
+        "제목 없는 문서"
+    );
+    assert_eq!(
+        DocumentTitle::from_markdown_body(&punctuation).as_str(),
+        "제목 없는 문서"
+    );
+
+    for markdown in [
+        "# 새로운 제목\n본문",
+        "일반 첫 줄\n본문",
+        "\n본문",
+        "# !!!\n본문",
+        "# CRLF 제목\r\n본문",
+    ] {
+        let body = DocumentBody::new(markdown, policy).expect("body");
+        assert_eq!(
+            DocumentTitle::from_markdown_text(markdown),
+            DocumentTitle::from_markdown_body(&body)
+        );
+    }
 }
 
 #[test]
 fn derived_document_title_is_bounded_without_rejecting_the_body() {
     let source = format!("# {}\n본문", "가".repeat(140));
-    let body = DocumentBody::new(&source, DocumentBodyPolicy::new(4096).expect("policy")).expect("body");
+    let body =
+        DocumentBody::new(&source, DocumentBodyPolicy::new(4096).expect("policy")).expect("body");
     let title = DocumentTitle::from_markdown_body(&body);
 
     assert_eq!(title.as_str().chars().count(), 120);

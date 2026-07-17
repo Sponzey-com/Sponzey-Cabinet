@@ -25,6 +25,9 @@ use cabinet_ports::asset_object_publisher::{
 };
 use cabinet_ports::asset_staging::{AssetStagingError, AssetStagingWriter, StagedAsset};
 use cabinet_ports::document_existence::{DocumentExistenceError, DocumentExistenceReader};
+use cabinet_ports::imported_asset_document_link::{
+    ImportedAssetDocumentLinkError, ImportedAssetDocumentLinkOutcome, ImportedAssetDocumentLinkPort,
+};
 use cabinet_usecases::asset_import::{
     ImportAssetInput, ImportAssetProductEvent, ImportAssetProductLogger, ImportAssetUsecase,
 };
@@ -203,6 +206,28 @@ fn import_usecase_rejects_missing_document_before_storage_mutation() {
     assert_eq!(logger.events.len(), 1);
 }
 
+#[test]
+fn import_usecase_accepts_a_link_only_document_port() {
+    let mut linker = LinkOnlyDocumentPort::default();
+    let output = ImportAssetUsecase::new()
+        .execute(
+            input(),
+            &Documents,
+            &Source,
+            &mut Writer::default(),
+            &mut Publisher { fail: false },
+            &mut Metadata::default(),
+            &mut linker,
+            &mut Operations::default(),
+            &mut Logger::default(),
+        )
+        .expect("import through narrow link port");
+
+    assert_eq!(output.asset_id().as_str(), HASH);
+    assert_eq!(linker.records.len(), 1);
+    assert_eq!(linker.records[0].document_id().as_str(), "doc-1");
+}
+
 struct Source;
 struct Documents;
 struct MissingDocuments;
@@ -340,6 +365,21 @@ impl AssetMetadataCatalog for Metadata {
 struct Associations {
     records: Vec<AssetAssociation>,
     fail: bool,
+}
+
+#[derive(Default)]
+struct LinkOnlyDocumentPort {
+    records: Vec<AssetAssociation>,
+}
+impl ImportedAssetDocumentLinkPort for LinkOnlyDocumentPort {
+    fn link_imported_asset(
+        &mut self,
+        _: &WorkspaceId,
+        association: AssetAssociation,
+    ) -> Result<ImportedAssetDocumentLinkOutcome, ImportedAssetDocumentLinkError> {
+        self.records.push(association);
+        Ok(ImportedAssetDocumentLinkOutcome::Linked)
+    }
 }
 impl AssetAssociationCatalog for Associations {
     fn link(

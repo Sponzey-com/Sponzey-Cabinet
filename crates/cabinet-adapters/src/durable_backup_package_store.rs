@@ -12,6 +12,10 @@ use cabinet_ports::backup_package::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::local_create_document_revision_runtime::{
+    LOCAL_DOCUMENT_POINTER_ROOT, LOCAL_DOCUMENT_VERSION_ROOT,
+};
+
 const MANIFEST_SCHEMA: u16 = 1;
 pub(crate) const CURRENT_VERSION_POINTERS_PAYLOAD_DIR: &str = ".version-pointers";
 const MANIFEST_FILE: &str = "manifest.tsv";
@@ -105,7 +109,7 @@ impl LocalBackupPackageStore {
             ),
             BackupDataClass::VersionHistory => Some(
                 self.app_data_root
-                    .join("authoring-versions")
+                    .join(LOCAL_DOCUMENT_VERSION_ROOT)
                     .join(document_workspace),
             ),
             BackupDataClass::CanvasRecords => {
@@ -147,7 +151,7 @@ impl LocalBackupPackageStore {
                     }
                     let pointer_source = self
                         .app_data_root
-                        .join("authoring-current-version")
+                        .join(LOCAL_DOCUMENT_POINTER_ROOT)
                         .join(hex(workspace.as_str()));
                     fs::create_dir_all(&pointer_destination)
                         .map_err(|_| BackupPackageStoreError::StorageUnavailable)?;

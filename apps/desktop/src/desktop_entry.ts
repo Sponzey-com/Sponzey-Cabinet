@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import {
+  LocalDesktopCommandClientError,
   createLocalDesktopCommandClient,
   createPersonalLocalDesktopCapabilityProfile,
 } from "@sponzey-cabinet/client-core";
@@ -16,7 +17,7 @@ import {
   type DocumentNavigatorModel,
   type PersonalWorkspaceHomeModel,
 } from "@sponzey-cabinet/ui";
-import type { DocumentNavigatorView } from "@sponzey-cabinet/client-core";
+import type { DocumentDiffQuery, DocumentNavigatorView } from "@sponzey-cabinet/client-core";
 
 import { loadDesktopDocumentNavigator } from "./desktop_navigator_controller.ts";
 import {
@@ -39,6 +40,7 @@ import {
   type DesktopLinkOverviewSnapshot,
 } from "./desktop_link_overview_controller.ts";
 import {
+  applyDesktopAssetDetailResult,
   createDesktopAssetPlacementOptions,
   createDesktopAssetSnapshot,
   beginDesktopAssetImport,
@@ -47,10 +49,12 @@ import {
   linkDesktopSelectedAsset,
   loadDesktopAssetDetail,
   loadDesktopAssetPreview,
+  openDesktopSelectedAsset,
   loadDesktopDocumentAssets,
   loadDesktopWorkspaceAssets,
   requestDesktopAssetLoad,
   requestDesktopAssetPreview,
+  requestDesktopAssetOpen,
   requestDesktopWorkspaceAssetLoad,
   selectDesktopAsset,
   closeDesktopAssetPreview,
@@ -107,6 +111,7 @@ import {
 } from "./desktop_route_controller.ts";
 import { loadDesktopWorkspaceHome } from "./index.ts";
 import { createDesktopDocumentNavigatorElement } from "./react_document_navigator.ts";
+import { createDesktopDocumentEmptyStateElement } from "./react_document_empty_state.ts";
 import {
   createDesktopDocumentAuthoringWorkbenchElement,
   type DesktopDocumentHistoryWorkbenchState,
@@ -125,6 +130,20 @@ import { createTauriGlobalGraphTransport } from "./tauri_global_graph_transport.
 import { createTauriAssetImportTransport } from "./tauri_asset_import_transport.ts";
 import { createTauriCanvasTransport, type DesktopCanvasMutationDraft } from "./tauri_canvas_transport.ts";
 import { createTauriBackupRecoveryTransport } from "./tauri_backup_recovery_transport.ts";
+import { createTauriDocumentDiffOperationTransport } from "./tauri_document_diff_operation_transport.ts";
+import {
+  applyDesktopDocumentDiffOperationCandidate,
+  cancelDesktopDocumentDiffOperation,
+  createDesktopDocumentDiffOperationSnapshot,
+  pollDesktopDocumentDiffOperation,
+  retryDesktopDocumentDiffOperation,
+  startDesktopDocumentDiffOperation,
+  type DesktopDocumentDiffOperationSnapshot,
+} from "./desktop_document_diff_operation_controller.ts";
+import {
+  presentDesktopDocumentDiffOperation,
+  type DesktopDocumentDiffPresentationTarget,
+} from "./document_diff_operation_presenter.ts";
 import { runPackagedUiSmoke } from "./packaged_ui_smoke.ts";
 import { isMacDocumentSaveShortcut } from "./desktop_authoring_shortcut.ts";
 import { isMacWorkspaceSearchShortcut } from "./desktop_shell_shortcut.ts";
@@ -133,6 +152,26 @@ import {
   presentDocumentHistory,
 } from "./document_history_presenter.ts";
 import { focusWorkspaceRouteMain } from "./route_main_focus.ts";
+import { resolveDesktopDocumentMenuTarget } from "./desktop_document_menu_target.ts";
+import {
+  createDocumentInspectorState,
+  transitionDocumentInspector,
+  type DocumentInspectorState,
+} from "./document_inspector_state.ts";
+import {
+  createDocumentHistoryCompareSelection,
+  transitionDocumentHistoryCompareSelection,
+} from "./document_history_compare_selection.ts";
+import {
+  beginRestoreApply,
+  beginRestorePreview,
+  cancelRestoreConfirmation,
+  completeRestoreApply,
+  completeRestorePreview,
+  failRestoreApply,
+  requestRestoreConfirmation,
+  retryRestoreRecovery,
+} from "./document_restore_presentation.ts";
 
 const profile = createPersonalLocalDesktopCapabilityProfile();
 const homeQuery = Object.freeze({
@@ -152,6 +191,16 @@ const globalGraphClient = bootstrapInvoke ? createTauriGlobalGraphTransport(boot
 const assetImportClient = bootstrapInvoke ? createTauriAssetImportTransport(bootstrapInvoke) : undefined;
 const canvasClient = bootstrapInvoke ? createTauriCanvasTransport(bootstrapInvoke) : undefined;
 const backupClient = bootstrapInvoke ? createTauriBackupRecoveryTransport(bootstrapInvoke) : undefined;
+const documentDiffOperationClient = bootstrapInvoke
+  ? createTauriDocumentDiffOperationTransport(bootstrapInvoke)
+  : undefined;
+const DOCUMENT_DIFF_OPERATION_POLL_INTERVAL_MS = 100;
+
+function waitForDocumentDiffOperationPoll(): Promise<void> {
+  return new Promise((resolve) => {
+    globalThis.setTimeout(resolve, DOCUMENT_DIFF_OPERATION_POLL_INTERVAL_MS);
+  });
+}
 const bootstrapUuidSource = globalThis.crypto?.randomUUID
   ? globalThis.crypto.randomUUID.bind(globalThis.crypto)
   : undefined;
@@ -161,10 +210,10 @@ const revisionMetadataGenerator = bootstrapUuidSource
 const canvasOperationIdSource = bootstrapUuidSource
   ? () => `canvas-${bootstrapUuidSource()}`
   : undefined;
-const authoringController = desktopClient && revisionMetadataGenerator
+const authoringController = desktopClient && bootstrapUuidSource
   ? createDesktopDocumentAuthoringController({
       client: desktopClient,
-      metadataGenerator: revisionMetadataGenerator,
+      operationIdSource: () => `document-save-${bootstrapUuidSource()}`,
       author: "local-user",
       summary: "Updated",
       autosaveDelayMs: 800,
@@ -191,6 +240,16 @@ function DesktopApp(): React.ReactElement {
     }),
   );
   const authoringGeneration = useRef(0);
+  const diffGeneration = useRef(0);
+  const diffOperationSnapshotRef = useRef<DesktopDocumentDiffOperationSnapshot>(
+    createDesktopDocumentDiffOperationSnapshot(),
+  );
+  const diffOperationContextRef = useRef<{
+    readonly authoringGeneration: number;
+    readonly diffGeneration: number;
+    readonly documentId: string;
+    readonly target: DesktopDocumentDiffPresentationTarget;
+  } | undefined>(undefined);
   const [authoringSnapshot, setAuthoringSnapshot] = useState<DesktopDocumentAuthoringSnapshot>(
     () => authoringController?.snapshot() ?? emptyAuthoringSnapshot(),
   );
@@ -198,6 +257,19 @@ function DesktopApp(): React.ReactElement {
     status: "Idle",
     entries: [],
   }));
+  const beginAuthoringDiffGeneration = useCallback(() => {
+    const active = diffOperationSnapshotRef.current;
+    if (documentDiffOperationClient && (active.state === "Accepted" || active.state === "Running")) {
+      void cancelDesktopDocumentDiffOperation(documentDiffOperationClient, active);
+    }
+    diffOperationSnapshotRef.current = createDesktopDocumentDiffOperationSnapshot();
+    diffOperationContextRef.current = undefined;
+    diffGeneration.current += 1;
+    return diffGeneration.current;
+  }, []);
+  const [documentInspectorState, setDocumentInspectorState] = useState<DocumentInspectorState>(() =>
+    createDocumentInspectorState(),
+  );
   const [linkOverviewSnapshot, setLinkOverviewSnapshot] = useState<DesktopLinkOverviewSnapshot>(
     () => createDesktopLinkOverviewSnapshot("workspace-1", "unloaded"),
   );
@@ -238,7 +310,11 @@ function DesktopApp(): React.ReactElement {
       ?? homeModel.recentDocuments[0]?.documentId
     : undefined;
   const graphQueryScope = activeRoute.kind === "Graph" ? graphQueryScopeForRoute(activeRoute) : "local";
-  const assetDocumentId = activeRoute.kind === "Assets" ? activeRoute.documentId : undefined;
+  const assetDocumentId = activeRoute.kind === "Assets"
+    ? activeRoute.documentId
+    : activeRoute.kind === "Document"
+      ? activeRoute.documentId
+      : undefined;
   const requestedAssetId = activeRoute.kind === "Assets" ? activeRoute.assetId : undefined;
   const activeCanvasId = activeRoute.kind === "Canvas" ? activeRoute.canvasId : undefined;
 
@@ -512,27 +588,27 @@ function DesktopApp(): React.ReactElement {
     const selecting = beginDesktopAssetImport(assetSnapshotRef.current);
     if (selecting === assetSnapshotRef.current) return;
     commitAssetSnapshot(selecting);
-    if (!assetImportClient) {
-      commitAssetSnapshot(Object.freeze({
+    if (!assetImportClient || !desktopClient || !bootstrapUuidSource) {
+      const failed = Object.freeze({
         ...selecting,
         importState: "Failed",
         importErrorCode: "COMMAND_BRIDGE_FAILED",
-      }));
-      return;
+      } as const);
+      commitAssetSnapshot(failed);
+      return failed;
     }
-    const queryClient = desktopClient ?? {
-      async getAssetMetadata() { throw new Error("COMMAND_BRIDGE_FAILED"); },
-    };
     const importGeneration = selecting.importGeneration;
     const result = await importDesktopDocumentAssets(
       assetImportClient,
-      queryClient,
+      desktopClient,
       selecting,
+      () => `document-attachment-import-${bootstrapUuidSource()}`,
       (progress) => {
         if (assetSnapshotRef.current.importGeneration === importGeneration) commitAssetSnapshot(progress);
       },
     );
     if (assetSnapshotRef.current.importGeneration === importGeneration) commitAssetSnapshot(result);
+    return result;
   }, [commitAssetSnapshot]);
 
   const selectAndLoadAssetDetail = useCallback(async (assetId: string) => {
@@ -540,23 +616,36 @@ function DesktopApp(): React.ReactElement {
     commitAssetSnapshot(selected);
     if (!assetImportClient || selected.detailState !== "Loading") return;
     const detailed = await loadDesktopAssetDetail(assetImportClient, selected);
-    if (assetSnapshotRef.current.selectedAssetId === assetId) commitAssetSnapshot(detailed);
+    const current = assetSnapshotRef.current;
+    if (current.selectedAssetId === assetId) {
+      commitAssetSnapshot(applyDesktopAssetDetailResult(current, detailed));
+    }
   }, [commitAssetSnapshot]);
 
   const runAssetUnlink = useCallback(async () => {
     const current = assetSnapshotRef.current;
-    if (!assetImportClient || !current.selectedAssetId || current.mutationState === "Unlinking") return;
+    if (!assetImportClient || !desktopClient || !current.selectedAssetId || current.mutationState === "Unlinking") return;
     commitAssetSnapshot(Object.freeze({ ...current, mutationState: "Unlinking" }));
-    const queryClient = desktopClient ?? { async getAssetMetadata() { throw new Error("COMMAND_BRIDGE_FAILED"); } };
-    const result = await unlinkDesktopSelectedAsset(assetImportClient, queryClient, current);
+    const result = await unlinkDesktopSelectedAsset(
+      assetImportClient,
+      desktopClient,
+      current,
+      () => bootstrapUuidSource ? `document-attachment-unlink-${bootstrapUuidSource()}` : "",
+    );
     if (assetSnapshotRef.current.selectedAssetId === current.selectedAssetId) commitAssetSnapshot(result);
+    return result;
   }, [commitAssetSnapshot]);
 
   const runAssetLink = useCallback(async () => {
     const current = assetSnapshotRef.current;
     if (!assetImportClient || !desktopClient || !current.selectedAssetId || current.mutationState === "Linking") return;
     commitAssetSnapshot(Object.freeze({ ...current, mutationState: "Linking" }));
-    const result = await linkDesktopSelectedAsset(assetImportClient, desktopClient, current);
+    const result = await linkDesktopSelectedAsset(
+      assetImportClient,
+      desktopClient,
+      current,
+      () => bootstrapUuidSource ? `document-attachment-link-${bootstrapUuidSource()}` : "",
+    );
     if (assetSnapshotRef.current.selectedAssetId === current.selectedAssetId) commitAssetSnapshot(result);
   }, [commitAssetSnapshot]);
 
@@ -579,6 +668,22 @@ function DesktopApp(): React.ReactElement {
 
   const closeAssetPreview = useCallback(() => {
     commitAssetSnapshot(closeDesktopAssetPreview(assetSnapshotRef.current));
+  }, [commitAssetSnapshot]);
+
+  const runAssetExternalOpen = useCallback(async () => {
+    const opening = requestDesktopAssetOpen(assetSnapshotRef.current);
+    if (opening === assetSnapshotRef.current) return;
+    commitAssetSnapshot(opening);
+    if (!assetImportClient) {
+      return commitAssetSnapshot(Object.freeze({
+        ...opening,
+        openState: "OpenFailed" as const,
+        openErrorCode: "COMMAND_BRIDGE_FAILED",
+      }));
+    }
+    const generation = opening.openGeneration;
+    const result = await openDesktopSelectedAsset(assetImportClient, opening);
+    if (assetSnapshotRef.current.openGeneration === generation) commitAssetSnapshot(result);
   }, [commitAssetSnapshot]);
 
   const requestDesktopRoute = useCallback((
@@ -702,6 +807,7 @@ function DesktopApp(): React.ReactElement {
       documentId,
       originRoute: visibleRoute(routeState).kind,
     })) return;
+    beginAuthoringDiffGeneration();
     setHistoryState({ status: "Idle", entries: [] });
     authoringGeneration.current += 1;
     const requestGeneration = authoringGeneration.current;
@@ -726,13 +832,14 @@ function DesktopApp(): React.ReactElement {
           setAuthoringSnapshot(failedAuthoringSnapshot("COMMAND_BRIDGE_FAILED"));
         }
       });
-  }, [requestDesktopRoute, routeState]);
+  }, [beginAuthoringDiffGeneration, requestDesktopRoute, routeState]);
 
   const createNewDocument = useCallback(() => {
+    beginAuthoringDiffGeneration();
     setHistoryState({ status: "Idle", entries: [] });
     authoringGeneration.current += 1;
     const requestGeneration = authoringGeneration.current;
-    if (!desktopClient || !authoringController || !revisionMetadataGenerator || !bootstrapUuidSource) {
+    if (!desktopClient || !authoringController || !bootstrapUuidSource) {
       setAuthoringSnapshot(failedAuthoringSnapshot("COMMAND_BRIDGE_FAILED"));
       return;
     }
@@ -742,18 +849,14 @@ function DesktopApp(): React.ReactElement {
       documentId,
       originRoute: visibleRoute(routeState).kind,
     })) return;
-    const metadata = revisionMetadataGenerator.next(documentId, 0);
-    const path = `notes/${documentId}.md`;
     const body = "# 제목 없는 문서\n\n";
     setAuthoringSnapshot(authoringController.snapshot());
     void desktopClient
       .createDocument({
+        operationId: `document-create-${bootstrapUuidSource()}`,
         workspaceId: "workspace-1",
         documentId,
-        path,
         body,
-        versionId: metadata.versionId,
-        snapshotRef: metadata.snapshotRef,
         author: "local-user",
         summary: "문서 생성",
       })
@@ -774,7 +877,22 @@ function DesktopApp(): React.ReactElement {
           setAuthoringSnapshot(failedAuthoringSnapshot("COMMAND_BRIDGE_FAILED"));
         }
       });
-  }, [requestDesktopRoute, routeState]);
+  }, [beginAuthoringDiffGeneration, requestDesktopRoute, routeState]);
+
+  const resumeDocument = useCallback(() => {
+    const target = resolveDesktopDocumentMenuTarget(
+      authoringSnapshot.documentId,
+      homeModel.recentDocuments.map((document) => document.documentId),
+    );
+    if (target.kind === "EmptyWorkspace") {
+      requestDesktopRoute({ kind: "Document" }, {
+        workspaceId: "workspace-1",
+        originRoute: visibleRoute(routeState).kind,
+      });
+      return;
+    }
+    openDocument(target.documentId);
+  }, [authoringSnapshot.documentId, homeModel.recentDocuments, openDocument, requestDesktopRoute, routeState]);
 
   const runAuthoringSave = useCallback((kind: "manual" | "retry") => {
     if (!authoringController) return Promise.resolve(undefined);
@@ -800,48 +918,127 @@ function DesktopApp(): React.ReactElement {
   const loadAuthoringHistory = useCallback(() => {
     const snapshot = authoringController?.snapshot();
     if (!desktopClient || !snapshot?.workspaceId || !snapshot.documentId) return;
-    setHistoryState((current) => ({ ...current, status: "Loading" }));
+    const requestGeneration = authoringGeneration.current;
+    const requestDocumentId = snapshot.documentId;
+    setHistoryState({ status: "Loading", entries: [] });
     void desktopClient
       .listDocumentHistory({
         queryName: "get-document-history",
         workspaceId: snapshot.workspaceId,
         documentId: snapshot.documentId,
-        limit: 20,
+        limit: 50,
       })
       .then((page) => {
+        if (
+          authoringGeneration.current !== requestGeneration ||
+          authoringController?.snapshot().documentId !== requestDocumentId
+        ) return;
+        const entries = presentDocumentHistory(page.entries, historyDateFormatter);
         setHistoryState({
-          status: "Ready",
-          entries: presentDocumentHistory(page.entries, historyDateFormatter),
+          status: entries.length === 0 ? "Empty" : "Ready",
+          entries,
+          nextCursor: page.nextCursor,
         });
       })
-      .catch((error) => {
-        const code = error instanceof Error ? "COMMAND_BRIDGE_FAILED" : "COMMAND_BRIDGE_FAILED";
-        setHistoryState({ status: "Failed", entries: [], errorCode: code });
+      .catch(() => {
+        if (
+          authoringGeneration.current !== requestGeneration ||
+          authoringController?.snapshot().documentId !== requestDocumentId
+        ) return;
+        setHistoryState({ status: "Failed", entries: [], errorCode: "COMMAND_BRIDGE_FAILED" });
       });
   }, []);
 
+  const loadMoreAuthoringHistory = useCallback(() => {
+    const snapshot = authoringController?.snapshot();
+    const currentCursor = historyState.nextCursor;
+    if (
+      !desktopClient ||
+      !snapshot?.workspaceId ||
+      !snapshot.documentId ||
+      !currentCursor ||
+      historyState.status === "LoadingMore"
+    ) return;
+    const requestGeneration = authoringGeneration.current;
+    const requestDocumentId = snapshot.documentId;
+    setHistoryState((current) => current.nextCursor === currentCursor
+      ? { ...current, status: "LoadingMore", loadMoreErrorCode: undefined }
+      : current);
+    void desktopClient
+      .listDocumentHistory({
+        queryName: "get-document-history",
+        workspaceId: snapshot.workspaceId,
+        documentId: snapshot.documentId,
+        cursor: currentCursor,
+        limit: 50,
+      })
+      .then((page) => {
+        if (
+          authoringGeneration.current !== requestGeneration ||
+          authoringController?.snapshot().documentId !== requestDocumentId
+        ) return;
+        setHistoryState((current) => {
+          if (current.nextCursor !== currentCursor) return current;
+          const entriesByVersion = new Map(current.entries.map((entry) => [entry.versionId, entry]));
+          for (const entry of presentDocumentHistory(page.entries, historyDateFormatter)) {
+            if (!entriesByVersion.has(entry.versionId)) entriesByVersion.set(entry.versionId, entry);
+          }
+          const entries = [...entriesByVersion.values()];
+          return {
+            ...current,
+            status: entries.length === 0 ? "Empty" : "Ready",
+            entries,
+            nextCursor: page.nextCursor,
+            loadMoreErrorCode: undefined,
+          };
+        });
+      })
+      .catch(() => {
+        if (
+          authoringGeneration.current !== requestGeneration ||
+          authoringController?.snapshot().documentId !== requestDocumentId
+        ) return;
+        setHistoryState((current) => current.nextCursor === currentCursor
+          ? {
+              ...current,
+              status: current.entries.length === 0 ? "Empty" : "Ready",
+              loadMoreErrorCode: "COMMAND_BRIDGE_FAILED",
+            }
+          : current);
+      });
+  }, [historyState.nextCursor, historyState.status]);
+
   const previewAuthoringRestore = useCallback((versionId: string) => {
     const snapshot = authoringController?.snapshot();
-    if (!desktopClient || !snapshot?.workspaceId || !snapshot.documentId || !snapshot.expectedVersionId) return;
-    setHistoryState((current) => ({ ...current, status: "Loading" }));
+    if (!desktopClient || !snapshot?.workspaceId || !snapshot.documentId) return;
+    const targetVersionLabel = historyState.entries.find((entry) => entry.versionId === versionId)
+      ?.versionLabel ?? "선택한 버전";
+    const previewing = beginRestorePreview(versionId);
+    setHistoryState((current) => ({ ...current, status: "Loading", restore: previewing }));
     void desktopClient
       .previewDocumentRestore({
         queryName: "preview-document-restore",
         workspaceId: snapshot.workspaceId,
         documentId: snapshot.documentId,
         targetVersionId: versionId,
-        expectedCurrentVersionId: snapshot.expectedVersionId,
       })
       .then((preview) => {
+        const restore = completeRestorePreview(previewing, {
+          targetVersionId: preview.targetVersionId,
+          expectedCurrentVersionId: preview.expectedCurrentVersionId,
+          targetVersionLabel,
+          changedLineCount: preview.diff.addedCount + preview.diff.removedCount,
+          missingAssetLabels: preview.missingAssetLabels,
+          canRestore: preview.canRestore,
+          diff: preview.diff,
+        });
         setHistoryState((current) => ({
-          status: "PreviewReady",
+          status: restore.status === "BlockedMissingAsset" || restore.status === "BlockedLargeDiff"
+            ? "Blocked"
+            : "PreviewReady",
           entries: current.entries,
-          preview: {
-            targetVersionId: preview.targetVersionId,
-            expectedCurrentVersionId: preview.expectedCurrentVersionId,
-            changedLineCount: preview.lines.length,
-            canRestore: preview.canRestore,
-          },
+          nextCursor: current.nextCursor,
+          restore,
         }));
       })
       .catch(() => {
@@ -851,36 +1048,328 @@ function DesktopApp(): React.ReactElement {
           errorCode: "COMMAND_BRIDGE_FAILED",
         }));
       });
+  }, [historyState.entries]);
+
+  const isCurrentAuthoringDiffContext = useCallback((context: NonNullable<typeof diffOperationContextRef.current>) => (
+    authoringGeneration.current === context.authoringGeneration
+      && diffGeneration.current === context.diffGeneration
+      && authoringController?.snapshot().documentId === context.documentId
+  ), []);
+
+  const publishAuthoringBackgroundDiff = useCallback((
+    operation: DesktopDocumentDiffOperationSnapshot,
+    context: NonNullable<typeof diffOperationContextRef.current>,
+  ) => {
+    if (!isCurrentAuthoringDiffContext(context)) return false;
+    diffOperationSnapshotRef.current = operation;
+    diffOperationContextRef.current = context;
+    setHistoryState((current) => current.diff?.targetVersionId === context.target.targetVersionId
+      ? { ...current, diff: presentDesktopDocumentDiffOperation(operation, context.target) }
+      : current);
+    return true;
+  }, [isCurrentAuthoringDiffContext]);
+
+  const pollAuthoringBackgroundDiff = useCallback(async (
+    initial: DesktopDocumentDiffOperationSnapshot,
+    context: NonNullable<typeof diffOperationContextRef.current>,
+  ) => {
+    if (!documentDiffOperationClient) return;
+    let operation = initial;
+    while (operation.state === "Accepted" || operation.state === "Running") {
+      await waitForDocumentDiffOperationPoll();
+      if (!isCurrentAuthoringDiffContext(context)) {
+        void cancelDesktopDocumentDiffOperation(documentDiffOperationClient, operation);
+        return;
+      }
+      const candidate = await pollDesktopDocumentDiffOperation(documentDiffOperationClient, operation);
+      const active = diffOperationSnapshotRef.current;
+      if (active.state !== "Accepted" && active.state !== "Running") return;
+      operation = applyDesktopDocumentDiffOperationCandidate(active, candidate);
+      if (!publishAuthoringBackgroundDiff(operation, context)) return;
+    }
+  }, [isCurrentAuthoringDiffContext, publishAuthoringBackgroundDiff]);
+
+  const startAuthoringBackgroundDiff = useCallback(async (
+    query: DocumentDiffQuery,
+    target: DesktopDocumentDiffPresentationTarget,
+    requestGeneration: number,
+    requestDiffGeneration: number,
+    requestDocumentId: string,
+  ) => {
+    if (!documentDiffOperationClient) return;
+    const context = Object.freeze({
+      authoringGeneration: requestGeneration,
+      diffGeneration: requestDiffGeneration,
+      documentId: requestDocumentId,
+      target,
+    });
+    const operation = await startDesktopDocumentDiffOperation(
+      documentDiffOperationClient,
+      createDesktopDocumentDiffOperationSnapshot(),
+      query,
+    );
+    if (!publishAuthoringBackgroundDiff(operation, context)) {
+      if (operation.state === "Accepted" || operation.state === "Running") {
+        void cancelDesktopDocumentDiffOperation(documentDiffOperationClient, operation);
+      }
+      return;
+    }
+    await pollAuthoringBackgroundDiff(operation, context);
+  }, [pollAuthoringBackgroundDiff, publishAuthoringBackgroundDiff]);
+
+  const cancelAuthoringBackgroundDiff = useCallback(() => {
+    if (!documentDiffOperationClient) return;
+    const operation = diffOperationSnapshotRef.current;
+    const context = diffOperationContextRef.current;
+    if (!context || (operation.state !== "Accepted" && operation.state !== "Running")) return;
+    void cancelDesktopDocumentDiffOperation(documentDiffOperationClient, operation).then((candidate) => {
+      if (!isCurrentAuthoringDiffContext(context)) return;
+      const applied = applyDesktopDocumentDiffOperationCandidate(operation, candidate);
+      publishAuthoringBackgroundDiff(applied, context);
+    });
+  }, [isCurrentAuthoringDiffContext, publishAuthoringBackgroundDiff]);
+
+  const retryAuthoringBackgroundDiff = useCallback(() => {
+    if (!documentDiffOperationClient) return;
+    const operation = diffOperationSnapshotRef.current;
+    const context = diffOperationContextRef.current;
+    if (!context || !["Cancelled", "Expired", "Failed"].includes(operation.state)) return;
+    void retryDesktopDocumentDiffOperation(documentDiffOperationClient, operation).then(async (candidate) => {
+      if (!publishAuthoringBackgroundDiff(candidate, context)) return;
+      await pollAuthoringBackgroundDiff(candidate, context);
+    });
+  }, [pollAuthoringBackgroundDiff, publishAuthoringBackgroundDiff]);
+
+  const compareAuthoringVersion = useCallback((versionId: string) => {
+    const snapshot = authoringController?.snapshot();
+    if (!desktopClient || !snapshot?.workspaceId || !snapshot.documentId) return;
+    const requestGeneration = authoringGeneration.current;
+    const requestDiffGeneration = beginAuthoringDiffGeneration();
+    const requestDocumentId = snapshot.documentId;
+    const targetVersionLabel = historyState.entries.find((entry) => entry.versionId === versionId)
+      ?.versionLabel ?? "선택한 버전";
+    setHistoryState((current) => ({
+      ...current,
+      diff: {
+        status: "Loading",
+        targetVersionId: versionId,
+        targetVersionLabel,
+      },
+    }));
+    const query = Object.freeze({
+        queryName: "compare-current-document-to-version",
+        workspaceId: snapshot.workspaceId,
+        documentId: snapshot.documentId,
+        targetVersionId: versionId,
+      } satisfies DocumentDiffQuery);
+    void desktopClient
+      .compareDocumentVersions({ ...query })
+      .then((result) => {
+        if (
+          authoringGeneration.current !== requestGeneration ||
+          diffGeneration.current !== requestDiffGeneration ||
+          authoringController?.snapshot().documentId !== requestDocumentId
+        ) return;
+        if (result.status === "TooLarge" && documentDiffOperationClient) {
+          void startAuthoringBackgroundDiff(
+            query,
+            { targetVersionId: versionId, targetVersionLabel },
+            requestGeneration,
+            requestDiffGeneration,
+            requestDocumentId,
+          );
+          return;
+        }
+        setHistoryState((current) => {
+          if (current.diff?.targetVersionId !== versionId) return current;
+          if (result.status === "TooLarge") {
+            return {
+              ...current,
+              diff: {
+                status: "TooLarge",
+                targetVersionId: versionId,
+                targetVersionLabel,
+                limitReason: result.limitReason ?? "bytes",
+                attachmentDiff: result.attachmentDiff,
+              },
+            };
+          }
+          return {
+            ...current,
+            diff: {
+              status: "Ready",
+              targetVersionId: versionId,
+              targetVersionLabel,
+              addedCount: result.addedCount,
+              removedCount: result.removedCount,
+              attachmentDiff: result.attachmentDiff,
+              titleDelta: result.titleDelta,
+              hunks: result.hunks,
+            },
+          };
+        });
+      })
+      .catch(() => {
+        if (
+          authoringGeneration.current !== requestGeneration ||
+          diffGeneration.current !== requestDiffGeneration ||
+          authoringController?.snapshot().documentId !== requestDocumentId
+        ) return;
+        setHistoryState((current) => current.diff?.targetVersionId === versionId
+          ? {
+              ...current,
+              diff: {
+                status: "Failed",
+                targetVersionId: versionId,
+                targetVersionLabel,
+                errorCode: "COMMAND_BRIDGE_FAILED",
+              },
+            }
+          : current);
+      });
+  }, [beginAuthoringDiffGeneration, historyState.entries, startAuthoringBackgroundDiff]);
+
+  const toggleHistoryCompareSelection = useCallback((versionId: string, versionLabel: string) => {
+    setHistoryState((current) => ({
+      ...current,
+      comparison: transitionDocumentHistoryCompareSelection(
+        current.comparison ?? createDocumentHistoryCompareSelection(),
+        { type: "Toggle", versionId, versionLabel },
+      ),
+    }));
   }, []);
+
+  const compareSelectedAuthoringVersions = useCallback(() => {
+    const snapshot = authoringController?.snapshot();
+    const comparison = historyState.comparison;
+    if (
+      !desktopClient ||
+      !snapshot?.workspaceId ||
+      !snapshot.documentId ||
+      comparison?.status !== "TwoSelected"
+    ) return;
+    const [left, right] = comparison.selections;
+    const requestGeneration = authoringGeneration.current;
+    const requestDiffGeneration = beginAuthoringDiffGeneration();
+    const requestDocumentId = snapshot.documentId;
+    const targetVersionLabel = `${left.versionLabel}과 ${right.versionLabel}`;
+    setHistoryState((current) => ({
+      ...current,
+      diff: { status: "Loading", targetVersionId: right.versionId, targetVersionLabel },
+    }));
+    const query = Object.freeze({
+      queryName: "compare-document-versions",
+      workspaceId: snapshot.workspaceId,
+      documentId: snapshot.documentId,
+      leftVersionId: left.versionId,
+      rightVersionId: right.versionId,
+    } satisfies DocumentDiffQuery);
+    void desktopClient.compareDocumentVersions({ ...query }).then((result) => {
+      if (
+        authoringGeneration.current !== requestGeneration ||
+        diffGeneration.current !== requestDiffGeneration ||
+        authoringController?.snapshot().documentId !== requestDocumentId
+      ) return;
+      if (result.status === "TooLarge" && documentDiffOperationClient) {
+        void startAuthoringBackgroundDiff(
+          query,
+          { targetVersionId: right.versionId, targetVersionLabel },
+          requestGeneration,
+          requestDiffGeneration,
+          requestDocumentId,
+        );
+        return;
+      }
+      setHistoryState((current) => {
+        if (current.diff?.targetVersionId !== right.versionId) return current;
+        if (result.status === "TooLarge") {
+          return {
+            ...current,
+            diff: {
+              status: "TooLarge",
+              targetVersionId: right.versionId,
+              targetVersionLabel,
+              limitReason: result.limitReason ?? "bytes",
+              attachmentDiff: result.attachmentDiff,
+            },
+          };
+        }
+        return {
+          ...current,
+          diff: {
+            status: "Ready",
+            targetVersionId: right.versionId,
+            targetVersionLabel,
+            addedCount: result.addedCount,
+            removedCount: result.removedCount,
+            attachmentDiff: result.attachmentDiff,
+            titleDelta: result.titleDelta,
+            hunks: result.hunks,
+          },
+        };
+      });
+    }).catch(() => {
+      if (
+        authoringGeneration.current !== requestGeneration ||
+        diffGeneration.current !== requestDiffGeneration ||
+        authoringController?.snapshot().documentId !== requestDocumentId
+      ) return;
+      setHistoryState((current) => current.diff?.targetVersionId === right.versionId
+        ? {
+            ...current,
+            diff: {
+              status: "Failed",
+              targetVersionId: right.versionId,
+              targetVersionLabel,
+              errorCode: "COMMAND_BRIDGE_FAILED",
+            },
+          }
+        : current);
+    });
+  }, [beginAuthoringDiffGeneration, historyState.comparison, startAuthoringBackgroundDiff]);
+
+  const closeAuthoringDiff = useCallback(() => {
+    beginAuthoringDiffGeneration();
+    setHistoryState((current) => {
+      const { diff: _discarded, ...history } = current;
+      return history;
+    });
+  }, [beginAuthoringDiffGeneration]);
 
   const applyAuthoringRestore = useCallback(() => {
     const snapshot = authoringController?.snapshot();
-    const preview = historyState.preview;
+    const restore = historyState.restore;
     if (
       !desktopClient ||
       !authoringController ||
-      !revisionMetadataGenerator ||
+      !bootstrapUuidSource ||
       !snapshot?.workspaceId ||
       !snapshot.documentId ||
-      !preview
+      !restore ||
+      (restore.status !== "Confirming" && restore.status !== "RecoveryRequired")
     ) {
       return;
     }
-    const metadata = revisionMetadataGenerator.next(snapshot.documentId, snapshot.revision + 1);
-    setHistoryState((current) => ({ ...current, status: "Applying" }));
+    const applying = restore.status === "RecoveryRequired"
+      ? retryRestoreRecovery(restore)
+      : beginRestoreApply(restore, `document-restore-${bootstrapUuidSource()}`);
+    if (applying.status !== "Applying") return;
+    const preview = applying;
+    let primaryCommitted = false;
+    setHistoryState((current) => ({ ...current, status: "Applying", restore: applying }));
     void desktopClient
       .restoreDocumentVersion({
         commandName: "restore-document-version",
+        operationId: preview.operationId,
         workspaceId: snapshot.workspaceId,
         documentId: snapshot.documentId,
         targetVersionId: preview.targetVersionId,
         expectedCurrentVersionId: preview.expectedCurrentVersionId,
-        restoredVersionId: metadata.versionId,
-        restoredSnapshotRef: metadata.snapshotRef,
         author: "local-user",
         summary: "문서 이력 복원",
       })
       .then(async (restored) => {
+        primaryCommitted = true;
         const current = await desktopClient.getCurrentDocument({
           queryName: "get-current-document",
           workspaceId: snapshot.workspaceId,
@@ -901,29 +1390,63 @@ function DesktopApp(): React.ReactElement {
           queryName: "get-document-history",
           workspaceId: snapshot.workspaceId,
           documentId: snapshot.documentId,
-          limit: 20,
+          limit: 50,
         });
         return {
           nextSnapshot,
           entries: presentDocumentHistory(history.entries, historyDateFormatter),
+          nextCursor: history.nextCursor,
         };
       })
-      .then(({ nextSnapshot, entries }) => {
+      .then(({ nextSnapshot, entries, nextCursor }) => {
         setAuthoringSnapshot(nextSnapshot);
         setHistoryState({
           status: "Applied",
           entries,
-          preview,
+          nextCursor,
+          restore: completeRestoreApply(applying),
         });
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        const failure = error instanceof LocalDesktopCommandClientError
+          ? { code: error.code, retryable: error.retryable, repairRequired: error.repairRequired }
+          : {
+              code: primaryCommitted
+                ? "DOCUMENT_RESTORE_RECOVERY_REQUIRED"
+                : "COMMAND_BRIDGE_FAILED",
+              retryable: primaryCommitted,
+              repairRequired: primaryCommitted,
+            };
         setHistoryState((current) => ({
           ...current,
           status: "Failed",
-          errorCode: "DOCUMENT_RESTORE_VERSION_CONFLICT",
+          restore: failRestoreApply(applying, failure),
         }));
       });
-  }, [historyState.preview]);
+  }, [historyState.restore]);
+
+  const requestAuthoringRestoreConfirmation = useCallback(() => {
+    setHistoryState((current) => ({
+      ...current,
+      restore: current.restore
+        ? requestRestoreConfirmation(current.restore)
+        : current.restore,
+    }));
+  }, []);
+
+  const cancelAuthoringRestoreConfirmation = useCallback(() => {
+    setHistoryState((current) => ({
+      ...current,
+      restore: current.restore
+        ? cancelRestoreConfirmation(current.restore)
+        : current.restore,
+    }));
+  }, []);
+
+  const refreshAuthoringRestorePreview = useCallback(() => {
+    const restore = historyState.restore;
+    if (restore?.status === "Conflict") previewAuthoringRestore(restore.targetVersionId);
+  }, [historyState.restore, previewAuthoringRestore]);
 
   useEffect(() => {
     if (
@@ -972,7 +1495,7 @@ function DesktopApp(): React.ReactElement {
   }, [surface, graphCenterDocumentId, graphQueryScope]);
 
   useEffect(() => {
-    if (surface === "Assets") void runAssetQuery();
+    if (surface === "Assets" || surface === "Authoring") void runAssetQuery();
   }, [surface, assetDocumentId, requestedAssetId]);
 
   useEffect(() => {
@@ -1014,11 +1537,16 @@ function DesktopApp(): React.ReactElement {
     };
   }, [surface, authoringSnapshot.workspaceId, authoringSnapshot.documentId]);
 
+  useEffect(() => {
+    setDocumentInspectorState(createDocumentInspectorState());
+  }, [authoringSnapshot.documentId]);
+
   if (surface === "Home") {
     return createDesktopWorkspaceHomeElement(homeModel, {
         onRetry: loadHome,
         onCreateDocument: createNewDocument,
         onOpenNavigator: openNavigator,
+        onResumeDocument: resumeDocument,
         onOpenGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Global" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
         onOpenCanvas: () => requestDesktopRoute({ kind: "Canvas", canvasId: "default-canvas" }, { workspaceId: "workspace-1", canvasId: "default-canvas", originRoute: activeRoute.kind }),
         onOpenAssets: () => requestDesktopRoute({ kind: "Assets" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
@@ -1030,6 +1558,7 @@ function DesktopApp(): React.ReactElement {
     return createDesktopDocumentNavigatorElement(navigatorModel, {
         onCreateDocument: createNewDocument,
         onHome: () => requestDesktopRoute({ kind: "Home" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
+        onDocument: resumeDocument,
         onView: selectNavigatorView,
         onFilter: filterNavigator,
         onRetry: retryNavigator,
@@ -1044,7 +1573,7 @@ function DesktopApp(): React.ReactElement {
     onCreateDocument: createNewDocument,
     onHome: () => requestDesktopRoute({ kind: "Home" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
     onSearch: openNavigator,
-    onDocument: openNavigator,
+    onDocument: resumeDocument,
     onGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Global" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
     onCanvas: () => requestDesktopRoute({ kind: "Canvas", canvasId: "default-canvas" }, { workspaceId: "workspace-1", canvasId: "default-canvas", originRoute: activeRoute.kind }),
     onAssets: () => requestDesktopRoute({ kind: "Assets" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
@@ -1052,6 +1581,17 @@ function DesktopApp(): React.ReactElement {
     onOpenDocument: openDocument,
     onOpenAsset: (assetId: string) => requestDesktopRoute({ kind: "Assets", assetId }, { workspaceId: "workspace-1", assetId, originRoute: activeRoute.kind }),
   };
+  if (surface === "DocumentEmpty") {
+    return createDesktopDocumentEmptyStateElement({
+      onCreateDocument: createNewDocument,
+      onHome: explorationCallbacks.onHome,
+      onSearch: explorationCallbacks.onSearch,
+      onGraph: explorationCallbacks.onGraph,
+      onCanvas: explorationCallbacks.onCanvas,
+      onAssets: explorationCallbacks.onAssets,
+      onBackup: explorationCallbacks.onBackup,
+    });
+  }
   if (surface === "Graph") {
     return createDesktopKnowledgeGraphElement(homeModel, graphSnapshot, {
       ...explorationCallbacks,
@@ -1177,6 +1717,7 @@ function DesktopApp(): React.ReactElement {
       onAssetCancel: () => { void runAssetImportCancel(); },
       onAssetPreview: () => { void runAssetPreview(); },
       onAssetPreviewClose: closeAssetPreview,
+      onAssetOpen: () => { void runAssetExternalOpen(); },
     });
   }
   if (surface === "Backup") {
@@ -1184,7 +1725,7 @@ function DesktopApp(): React.ReactElement {
       onCreateDocument: createNewDocument,
       onHome: () => requestDesktopRoute({ kind: "Home" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
       onSearch: openNavigator,
-      onDocument: openNavigator,
+      onDocument: resumeDocument,
       onGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Global" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
       onCanvas: () => requestDesktopRoute({ kind: "Canvas", canvasId: "default-canvas" }, { workspaceId: "workspace-1", canvasId: "default-canvas", originRoute: activeRoute.kind }),
       onAssets: () => requestDesktopRoute({ kind: "Assets" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
@@ -1248,20 +1789,75 @@ function DesktopApp(): React.ReactElement {
         setRouteState((current) => transitionDesktopRoute(current, { type: "CancelTransition" }).state);
       },
       onLoadHistory: loadAuthoringHistory,
+      onLoadMoreHistory: loadMoreAuthoringHistory,
+      onToggleHistoryCompareSelection: toggleHistoryCompareSelection,
+      onCompareSelectedVersions: compareSelectedAuthoringVersions,
       onCreateDocument: createNewDocument,
+      onCompareVersion: compareAuthoringVersion,
+      onCloseDiff: closeAuthoringDiff,
+      onCancelBackgroundDiff: cancelAuthoringBackgroundDiff,
+      onRetryBackgroundDiff: retryAuthoringBackgroundDiff,
       onPreviewRestore: previewAuthoringRestore,
+      onRequestRestoreConfirmation: requestAuthoringRestoreConfirmation,
+      onCancelRestoreConfirmation: cancelAuthoringRestoreConfirmation,
       onApplyRestore: applyAuthoringRestore,
+      onRefreshRestorePreview: refreshAuthoringRestorePreview,
+      onContinueRestoreRecovery: applyAuthoringRestore,
       onSearch: openNavigator,
       onGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Global" }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, originRoute: activeRoute.kind }),
       onCanvas: () => requestDesktopRoute({ kind: "Canvas", canvasId: "default-canvas" }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, canvasId: "default-canvas", originRoute: activeRoute.kind }),
       onAssets: () => requestDesktopRoute({ kind: "Assets", documentId: authoringSnapshot.documentId }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, originRoute: activeRoute.kind }),
       onBackup: () => requestDesktopRoute({ kind: "Backup" }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, originRoute: activeRoute.kind }),
       onOpenLinkedDocument: openDocument,
+      onInspectorTab: (tab) => {
+        setDocumentInspectorState((current) => transitionDocumentInspector(current, { type: "SelectTab", tab }));
+      },
+      onAssetImport: () => {
+        void (async () => {
+          const result = await runAssetImport();
+          if (result?.importState === "Completed") await loadAuthoringHistory();
+        })();
+      },
+      onAssetRetry: () => { void runAssetQuery(); },
+      onAssetCancel: () => { void runAssetImportCancel(); },
+      onAssetSelect: (assetId) => { void selectAndLoadAssetDetail(assetId); },
+      onAssetPreview: () => { void runAssetPreview(); },
+      onAssetPreviewClose: closeAssetPreview,
+      onAssetOpen: () => { void runAssetExternalOpen(); },
+      onAssetUnlinkRequest: () => {
+        const selected = assetSnapshotRef.current.page?.assets.find(
+          (asset) => asset.assetId === assetSnapshotRef.current.selectedAssetId,
+        );
+        if (!selected) return;
+        setDocumentInspectorState((current) => transitionDocumentInspector(current, {
+          type: "RequestUnlink",
+          fileName: selected.fileName,
+        }));
+      },
+      onAssetUnlinkCancel: () => {
+        setDocumentInspectorState((current) => transitionDocumentInspector(current, { type: "CancelUnlink" }));
+      },
+      onAssetUnlinkConfirm: () => {
+        if (!["Confirming", "Failed"].includes(documentInspectorState.unlink.status)) return;
+        setDocumentInspectorState((current) => transitionDocumentInspector(current, { type: "ConfirmUnlink" }));
+        void (async () => {
+          const result = await runAssetUnlink();
+          if (result?.mutationState === "Idle") {
+            await loadAuthoringHistory();
+            setDocumentInspectorState((current) => transitionDocumentInspector(current, { type: "UnlinkSucceeded" }));
+            return;
+          }
+          setDocumentInspectorState((current) => transitionDocumentInspector(current, { type: "UnlinkFailed" }));
+        })();
+      },
+      onOpenLibrary: () => requestDesktopRoute({ kind: "Assets", documentId: authoringSnapshot.documentId }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, originRoute: activeRoute.kind }),
     },
     {
       viewMode: editorViewMode,
       history: historyState,
       links: linkOverviewSnapshot,
+      assets: assetSnapshot,
+      inspector: documentInspectorState,
     },
   );
 }
@@ -1274,11 +1870,11 @@ function currentSelection(state: DesktopRouteControllerState): DesktopSelectionC
   return state.status === "Stable" ? state.selection : state.currentSelection;
 }
 
-function surfaceForRoute(route: DesktopRoute): "Home" | "Navigator" | "Authoring" | "Graph" | "Canvas" | "Assets" | "Backup" {
+function surfaceForRoute(route: DesktopRoute): "Home" | "Navigator" | "Authoring" | "DocumentEmpty" | "Graph" | "Canvas" | "Assets" | "Backup" {
   switch (route.kind) {
     case "Home": return "Home";
     case "Search": return "Navigator";
-    case "Document": return "Authoring";
+    case "Document": return route.documentId ? "Authoring" : "DocumentEmpty";
     case "Graph": return "Graph";
     case "Canvas": return "Canvas";
     case "Assets": return "Assets";

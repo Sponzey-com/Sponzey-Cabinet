@@ -1,7 +1,7 @@
 export type DesktopRoute =
   | { readonly kind: "Home" }
   | { readonly kind: "Search"; readonly query?: string; readonly scope?: string }
-  | { readonly kind: "Document"; readonly documentId: string }
+  | { readonly kind: "Document"; readonly documentId?: string }
   | { readonly kind: "Graph"; readonly centerDocumentId?: string; readonly scope: "Global" | "Local" }
   | { readonly kind: "Canvas"; readonly canvasId: string }
   | { readonly kind: "Assets"; readonly documentId?: string; readonly assetId?: string }

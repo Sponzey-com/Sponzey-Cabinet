@@ -1,7 +1,7 @@
 # Sponzey Cabinet 프로젝트 최종 목표
 
 작성일: 2026-06-22  
-최종 갱신일: 2026-07-15
+최종 갱신일: 2026-07-16
 프로젝트명: Sponzey Cabinet  
 문서 성격: 제품의 최종 목표와 사용자에게 제시할 기능 범위 정의. 실행 계획, 일정, 단계별 로드맵은 포함하지 않는다.
 
@@ -34,24 +34,63 @@ Sponzey Cabinet의 플랫폼 목표는 현재 검증 범위와 차후 목표를 
 - Web: 현재 단계에서는 데스크톱 앱 내부 UI와 공유 가능한 React/CodeMirror UI 계층 또는 로컬 preview/development UI로 취급한다. 서버 호스팅/SaaS용 Web 클라이언트와 관리자 콘솔은 차후 목표다.
 - iOS/Android: 현재 개발 범위가 아니라 차후 목표다. 현재 아키텍처는 모바일 클라이언트가 나중에 같은 문서/검색/AI API와 UI 모델을 재사용할 수 있도록 설계하되, 모바일 서버 접속, push notification, 승인 workflow는 사용자의 명시적 요구 전까지 구현하지 않는다.
 
+## 문서 기능의 필수 제품 계약
+
+기존 제품 목표와 기능 범위는 모두 유지한다. 그 위에 다음 네 가지를 개인용 로컬 제품의 필수 문서 기능으로 고정한다. 아래 항목은 선택 기능이나 차후 서버 기능이 아니며, macOS 개인용 로컬 앱의 문서 작성 흐름에서 사용자가 직접 확인할 수 있어야 한다.
+
+### 1. 문서 작성과 첨부
+
+- 사용자는 문서를 작성하거나 읽는 화면에서 파일을 선택해 해당 문서에 첨부할 수 있어야 한다.
+- 파일 선택은 macOS platform picker 같은 UI adapter에서 수행하고, 유스케이스에는 검증된 파일 입력만 전달한다.
+- 파일 원본은 문서 Markdown이나 내부 version store에 삽입하지 않고 content-addressed asset store에 저장한다. 문서는 안정적인 asset identity와 document association만 참조한다.
+- 문서 화면은 해당 문서에 연결된 첨부 목록, 파일 종류, 크기, 상태, 연결 시점, 미리보기 가능 여부를 보여주고, 열기, 미리보기, 연결 해제를 제공한다.
+- 첨부 연결 실패는 문서 본문이나 current version을 변경하지 않아야 하며, 완료되지 않은 document association과 고아 metadata를 남기지 않아야 한다.
+- 문서에서 연결을 해제해도 다른 문서나 Canvas가 같은 asset을 참조하면 파일 원본을 삭제하지 않는다. 실제 원본 삭제는 참조 수 확인과 명시적 삭제 또는 보존 정책을 통과한 별도 생명주기로 처리한다.
+- 첨부 참조가 버전 snapshot의 일부라면 복원 시 해당 시점의 association을 재현하되, asset 원본 자체를 중복 저장하거나 과거 원본을 자동 삭제하지 않는다.
+
+### 2. 문서별 변경 비교
+
+- 사용자는 문서 이력에서 현재 문서와 선택한 버전, 또는 서로 다른 두 버전을 비교할 수 있어야 한다.
+- 비교 결과는 Markdown 원문을 기준으로 추가, 삭제, 동일한 줄을 결정적으로 표시한다. 줄 삽입 하나가 이후 모든 줄의 변경으로 오인되지 않도록 검증된 sequence diff 알고리즘을 사용하며, 첫 번째 물리적 줄의 변경은 문서 제목 변경으로도 이해할 수 있게 표시한다.
+- 첨부 변경은 파일 bytes를 이진 비교하지 않고, 첨부 association의 추가, 제거, 교체와 metadata 변경 요약으로 표시한다.
+- 내용이 같은 버전, 빈 문서, 매우 긴 줄, 줄바꿈 형식 차이, 한글과 Unicode가 포함된 문서에서도 결과 순서가 안정적이어야 한다.
+- 일반 UI에는 내부 version ID, document ID, snapshot path, Git commit, branch, repository 같은 구현 정보를 노출하지 않는다. 사용자는 변경 시각, 변경 요약과 읽을 수 있는 버전 순서로 대상을 선택한다.
+
+### 3. 문서 복원과 버전 변경
+
+- 사용자는 복원 전에 선택한 버전과 현재 문서의 diff 및 첨부 association 변경 요약을 확인해야 한다.
+- 복원은 과거 이력을 수정하거나 삭제하지 않는다. 선택한 과거 snapshot을 내용으로 하는 새 버전을 생성하고 그 새 버전을 current로 전환한다.
+- 복원 직전 current version도 이력에 남아야 하므로, 사용자는 다시 비교하거나 별도 복원으로 복원 동작을 되돌릴 수 있어야 한다.
+- 복원 command는 preview에서 확인한 expected current version과 idempotent operation identity를 받아야 한다. preview 이후 문서가 변경되었다면 쓰기 전에 `version conflict`를 반환하고 current document와 history를 변경하지 않는다. 같은 operation 재시도는 restore version을 중복 생성하지 않는다.
+- 복원 성공은 본문, 첫 줄에서 파생된 제목, 링크/백링크, 검색/Graph projection과 첨부 association이 같은 새 version을 가리키고 durable readback이 완료된 뒤에만 확정한다.
+- append, current 전환 또는 projection enqueue가 실패하면 부분 성공을 사용자에게 성공으로 표시하지 않는다. current document는 복원 전 상태를 유지한다. append가 이미 완료된 뒤 후속 단계가 실패했다면 operation journal에 `RecoveryRequired`를 기록하고 같은 operation identity로 재개하거나 실패 attempt를 비-current 상태로 종결한다.
+
+### 4. 문서 이력의 조회와 사용자 경험
+
+- 현재 문서 조회, 이력 목록 조회, 특정 버전 조회, diff 조회, restore preview와 restore command를 별도 유스케이스와 계약으로 분리한다.
+- 표준 크기 문서의 이력, diff와 restore preview는 정상적인 로컬 인덱스와 cache 상태에서 p95 300ms 이내를 목표로 한다.
+- 대용량 diff가 300ms 안에 완료될 수 없으면 전체 UI를 멈추지 말고 비동기 작업으로 전환한다. 작업 접수와 상태 조회는 p95 300ms 목표를 유지한다.
+- 문서 저장, 첨부, 비교와 복원은 모두 로컬에서 동작하고 외부 서버, Git provider, Git CLI, 수동 설정 파일 또는 계정 로그인을 요구하지 않는다.
+- Product Log에는 안정적인 이벤트 이름, 마스킹된 identity, 변경 줄 수, 첨부 변경 수, 처리 시간과 error code만 기록한다. 문서 본문, diff hunk 원문, 파일 bytes, 원본 파일명과 절대 경로는 기록하지 않는다.
+
 ## 현재 구현 기준선
 
 Phase 013 UI 통합과 이후 문서 제목 일관성 보강까지 반영한 현재 제품 기준선은 `personal_local_macos_desktop`이다. 이 기준선은 프로젝트 전체 장기 목표의 완료가 아니라, 개인 사용자가 실제로 확인할 수 있는 로컬 데스크톱 제품 범위의 구현 기준선을 뜻한다. Phase 012 archived release evidence는 보존하고, Phase 013 이후 변경은 현재 source fingerprint에서 다시 검증한다.
 
-- React와 CodeMirror 기반 문서 작성 화면에서 새 문서 작성, 현재 문서 저장, `Cmd+S`, Markdown preview, 이력 조회, 버전 비교와 복원을 제공한다.
+- React와 CodeMirror 기반 문서 작성 화면에서 새 문서 작성, 현재 문서 저장, `Cmd+S`, Markdown preview, 문서 첨부, 이력 조회, 버전 비교와 preview 기반 복원을 제공한다.
 - 문서 제목은 별도 입력값이나 독립 metadata가 아니라 Markdown 본문의 첫 번째 물리적 줄에서 파생한다. 첫 줄의 Markdown heading marker를 제거해 표시하고, 유효한 문자가 없으면 `제목 없는 문서`를 사용하며, 사용자 UI와 신규 문서 생성 command에 별도 제목 입력을 두지 않는다.
 - 본문 저장과 버전 복원은 같은 제목 파생 규칙으로 current metadata를 갱신한다. 저장 성공은 durable readback과 projection 동기화 뒤에 확정하고, Home, 문서 목록, Graph, Canvas와 연결 문서 표시는 같은 current title을 사용한다.
 - 현재 문서 조회와 이력 조회를 별도 query path로 유지하고, 저장 성공은 native durable write 뒤의 version/readback과 앱 재시작 결과로 확인한다.
 - Wikilink와 Markdown link를 durable link index와 Graph projection에 반영하고, Graph 화면은 fixture나 최근 문서 추정 관계가 아니라 실제 projection의 node와 edge만 표시한다.
 - Canvas 생성, 조회, node/edge/geometry/viewport 수정, 이름 변경, 보관과 손상 복구를 durable revision store에 저장한다.
-- 첨부 파일은 platform picker, staging, content-addressed object store, metadata와 document association으로 분리 관리하며, 허용된 형식과 크기 범위에서 native preview를 제공한다.
+- 첨부 파일은 문서에서 연결할 수 있고 platform picker, staging, content-addressed object store, metadata와 document association으로 분리 관리하며, 허용된 형식과 크기 범위에서 native preview를 제공한다. 연결 해제는 다른 참조가 남은 asset 원본을 삭제하지 않는다.
 - backup/export/restore는 문서 current/history뿐 아니라 Canvas와 Asset metadata/object를 포함하고, 복원 뒤 durable readback과 reopen으로 결과를 확인한다.
 - Graph, Canvas, Asset, projection 손상과 중단 상태는 빈 화면이나 성공 상태로 숨기지 않고 안정적인 error code와 recovery action으로 전달한다.
 - 현재 문서, 이력, 검색, 링크, Graph, Canvas viewport, Asset metadata 조회는 표준 fixture의 release-mode 성능 검증에서 p95 300ms 목표를 충족한다.
 - Product Log, Field Debug Log, Development Log를 분리하고 문서 본문, 첨부 bytes, 절대 경로와 비밀값을 릴리스 증거 및 운영 로그에서 제외한다.
 - macOS packaged UI smoke는 Home, Document, Graph, Canvas, Assets, Backup/Restore와 recovery 흐름을 실제 `.app`에서 검증한다.
 
-Phase 012 authoritative evidence는 `.tasks/phase012/phase012-release-gate-result.md`와 `.tasks/phase012/release/`에 보관한다. Phase 013 이후 변경은 `.tasks/plan.md`와 현재 테스트 결과를 기준으로 재검증하며, 과거 archive marker를 현재 source fingerprint의 완료 증거로 재사용하지 않는다. Windows/Linux는 `deferred_future`이며 Web/iOS/Android, 서버 호스팅, SaaS, 멀티 사용자 기능은 현재 완료 범위가 아니다.
+Phase 012 authoritative evidence는 `.tasks/phase012/phase012-release-gate-result.md`와 `.tasks/phase012/release/`에 보관한다. Phase 013 이후 변경은 현재 source fingerprint의 테스트 결과와 활성 phase plan이 존재할 때 그 `.tasks/plan.md`를 기준으로 재검증하며, 과거 archive marker를 현재 완료 증거로 재사용하지 않는다. Windows/Linux는 `deferred_future`이며 Web/iOS/Android, 서버 호스팅, SaaS, 멀티 사용자 기능은 현재 완료 범위가 아니다.
 
 최종 제품은 사용자가 다음 문장으로 이해할 수 있어야 한다.
 
@@ -567,10 +606,13 @@ Web / Tauri desktop / mobile clients
 - 문서 조회는 현재 문서 조회와 이력 조회를 명확히 분리해야 한다.
 - 현재 문서 조회는 최신 snapshot과 metadata를 기준으로 응답해야 한다.
 - 이력 조회는 version history, diff, restore preview, 특정 시점 snapshot을 기준으로 응답해야 한다.
+- diff 조회는 현재 문서 대 특정 버전과 특정 버전 대 특정 버전을 구분하고, 파일 원본의 binary diff가 아니라 Markdown 줄 변경과 첨부 association 변경 요약을 반환해야 한다.
+- restore preview는 대상 version과 preview 당시 current version을 식별해야 하며, restore command는 그 current version을 optimistic concurrency guard로 사용해야 한다.
+- 문서 복원은 기존 version을 덮어쓰지 않고 새 version을 append한 뒤 current를 전환해야 한다. 복원 실패나 version conflict에서는 복원 전 current를 보존해야 한다.
 - 현재 문서 조회 경로는 이력 저장소 전체를 스캔하지 않아야 한다.
 - 이력 조회 경로는 현재 문서 조회 성능을 저하시키지 않도록 별도 query path와 pagination을 가져야 한다.
 - 모든 사용자-facing 검색과 조회는 정상적인 인덱스 상태에서 p95 300ms 이내 응답을 목표로 해야 한다.
-- 300ms 기준은 문서 현재 조회, 문서 이력 목록 조회, 특정 버전 metadata 조회, 폴더/컬렉션 목록 조회, 링크/백링크 조회, 첨부 metadata 조회, 권한 필터링이 적용된 검색에 적용한다.
+- 300ms 기준은 문서 현재 조회, 문서 이력 목록 조회, 특정 버전 metadata 조회, 표준 크기 문서의 diff/restore preview, 폴더/컬렉션 목록 조회, 링크/백링크 조회, 첨부 metadata 조회, 권한 필터링이 적용된 검색에 적용한다.
 - AI 답변 생성, OCR, embedding, 대용량 export, 대용량 첨부 preview 생성처럼 본질적으로 비동기인 작업은 300ms 기준의 직접 대상이 아니다. 단, 작업 상태 조회와 캐시된 결과 조회는 300ms 이내를 목표로 해야 한다.
 - 문서 읽기 경로는 metadata, current snapshot, permission decision, search/graph projection을 활용해 빠르게 응답해야 한다.
 - 문서 쓰기 경로는 operation validation, permission check, durable append, broadcast를 우선하고, 검색/그래프/AI indexing은 비동기로 처리해야 한다.
@@ -621,6 +663,10 @@ Web / Tauri desktop / mobile clients
 - 특정 버전 조회
 - 문서 diff 조회
 - 복원 preview 조회
+- preview에서 확인한 current version을 기준으로 한 충돌 방지
+- 과거 snapshot으로 새 version을 생성하는 비파괴 복원
+- 문서 화면에서 파일 첨부, 첨부 목록 조회, 미리보기/열기와 연결 해제
+- 문서 diff에서 첨부 association 추가/제거/교체 요약
 - 현재 목표: 로컬 workspace 안의 문서 즐겨찾기, 최근 문서, 태그 기반 탐색
 - 차후 목표: 문서 공개 링크와 비공개 공유 링크
 - 차후 목표: 문서별 댓글, 인라인 댓글, 멘션, 해결됨 상태
@@ -652,9 +698,14 @@ Sponzey Cabinet의 문서 버전 관리는 사용자에게는 변경 이력, 비
 
 - 문서 생성, 수정, 이동, 삭제는 내부 변경 단위로 기록된다.
 - 작성자, 수정자, 변경 요약, timestamp, 상태, 릴리즈 정보를 보존한다.
-- 문서 history, diff, 작성자 추적, revert를 문서 UI에서 제공한다.
+- 문서 history, 현재 대 과거 version diff, 과거 version 간 diff, 작성자 추적과 restore를 문서 UI에서 제공한다.
 - 현재 문서 조회와 이력 조회는 UI/API에서 명확히 구분한다.
 - 현재 문서 조회는 latest snapshot을 기준으로 빠르게 응답하고, 이력 조회는 version entry와 snapshot/diff를 기준으로 별도 처리한다.
+- diff는 Markdown 줄 단위 변경과 첨부 association 변경을 구분한다. 첨부 파일 bytes의 binary diff는 기본 문서 diff 범위에 포함하지 않는다.
+- 복원 전에는 현재 문서와 대상 version의 차이를 preview하고, preview 당시 current version이 바뀌면 복원을 거부한다.
+- 복원은 선택한 snapshot을 내용으로 하는 새 version entry를 append하고 그 version을 current로 전환한다. 기존 version entry와 복원 직전 current는 삭제하거나 덮어쓰지 않는다.
+- 복원 성공은 본문, 첫 줄 파생 제목, 링크/검색/Graph projection, 첨부 association과 durable readback이 새 version에 일치한 뒤 확정한다.
+- 사용자 UI에는 내부 version ID, snapshot path나 Git 용어를 표시하지 않고 변경 시각, 변경 요약, 비교와 복원 action만 제공한다.
 - 문서 초안, 승인, 배포는 사용자에게 draft, review, published 같은 상태로 보인다.
 - 리뷰와 승인은 문서 워크플로로 제공하며, 코드 저장소형 리뷰 절차로 제공하지 않는다.
 - 개인 로컬 저장소와 원격 백업 저장소를 연결할 수 있다.
@@ -664,6 +715,18 @@ Sponzey Cabinet의 문서 버전 관리는 사용자에게는 변경 이력, 비
 ### 4. 첨부 파일 관리
 
 첨부 파일은 Redmine DMSF(Document Management System Features)처럼 문서 부속물이 아니라 별도 생명주기를 가진 관리 대상이어야 한다.
+
+현재 개인용 로컬 제품은 다음 동작을 필수로 제공한다.
+
+- 문서 작성/조회 화면에서 platform file picker로 파일을 선택하고 현재 문서에 연결
+- 파일 검증, staging, content-addressed 원본 저장, metadata 기록, document association 생성을 순서가 명시된 상태머신으로 처리
+- 문서별 첨부 목록과 workspace asset 목록을 같은 asset identity로 조회
+- 지원 형식의 bounded preview, 원본 열기, 문서 연결과 연결 해제
+- 연결 실패 시 고아 association과 부분 저장을 남기지 않는 보상 또는 재개 가능한 실패 상태
+- 연결 해제 시 다른 문서나 Canvas의 참조를 보존하고, 참조가 남은 원본을 삭제하지 않는 참조 무결성
+- 문서 이력 비교와 복원에서 첨부 association snapshot의 추가/제거/교체를 추적
+
+다음 고급 파일 관리 항목은 기존 장기 목표로 유지하되, 멀티 사용자 승인과 서버 저장소가 필요한 항목은 사용자의 명시적 범위 변경 전까지 현재 release gate에 포함하지 않는다.
 
 - 폴더/디렉터리 구조
 - 파일 버전과 revision history
@@ -879,9 +942,11 @@ Sponzey Cabinet은 "닫힌 위키"가 아니라 다른 시스템과 연결되는
 - 로컬 문서 저장소
 - 자동 변경 이력과 복원
 - 현재 문서 조회와 이력 조회 분리
+- 현재 대 과거 및 과거 대 과거 문서 diff
+- preview, optimistic concurrency guard와 새 version append를 사용하는 비파괴 문서 복원
 - 문서 링크/백링크/그래프
 - AFFiNE/Canvas형 개인용 관계도와 자유 배치
-- 첨부 파일 로컬 관리
+- 문서 화면에서 파일 첨부와 연결 해제, 문서별 첨부 목록, 로컬 asset 원본 관리
 - 로컬 검색
 - 검색/조회 p95 300ms 목표
 - AI provider 직접 연결
@@ -944,6 +1009,8 @@ Sponzey Cabinet은 "닫힌 위키"가 아니라 다른 시스템과 연결되는
 
 - Obsidian처럼 내 문서를 내가 소유한다.
 - 모든 문서 변경이 자동으로 기록되고 필요할 때 복원할 수 있다.
+- 현재 문서와 과거 버전의 차이를 읽기 쉬운 diff로 확인하고, 기존 이력을 잃지 않은 채 원하는 버전으로 되돌릴 수 있다.
+- 문서에서 파일을 바로 첨부하되 원본은 별도 자산으로 안전하게 관리하고 여러 문서와 Canvas에서 재사용할 수 있다.
 - 문서 간 관계를 그래프로 탐색한다.
 - AI를 내 문서에 연결해 검색, 요약, 정리를 자동화한다.
 - 설치 한 번으로 개인 PC에서 바로 사용할 수 있다.

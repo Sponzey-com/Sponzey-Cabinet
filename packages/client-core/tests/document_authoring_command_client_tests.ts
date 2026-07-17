@@ -74,7 +74,11 @@ test("authoring client dispatches explicit create current and revision save comm
     "rename_document",
   ]);
   assert.equal(calls[2]?.payload.revision, 7);
-  assert.equal(calls[2]?.payload.nextVersionId, "v2");
+  assert.equal(calls[0]?.payload.operationId, "operation-create-1");
+  assert.equal(calls[2]?.payload.operationId, "operation-save-1");
+  assert.equal("path" in calls[0]!.payload, false);
+  assert.equal("nextVersionId" in calls[2]!.payload, false);
+  assert.equal("snapshotRef" in calls[2]!.payload, false);
   assert.equal(saved.revision, 7);
   assert.equal(saved.currentVersionId, "v2");
   assert.equal(renamed.title, "새 제목");
@@ -105,13 +109,10 @@ test("authoring client preserves repair metadata without native message or body 
 
 function createCommand() {
   return {
+    operationId: "operation-create-1",
     workspaceId: "workspace-1",
     documentId: "doc-1",
-    title: "Source",
-    path: "notes/source.md",
     body: "body one",
-    versionId: "v1",
-    snapshotRef: "snapshot-v1",
     author: "local-user",
     summary: "Created",
   };
@@ -119,12 +120,11 @@ function createCommand() {
 
 function saveCommand() {
   return {
+    operationId: "operation-save-1",
     workspaceId: "workspace-1",
     documentId: "doc-1",
     body: "body two",
     expectedVersionId: "v1",
-    nextVersionId: "v2",
-    snapshotRef: "snapshot-v2",
     author: "local-user",
     summary: "Updated",
     revision: 7,

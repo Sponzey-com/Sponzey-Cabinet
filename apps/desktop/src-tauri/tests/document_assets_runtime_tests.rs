@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cabinet_adapters::durable_asset_association_catalog::DurableAssetAssociationCatalog;
@@ -62,6 +63,7 @@ use cabinet_domain::asset::{
 use cabinet_domain::document::DocumentId;
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::asset_association_catalog::AssetAssociationCatalog;
+use cabinet_ports::asset_external_open::{AssetExternalOpenError, AssetExternalOpener};
 use cabinet_ports::asset_metadata_catalog::AssetMetadataCatalog;
 
 #[test]
@@ -161,6 +163,56 @@ fn native_asset_detail_and_unlink_return_capability_and_durable_readback() {
             })
             .ok
     );
+}
+
+#[test]
+fn native_external_open_response_contains_no_internal_path() {
+    let temp = TempRoot::new("external-open");
+    seed_asset(&temp.path);
+    let opener = Arc::new(RecordingExternalOpener::default());
+    let runtime = DesktopDocumentAssetsRuntime::with_preview_limit_and_opener(
+        temp.path.clone(),
+        10 * 1024 * 1024,
+        2 * 1024 * 1024,
+        opener.clone(),
+    )
+    .expect("runtime");
+
+    let response = runtime.open_external(DesktopAssetDetailRequestDto {
+        workspace_id: "workspace-1".into(),
+        asset_id: "a".repeat(64),
+    });
+    let json = serde_json::to_string(&response).expect("json");
+
+    assert!(response.ok);
+    assert!(response.opened);
+    assert_eq!(
+        opener.calls.lock().expect("calls").as_slice(),
+        &[("workspace-1".into(), "a".repeat(64), "spec.pdf".into())]
+    );
+    assert!(!json.contains(&temp.path.display().to_string()));
+    assert!(!json.contains("path"));
+}
+
+#[derive(Default)]
+struct RecordingExternalOpener {
+    calls: Mutex<Vec<(String, String, String)>>,
+}
+
+impl AssetExternalOpener for RecordingExternalOpener {
+    fn open(
+        &self,
+        workspace: &WorkspaceId,
+        asset: &AssetId,
+        file_name: &AssetFileName,
+    ) -> Result<(), AssetExternalOpenError> {
+        self.calls.lock().expect("calls").push((
+            workspace.as_str().into(),
+            asset.as_str().into(),
+            file_name.as_str().into(),
+        ));
+        Ok(())
+    }
 }
 
 #[test]

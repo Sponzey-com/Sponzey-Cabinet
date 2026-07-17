@@ -13,6 +13,7 @@ const shellRoutes: readonly WorkspaceShellRouteKind[] = ["Home", "Search", "Docu
 export interface DesktopDocumentNavigatorCallbacks {
   readonly onCreateDocument: () => void;
   readonly onHome: () => void;
+  readonly onDocument: () => void;
   readonly onView: (view: DocumentNavigatorView, viewKey?: string) => void;
   readonly onFilter: (filter: string) => void;
   readonly onRetry: () => void;
@@ -47,7 +48,7 @@ export function createDesktopDocumentNavigatorElement(
   return createWorkspaceShellElement({
     model: createWorkspaceShellModel({ route: "Search", availableActions: shellRoutes, messages: KO_KR_MESSAGES }),
     messages: KO_KR_MESSAGES,
-    routeActions: { Home: callbacks.onHome, Document: () => callbacks.onView("Tree"), Graph: callbacks.onGraph, Canvas: callbacks.onCanvas, Assets: callbacks.onAssets, Backup: callbacks.onBackup },
+    routeActions: { Home: callbacks.onHome, Document: callbacks.onDocument, Graph: callbacks.onGraph, Canvas: callbacks.onCanvas, Assets: callbacks.onAssets, Backup: callbacks.onBackup },
     rootAttributes: { "data-cabinet-navigator-state": model.displayState },
     rootClassName: "navigator-shell",
     onCreateDocument: callbacks.onCreateDocument,

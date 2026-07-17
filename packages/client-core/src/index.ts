@@ -93,13 +93,14 @@ export interface RestoreDiffLineView {
 export interface RestorePreviewQuery extends DocumentIdentity {
   readonly queryName: "preview-document-restore";
   readonly targetVersionId: string;
-  readonly expectedCurrentVersionId: string;
 }
 
 export interface RestorePreviewResult extends DocumentIdentity {
   readonly targetVersionId: string;
   readonly expectedCurrentVersionId: string;
   readonly canRestore: boolean;
+  readonly missingAssetLabels: readonly string[];
+  readonly diff: DocumentDiffView;
   readonly lines: readonly RestoreDiffLineView[];
 }
 
@@ -130,13 +131,14 @@ export interface KnowledgeGraphQuery extends DocumentIdentity {
 
 export interface CurrentDocumentView extends DocumentIdentity {
   readonly title: string;
-  readonly path: string;
+  readonly path?: string;
   readonly body: string;
   readonly versionId: string;
 }
 
 export interface DocumentHistoryEntry {
   readonly versionId: string;
+  readonly revisionNumber?: number;
   readonly summary: string;
   readonly author: string;
   readonly createdAt: string;
@@ -145,6 +147,73 @@ export interface DocumentHistoryEntry {
 export interface DocumentHistoryPage extends DocumentIdentity {
   readonly entries: readonly DocumentHistoryEntry[];
   readonly nextCursor?: string;
+}
+
+export type DocumentDiffQuery =
+  | (DocumentIdentity & {
+      readonly queryName: "compare-current-document-to-version";
+      readonly targetVersionId: string;
+    })
+  | (DocumentIdentity & {
+      readonly queryName: "compare-document-versions";
+      readonly leftVersionId: string;
+      readonly rightVersionId: string;
+    });
+
+export type DocumentDiffLineKind = "Unchanged" | "Added" | "Removed";
+
+export interface DocumentDiffLineView {
+  readonly kind: DocumentDiffLineKind;
+  readonly text: string;
+  readonly oldLineNumber?: number;
+  readonly newLineNumber?: number;
+}
+
+export interface DocumentDiffHunkView {
+  readonly oldStartLine: number;
+  readonly newStartLine: number;
+  readonly addedCount: number;
+  readonly removedCount: number;
+  readonly lines: readonly DocumentDiffLineView[];
+}
+
+export type DocumentTitleDeltaView =
+  | { readonly kind: "Unchanged" }
+  | { readonly kind: "Changed"; readonly before: string; readonly after: string };
+
+export interface DocumentAttachmentLabelView {
+  readonly label: string;
+  readonly availability: DocumentAttachmentAvailabilityView;
+}
+
+export interface DocumentAttachmentRelabelView {
+  readonly beforeLabel: string;
+  readonly afterLabel: string;
+  readonly availability: DocumentAttachmentAvailabilityView;
+}
+
+export type DocumentAttachmentAvailabilityView = "Available" | "Missing";
+
+export type DocumentAttachmentDiffView =
+  | {
+      readonly status: "Known";
+      readonly added: readonly DocumentAttachmentLabelView[];
+      readonly removed: readonly DocumentAttachmentLabelView[];
+      readonly relabeled: readonly DocumentAttachmentRelabelView[];
+      readonly unchangedCount: number;
+    }
+  | { readonly status: "LegacyUnknown" };
+
+export interface DocumentDiffView extends DocumentIdentity {
+  readonly status: "Complete" | "TooLarge";
+  readonly leftVersionId: string;
+  readonly rightVersionId: string;
+  readonly limitReason?: "bytes" | "lines" | "hunks";
+  readonly addedCount: number;
+  readonly removedCount: number;
+  readonly attachmentDiff: DocumentAttachmentDiffView;
+  readonly titleDelta: DocumentTitleDeltaView;
+  readonly hunks: readonly DocumentDiffHunkView[];
 }
 
 export interface SearchResultView extends DocumentIdentity {
@@ -639,6 +708,7 @@ export const PHASE009_LOCAL_DESKTOP_COMMAND_NAMES = [
   "update_current_document",
   "get_document_history",
   "get_document_version",
+  "compare_document_versions",
   "preview_document_restore",
   "restore_document_version",
   "search_documents",
@@ -671,6 +741,19 @@ export type LocalDesktopCommandErrorCode =
   | "DOCUMENT_AUTHORING_POINTER_UPDATE_FAILED"
   | "DOCUMENT_AUTHORING_STORAGE_UNAVAILABLE"
   | "DOCUMENT_AUTHORING_RUNTIME_UNAVAILABLE"
+  | "DOCUMENT_REVISION_INVALID_INPUT"
+  | "DOCUMENT_REVISION_NOT_FOUND"
+  | "DOCUMENT_REVISION_CONFLICT"
+  | "DOCUMENT_REVISION_RECOVERY_REQUIRED"
+  | "DOCUMENT_REVISION_STORAGE_UNAVAILABLE"
+  | "DOCUMENT_QUERY_INVALID_INPUT"
+  | "DOCUMENT_QUERY_NOT_FOUND"
+  | "DOCUMENT_QUERY_STORAGE_UNAVAILABLE"
+  | "DOCUMENT_QUERY_CORRUPTED_DATA"
+  | "DOCUMENT_DIFF_INVALID_INPUT"
+  | "DOCUMENT_DIFF_NOT_FOUND"
+  | "DOCUMENT_DIFF_STORAGE_UNAVAILABLE"
+  | "DOCUMENT_DIFF_CORRUPTED_DATA"
   | "DOCUMENT_RESTORE_VERSION_CONFLICT"
   | "DOCUMENT_RESTORE_NOT_FOUND"
   | "DOCUMENT_RESTORE_STORAGE_UNAVAILABLE"
@@ -808,10 +891,8 @@ export interface SaveCurrentDocumentResult extends DocumentIdentity {
 }
 
 export interface CreateLocalDocumentCommand extends DocumentIdentity {
-  readonly path: string;
+  readonly operationId: string;
   readonly body: string;
-  readonly versionId: string;
-  readonly snapshotRef: string;
   readonly author: string;
   readonly summary: string;
 }
@@ -833,10 +914,9 @@ export interface RenameLocalDocumentResult extends DocumentIdentity {
 }
 
 export interface SaveDocumentRevisionCommand extends DocumentIdentity {
+  readonly operationId: string;
   readonly body: string;
   readonly expectedVersionId: string;
-  readonly nextVersionId: string;
-  readonly snapshotRef: string;
   readonly author: string;
   readonly summary: string;
   readonly revision: number;
@@ -848,10 +928,9 @@ export interface SaveDocumentRevisionResult extends SaveCurrentDocumentResult {
 
 export interface RestoreDocumentVersionCommand extends DocumentIdentity {
   readonly commandName: "restore-document-version";
+  readonly operationId: string;
   readonly targetVersionId: string;
   readonly expectedCurrentVersionId: string;
-  readonly restoredVersionId: string;
-  readonly restoredSnapshotRef: string;
   readonly author: string;
   readonly summary: string;
 }
@@ -859,6 +938,7 @@ export interface RestoreDocumentVersionCommand extends DocumentIdentity {
 export interface RestoreDocumentVersionResult extends DocumentIdentity {
   readonly restoredVersionId: string;
   readonly currentVersionId: string;
+  readonly revisionNumber: number;
   readonly finalState: "Completed";
 }
 
@@ -873,6 +953,7 @@ export interface LocalDesktopCommandClient {
   saveCurrentDocument(command: SaveCurrentDocumentCommand): Promise<SaveCurrentDocumentResult>;
   listDocumentHistory(query: DocumentHistoryQuery): Promise<DocumentHistoryPage>;
   getDocumentVersion(query: DocumentVersionQuery): Promise<DocumentVersionView>;
+  compareDocumentVersions(query: DocumentDiffQuery): Promise<DocumentDiffView>;
   previewDocumentRestore(query: RestorePreviewQuery): Promise<RestorePreviewResult>;
   restoreDocumentVersion(command: RestoreDocumentVersionCommand): Promise<RestoreDocumentVersionResult>;
   searchDocuments(query: SearchDocumentsQuery): Promise<SearchResultsPage>;
@@ -1037,6 +1118,14 @@ export function createLocalDesktopCommandClient(
       return callLocalDesktopCommand<DocumentVersionView>(
         transport,
         "get_document_version",
+        query,
+      );
+    },
+
+    compareDocumentVersions(query) {
+      return callLocalDesktopCommand<DocumentDiffView>(
+        transport,
+        "compare_document_versions",
         query,
       );
     },

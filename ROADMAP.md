@@ -1,7 +1,7 @@
 # Sponzey Cabinet 단계별 목표와 개발 계획
 
 작성일: 2026-06-22  
-최종 갱신일: 2026-07-15
+최종 갱신일: 2026-07-16
 문서 성격: `PROJECT.md`의 최종 제품 목표를 단계적으로 구현하기 위한 개발 계획  
 기준 문서: `PROJECT.md`, `AGENTS.md`
 
@@ -117,7 +117,7 @@ Phase 001부터 Phase 012까지의 누적 개발은 초기 MVP 범위를 넘어 
 - 문서 현재 조회와 문서 이력 조회는 별도 query path로 분리되어야 한다.
 - 현재 문서 조회는 latest snapshot과 metadata를 사용해야 하며, version history 전체를 스캔하면 안 된다.
 - 이력 조회는 pagination과 특정 version query를 제공해야 하며, 현재 문서 조회 경로를 느리게 만들면 안 된다.
-- 링크/백링크, 폴더/컬렉션, 첨부 metadata, 권한 필터링 검색은 성능 테스트 대상에 포함되어야 한다.
+- 링크/백링크, 폴더/컬렉션, 첨부 metadata, 표준 크기 문서의 diff/restore preview, 권한 필터링 검색은 성능 테스트 대상에 포함되어야 한다.
 - AI 답변 생성, OCR, embedding, 대용량 export는 비동기로 처리하되, 작업 상태 조회와 캐시된 결과 조회는 300ms 목표를 따라야 한다.
 - 성능 기준을 만족하지 못하는 기능은 index, projection, cache, pagination, async worker 중 하나로 구조를 조정해야 한다.
 
@@ -156,13 +156,17 @@ Phase 001부터 Phase 012까지의 누적 개발은 초기 MVP 범위를 넘어 
 - 고아 문서 조회
 - 문서 history 조회
 - 문서 diff 조회
+- 현재 문서 대 특정 version 및 특정 version 대 특정 version 비교
+- Markdown 줄 변경과 첨부 association 변경을 구분한 diff
 - 현재 문서 기준 조회
 - 이력 기준 조회
 - 특정 버전 조회
 - 복원 preview 조회
-- 특정 버전 복원
+- preview 당시 current version을 검증하는 특정 버전 복원
+- 과거 snapshot으로 새 version을 append하는 비파괴 복원
 - 로컬 첨부 파일 등록
-- 문서에서 첨부 파일 참조
+- 문서 작성/조회 화면에서 파일 첨부
+- 문서에서 첨부 파일 참조, 목록 조회, 미리보기/열기와 연결 해제
 - 첨부 파일 metadata 조회
 - 실제 link/graph projection 기반 local/global Graph
 - durable Canvas 생성, node/edge/geometry/viewport 수정, 보관과 recovery
@@ -192,6 +196,19 @@ Phase 001부터 Phase 012까지의 누적 개발은 초기 MVP 범위를 넘어 
 - 플러그인 런타임
 - CRM 객체
 - 사용자가 DB, Git CLI, 검색 엔진, Node.js, 별도 서버를 직접 설치해야 하는 로컬 실행 방식
+
+### 문서 핵심 완료 계약
+
+문서 기능은 다음 사용자 흐름과 데이터 안전 조건을 모두 충족해야 한다.
+
+1. 사용자는 문서 작성 또는 조회 화면에서 파일을 선택하고, 완료된 첨부를 같은 문서의 첨부 목록에서 즉시 확인한다.
+2. 첨부 파이프라인은 파일 검증, staging, content-addressed 원본 저장, metadata 기록과 document association을 분리한다. 어느 단계든 실패하면 완료되지 않은 association을 제거하거나 재개 가능한 실패 상태로 남기며 성공으로 표시하지 않는다.
+3. 사용자는 문서 이력에서 현재 대 선택 version과 선택 version 대 선택 version을 비교한다. 검증된 sequence diff로 Markdown 줄 변경을 계산해 한 줄 삽입이 이후 동일한 줄 전체의 변경으로 보이지 않게 하고, 첨부 association 변경은 별도 요약하며 첨부 bytes의 binary diff는 수행하지 않는다.
+4. 사용자는 복원 전에 diff와 첨부 변경 요약을 확인한다. 복원은 preview 당시 current version이 그대로일 때만 대상 snapshot을 내용으로 하는 새 version을 생성하고, 같은 operation 재시도는 version을 중복 생성하지 않는다.
+5. 복원은 과거 version과 복원 직전 current를 보존한다. conflict에서는 어떤 write도 수행하지 않는다. append 이후 후속 단계가 실패하면 current를 보존하고 operation을 `RecoveryRequired`로 기록해 재개하거나 비-current 실패 attempt로 종결한다.
+6. 복원 성공은 본문, 첫 줄 파생 제목, 링크/백링크, 검색/Graph projection과 첨부 association의 durable readback이 같은 새 version을 가리킬 때 확정한다.
+7. 첨부 연결 해제는 document association만 제거한다. 다른 문서나 Canvas가 참조하는 asset 원본은 삭제하지 않으며, 원본 삭제는 별도 유스케이스와 참조 수 guard를 사용한다.
+8. UI에는 내부 document/version/asset ID, snapshot path, Git 용어와 실제 파일 경로를 노출하지 않는다.
 
 ### 아키텍처 산출물
 
@@ -229,6 +246,8 @@ Phase 001부터 Phase 012까지의 누적 개발은 초기 MVP 범위를 넘어 
 - `GetOrphanDocuments`
 - `AttachFileToDocument`
 - `ListDocumentAssets`
+- `UnlinkAssetFromDocument`
+- `DeleteUnreferencedAsset`
 - `SearchDocuments`
 - `GetDocumentHistory`
 - `CompareDocumentVersions`
@@ -242,6 +261,7 @@ Phase 001부터 Phase 012까지의 누적 개발은 초기 MVP 범위를 넘어 
 - `DocumentRepository`
 - `VersionStore`
 - `AssetStore`
+- `DocumentAssetAssociationRepository`
 - `SearchIndex`
 - `MarkdownParser`
 - `Clock`
@@ -282,17 +302,26 @@ Deleted -> Restored
 첨부 파일 생명주기:
 
 ```text
-Registered -> Linked -> Unlinked
-Linked -> Archived
-Archived -> Restored
+Selected -> Validating -> Staging -> Storing -> Associating -> Completed
+Validating -> Failed | Cancelled
+Staging -> Failed | Cancelled
+Storing -> Failed
+Associating -> Failed
+Completed -> Unlinking -> Unlinked
+Unlinked -> DeletionEligible only when reference_count == 0 and explicit deletion is requested
 ```
 
 버전 복원 흐름:
 
 ```text
-RestoreRequested -> VersionLoaded -> RestoreApplied -> RestoreCompleted
-RestoreRequested -> VersionMissing -> RestoreFailed
-RestoreApplied -> PersistFailed -> RestoreFailed
+Idle -> Previewing -> PreviewReady
+PreviewReady -> Applying when expected_current_version == current_version
+PreviewReady -> Conflict when expected_current_version != current_version
+Applying -> Verifying -> Completed
+Previewing -> Failed | Cancelled
+Applying -> Failed | RecoveryRequired
+Verifying -> Failed | RecoveryRequired
+RecoveryRequired -> Applying | Failed
 ```
 
 ### 테스트 전략
@@ -304,6 +333,8 @@ RestoreApplied -> PersistFailed -> RestoreFailed
 - 중복 링크를 정규화한다.
 - 미해결 링크와 고아 문서 규칙을 검증한다.
 - 첨부 참조가 문서 본문과 분리되어 유지되는지 검증한다.
+- 같은 asset을 여러 문서와 Canvas가 참조할 때 한 association 제거가 다른 참조와 원본을 보존하는지 검증한다.
+- 첨부 association 추가, 제거와 교체가 결정적인 diff summary를 생성하는지 검증한다.
 
 유스케이스 테스트:
 
@@ -315,6 +346,12 @@ RestoreApplied -> PersistFailed -> RestoreFailed
 - 문서 삭제 후 링크 인덱스가 갱신되는지 검증한다.
 - 복원 실패 시 원본 문서가 훼손되지 않는지 검증한다.
 - 첨부 등록 실패 시 문서 참조가 생성되지 않는지 검증한다.
+- 현재 대 version과 version 대 version diff가 동일 내용, 빈 문서, 줄 삽입/삭제, 첫 줄 제목 변경과 한글을 안정적으로 처리하는지 검증한다.
+- 문서 중간 한 줄 삽입이 이후 동일한 줄 전체를 변경으로 표시하지 않는지 검증한다.
+- restore preview 뒤 current version이 바뀌면 restore가 conflict를 반환하고 version append와 current mutation을 수행하지 않는지 검증한다.
+- restore가 대상 snapshot을 복사한 새 version을 append하고 대상 version과 복원 직전 current version을 보존하는지 검증한다.
+- 같은 restore operation 재시도가 version을 중복 생성하지 않고, append 이후 current 전환 실패가 `RecoveryRequired`로 재개되는지 검증한다.
+- restore 후 본문, 첫 줄 파생 제목, 첨부 association과 projection request가 같은 새 version을 참조하는지 검증한다.
 
 인프라 테스트:
 
@@ -328,11 +365,14 @@ RestoreApplied -> PersistFailed -> RestoreFailed
 - 앱 업그레이드 후 기존 local workspace와 내부 store가 보존되는지 검증한다.
 - local setup failure가 안전한 error code와 복구 가능한 사용자 메시지를 반환하는지 검증한다.
 - 문서 현재 조회, 이력 목록 조회, 특정 버전 조회, 링크/백링크 조회, 첨부 metadata 조회, 기본 검색이 p95 300ms 목표를 만족하는지 측정한다.
+- 표준 크기 문서의 현재 대 version diff, version 대 version diff와 restore preview가 p95 300ms 목표를 만족하는지 측정한다.
 - 인덱스가 정상 상태일 때 검색이 본문 파일 전체 스캔에 의존하지 않는지 검증한다.
+- 앱 재시작 후 문서 첨부 association, 새 restore version, current body/title과 projection revision이 일치하는지 검증한다.
 
 로그 테스트:
 
 - 문서 생성, 수정, 삭제, 복원은 Product Log 이벤트를 남긴다.
+- 첨부 성공/실패와 복원 conflict는 안정적인 Product Log event와 error code를 남기되 파일명, 경로, diff hunk와 본문은 남기지 않는다.
 - 문서 본문 원문은 Product Log에 남지 않는다.
 - Development Log는 테스트/로컬 모드에서만 활성화된다.
 
@@ -350,8 +390,12 @@ RestoreApplied -> PersistFailed -> RestoreFailed
 - 현재 문서 조회, 이력 목록 조회, 특정 버전 조회, 링크/백링크 조회, 첨부 metadata 조회, 기본 검색의 p95 300ms 목표가 측정된다.
 - 문서 간 링크와 백링크가 동작한다.
 - 내부 Git 기반 변경 이력이 UI/API에서는 일반 history로 보인다.
-- 특정 버전 복원이 동작한다.
-- 첨부 파일이 문서 본문과 분리되어 관리된다.
+- 현재 대 과거 version과 과거 version 간 Markdown diff가 동작하고, 첨부 변경은 association summary로 표시된다.
+- 특정 버전 복원은 preview와 expected current version guard를 거쳐 새 version을 생성하며 기존 이력을 보존한다.
+- 복원 conflict는 write를 수행하지 않고, 중간 저장 실패는 current document와 첨부 association을 보존한 채 idempotent `RecoveryRequired` operation으로 남는다.
+- 첨부 파일이 문서 본문과 분리되어 관리되고 문서 화면에서 첨부, 목록 조회, 미리보기/열기와 연결 해제를 수행할 수 있다.
+- 첨부 실패는 고아 association을 남기지 않고, 공유 asset의 연결 해제는 다른 참조와 원본을 보존한다.
+- 일반 UI에 내부 document/version/asset ID, snapshot path, Git 용어와 실제 파일 경로가 노출되지 않는다.
 - 설정은 시작 시 1회만 읽힌다.
 - 핵심 도메인/유스케이스 테스트가 존재한다.
 - Product Log에 민감 정보가 남지 않는다.

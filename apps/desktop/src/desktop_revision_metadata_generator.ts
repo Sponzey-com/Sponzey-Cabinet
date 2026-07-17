@@ -1,8 +1,10 @@
-import type { DocumentRevisionMetadataGenerator } from "./desktop_document_authoring_controller.ts";
+export interface DesktopRevisionMetadataGenerator {
+  next(): { readonly versionId: string; readonly snapshotRef: string };
+}
 
 export function createDesktopRevisionMetadataGenerator(
   nextId: () => string,
-): DocumentRevisionMetadataGenerator {
+): DesktopRevisionMetadataGenerator {
   return {
     next() {
       const id = nextId();

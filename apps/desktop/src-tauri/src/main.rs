@@ -1,44 +1,66 @@
-use cabinet_desktop_shell::{
-    DesktopAssetDetailRequestDto, DesktopAssetDetailResponse, DesktopAssetPreviewResponse,
-    DesktopAssetImportOperationRequestDto, DesktopAssetImportRequestDto,
-    DesktopAssetImportResponse, DesktopAssetImportSelectionResponse,
-    DesktopAssetImportSelectionRuntime, DesktopAssetLinkRequestDto, DesktopAssetLinkResponse,
-    DesktopAssetUnlinkRequestDto, DesktopAssetUnlinkResponse, DesktopBackupOperationRequestDto,
-    DesktopBackupOperationResponse, DesktopBackupPackageRequestDto,
-    DesktopBackupRecoveryRequestDto, DesktopBackupRecoveryResponse, DesktopBackupRecoveryRuntime,
-    DesktopCanvasRequestDto, DesktopCanvasResponse, DesktopCanvasRuntime,
-    DesktopDocumentAssetsCommandResponse, DesktopDocumentAssetsRuntime,
-    DesktopDocumentAuthoringCommandResponse, DesktopDocumentAuthoringRequestDto,
-    DesktopDocumentAuthoringRuntime, DesktopDocumentNavigatorCommandResponse,
-    DesktopDocumentNavigatorRequestDto, DesktopDocumentNavigatorRuntime,
-    DesktopGlobalKnowledgeGraphCommandResponse, DesktopGlobalKnowledgeGraphRequestDto,
-    DesktopGlobalKnowledgeGraphRuntime, DesktopKnowledgeGraphCommandResponse,
-    DesktopKnowledgeGraphRuntime, DesktopLocalCommandRequestDto,
-    DesktopLocalCommandRuntimeResponse, DesktopProjectionFreshnessResponse,
-    DesktopProjectionIdentityRequestDto, DesktopProjectionReindexResponse,
-    DesktopProjectionRepairOperationRequestDto, DesktopProjectionRepairOperationResponse,
-    DesktopProjectionRepairOperationRuntime, DesktopProjectionRepairStartRequestDto,
-    DesktopProjectionRunResponse, DesktopProjectionRuntime, DesktopRestoreCancelRequestDto,
-    DesktopRestoreConfirmRequestDto, DesktopShellRequest, DesktopWorkspaceAssetsRequestDto,
-    DesktopWorkspaceAssetsResponse, DesktopWorkspaceHomeCommandResponse,
-    DesktopWorkspaceHomeRuntime, PackagedUiSmokeAssetFixture, PackagedUiSmokeCanvasFixture, PackagedUiSmokeMode,
-    PackagedUiSmokeModeResponse, PackagedUiSmokeReport, create_desktop_package_smoke_report,
-    route_desktop_command, route_local_desktop_command_request, route_tauri_command,
-    validate_packaged_ui_smoke_report,
+use cabinet_adapters::local_asset_external_opener::{
+    ExternalPathLauncher, LocalAssetExternalOpener,
 };
+use cabinet_adapters::local_document_store_migration::LocalDocumentStoreMigration;
+use cabinet_desktop_shell::{
+    DesktopAssetDetailRequestDto, DesktopAssetDetailResponse, DesktopAssetExternalOpenResponse,
+    DesktopAssetImportOperationRequestDto, DesktopAssetImportResponse,
+    DesktopAssetImportSelectionResponse, DesktopAssetImportSelectionRuntime,
+    DesktopAssetPreviewResponse, DesktopBackupOperationRequestDto, DesktopBackupOperationResponse,
+    DesktopBackupPackageRequestDto, DesktopBackupRecoveryRequestDto, DesktopBackupRecoveryResponse,
+    DesktopBackupRecoveryRuntime, DesktopCanvasRequestDto, DesktopCanvasResponse,
+    DesktopCanvasRuntime, DesktopDocumentAssetsCommandResponse, DesktopDocumentAssetsRuntime,
+    DesktopDocumentAttachmentMutationRequestDto, DesktopDocumentAttachmentMutationResponse,
+    DesktopDocumentAttachmentMutationRuntime, DesktopDocumentAuthoringCommandResponse,
+    DesktopDocumentAuthoringRequestDto, DesktopDocumentAuthoringRuntime,
+    DesktopDocumentDiffOperationRequestDto, DesktopDocumentDiffOperationResponse,
+    DesktopDocumentDiffOperationRuntime, DesktopDocumentDiffOperationTokenRequestDto,
+    DesktopDocumentDiffRequestDto, DesktopDocumentDiffResponse, DesktopDocumentDiffRuntime,
+    DesktopDocumentMutationRequestDto, DesktopDocumentMutationRuntime,
+    DesktopDocumentNavigatorCommandResponse, DesktopDocumentNavigatorRequestDto,
+    DesktopDocumentNavigatorRuntime, DesktopDocumentQueryRequestDto, DesktopDocumentQueryResponse,
+    DesktopDocumentQueryRuntime, DesktopGlobalKnowledgeGraphCommandResponse,
+    DesktopGlobalKnowledgeGraphRequestDto, DesktopGlobalKnowledgeGraphRuntime,
+    DesktopKnowledgeGraphCommandResponse, DesktopKnowledgeGraphRuntime,
+    DesktopLocalCommandRequestDto, DesktopLocalCommandRuntimeResponse,
+    DesktopProjectionFreshnessResponse, DesktopProjectionIdentityRequestDto,
+    DesktopProjectionReindexResponse, DesktopProjectionRepairOperationRequestDto,
+    DesktopProjectionRepairOperationResponse, DesktopProjectionRepairOperationRuntime,
+    DesktopProjectionRepairStartRequestDto, DesktopProjectionRunResponse, DesktopProjectionRuntime,
+    DesktopRestoreCancelRequestDto, DesktopRestoreConfirmRequestDto,
+    DesktopRevisionGuardedAssetImportRequestDto, DesktopShellRequest,
+    DesktopWorkspaceAssetsRequestDto, DesktopWorkspaceAssetsResponse,
+    DesktopWorkspaceHomeCommandResponse, DesktopWorkspaceHomeRuntime, PackagedUiSmokeAssetFixture,
+    PackagedUiSmokeCanvasFixture, PackagedUiSmokeMode, PackagedUiSmokeModeResponse,
+    PackagedUiSmokeReport, create_desktop_package_smoke_report, route_desktop_command,
+    route_local_desktop_command_request, route_tauri_command, validate_packaged_ui_smoke_report,
+};
+use cabinet_domain::document::DocumentBodyPolicy;
+use cabinet_ports::asset_external_open::AssetExternalOpener;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 const DEFAULT_DOCUMENT_BODY_MAX_BYTES: usize = 10 * 1024 * 1024;
+const DEFAULT_DOCUMENT_DIFF_OPERATION_CAPACITY: usize = 32;
 const DEFAULT_PROJECTION_BATCH_LIMIT: usize = 64;
 const DEFAULT_PROJECTION_MAX_ATTEMPTS: u32 = 3;
 const DEFAULT_ASSET_IMPORT_CHUNK_BYTES: usize = 256 * 1024;
 const DEFAULT_ASSET_PREVIEW_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_BACKUP_MAX_FILE_COUNT: u64 = 100_000;
 const DEFAULT_BACKUP_MAX_TOTAL_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct PackagedSmokeExternalPathLauncher;
+
+impl ExternalPathLauncher for PackagedSmokeExternalPathLauncher {
+    fn launch(&self, path: &Path) -> Result<(), ()> {
+        path.is_file().then_some(()).ok_or(())
+    }
+}
 
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -130,6 +152,54 @@ fn execute_desktop_document_authoring(
 }
 
 #[tauri::command]
+fn execute_desktop_document_mutation(
+    request: DesktopDocumentMutationRequestDto,
+    runtime: tauri::State<'_, DesktopDocumentMutationRuntime>,
+) -> DesktopDocumentAuthoringCommandResponse {
+    runtime.execute(request)
+}
+
+#[tauri::command]
+fn execute_desktop_document_query(
+    request: DesktopDocumentQueryRequestDto,
+    runtime: tauri::State<'_, DesktopDocumentQueryRuntime>,
+) -> DesktopDocumentQueryResponse {
+    runtime.execute(request)
+}
+
+#[tauri::command]
+fn execute_desktop_document_diff(
+    request: DesktopDocumentDiffRequestDto,
+    runtime: tauri::State<'_, DesktopDocumentDiffRuntime>,
+) -> DesktopDocumentDiffResponse {
+    runtime.execute(request)
+}
+
+#[tauri::command]
+fn start_desktop_document_diff_operation(
+    request: DesktopDocumentDiffOperationRequestDto,
+    runtime: tauri::State<'_, DesktopDocumentDiffOperationRuntime>,
+) -> DesktopDocumentDiffOperationResponse {
+    runtime.start(request)
+}
+
+#[tauri::command]
+fn get_desktop_document_diff_operation_status(
+    request: DesktopDocumentDiffOperationTokenRequestDto,
+    runtime: tauri::State<'_, DesktopDocumentDiffOperationRuntime>,
+) -> DesktopDocumentDiffOperationResponse {
+    runtime.status(request)
+}
+
+#[tauri::command]
+fn cancel_desktop_document_diff_operation(
+    request: DesktopDocumentDiffOperationTokenRequestDto,
+    runtime: tauri::State<'_, DesktopDocumentDiffOperationRuntime>,
+) -> DesktopDocumentDiffOperationResponse {
+    runtime.cancel(request)
+}
+
+#[tauri::command]
 fn execute_desktop_canvas(
     request: DesktopCanvasRequestDto,
     runtime: tauri::State<'_, DesktopCanvasRuntime>,
@@ -178,6 +248,14 @@ fn get_desktop_asset_preview(
 }
 
 #[tauri::command]
+fn open_desktop_asset_externally(
+    request: DesktopAssetDetailRequestDto,
+    runtime: tauri::State<'_, DesktopDocumentAssetsRuntime>,
+) -> DesktopAssetExternalOpenResponse {
+    runtime.open_external(request)
+}
+
+#[tauri::command]
 fn get_desktop_workspace_assets(
     request: DesktopWorkspaceAssetsRequestDto,
     runtime: tauri::State<'_, DesktopDocumentAssetsRuntime>,
@@ -187,18 +265,18 @@ fn get_desktop_workspace_assets(
 
 #[tauri::command]
 fn link_desktop_asset(
-    request: DesktopAssetLinkRequestDto,
-    runtime: tauri::State<'_, DesktopDocumentAssetsRuntime>,
-) -> DesktopAssetLinkResponse {
-    runtime.link(request)
+    request: DesktopDocumentAttachmentMutationRequestDto,
+    runtime: tauri::State<'_, DesktopDocumentAttachmentMutationRuntime>,
+) -> DesktopDocumentAttachmentMutationResponse {
+    runtime.execute(request)
 }
 
 #[tauri::command]
 fn unlink_desktop_asset(
-    request: DesktopAssetUnlinkRequestDto,
-    runtime: tauri::State<'_, DesktopDocumentAssetsRuntime>,
-) -> DesktopAssetUnlinkResponse {
-    runtime.unlink(request)
+    request: DesktopDocumentAttachmentMutationRequestDto,
+    runtime: tauri::State<'_, DesktopDocumentAttachmentMutationRuntime>,
+) -> DesktopDocumentAttachmentMutationResponse {
+    runtime.execute(request)
 }
 
 #[tauri::command]
@@ -229,15 +307,15 @@ async fn select_desktop_asset_import_files(
 
 #[tauri::command]
 async fn import_desktop_asset(
-    request: DesktopAssetImportRequestDto,
+    request: DesktopRevisionGuardedAssetImportRequestDto,
     runtime: tauri::State<'_, DesktopAssetImportSelectionRuntime>,
 ) -> Result<DesktopAssetImportResponse, ()> {
     let runtime = runtime.inner().clone();
-    let started = runtime.start(request.clone());
+    let started = runtime.start_revision_guarded(&request);
     if let Some(operation_id) = started.operation_id.clone() {
         tauri::async_runtime::spawn(async move {
             let _ = tauri::async_runtime::spawn_blocking(move || {
-                runtime.run_started(request, &operation_id)
+                runtime.run_started_revision_guarded(request, &operation_id)
             })
             .await;
         });
@@ -466,6 +544,18 @@ fn complete_packaged_ui_smoke(
     println!("error_count={}", report.error_count);
     println!("action_count={}", report.action_count);
     println!("durable_readback_count={}", report.durable_readback_count);
+    println!(
+        "document_version_workflow_verified={}",
+        report.document_version_workflow_verified
+    );
+    println!(
+        "document_attachment_workflow_verified={}",
+        report.document_attachment_workflow_verified
+    );
+    println!(
+        "keyboard_document_workflow_verified={}",
+        report.keyboard_document_workflow_verified
+    );
     if let Err(error) = validation {
         println!(
             "error_code={}",
@@ -491,6 +581,11 @@ fn run_tauri_app(packaged_ui_smoke_root: Option<PathBuf>) {
                 Some(root) => root,
                 None => app.path().app_data_dir()?,
             };
+            let migration_policy = DocumentBodyPolicy::new(DEFAULT_DOCUMENT_BODY_MAX_BYTES)
+                .map_err(|_| std::io::Error::other("DOCUMENT_STORE_MIGRATION_INVALID_POLICY"))?;
+            LocalDocumentStoreMigration::new(app_data_dir.clone(), migration_policy)
+                .execute()
+                .map_err(|error| std::io::Error::other(error.code()))?;
             let asset_fixture = if packaged_ui_smoke_root.is_some() {
                 let fixture_path = app_data_dir
                     .join("smoke-fixtures")
@@ -537,28 +632,78 @@ fn run_tauri_app(packaged_ui_smoke_root: Option<PathBuf>) {
             app.manage(DesktopProjectionRepairOperationRuntime::new(
                 app_data_dir.clone(),
             ));
-            let assets = DesktopDocumentAssetsRuntime::with_preview_limit(
+            let external_opener: Arc<dyn AssetExternalOpener> = if packaged_ui_smoke_root.is_some()
+            {
+                Arc::new(LocalAssetExternalOpener::with_launcher(
+                    app_data_dir.clone(),
+                    PackagedSmokeExternalPathLauncher,
+                ))
+            } else {
+                Arc::new(LocalAssetExternalOpener::new(app_data_dir.clone()))
+            };
+            let assets = DesktopDocumentAssetsRuntime::with_preview_limit_and_opener(
                 app_data_dir.clone(),
                 DEFAULT_DOCUMENT_BODY_MAX_BYTES,
                 DEFAULT_ASSET_PREVIEW_MAX_BYTES,
+                external_opener,
             )
             .map_err(std::io::Error::other)?;
             app.manage(assets);
             app.manage(
-                DesktopAssetImportSelectionRuntime::with_app_data_root(
+                DesktopDocumentAttachmentMutationRuntime::new(
+                    app_data_dir.clone(),
+                    DEFAULT_DOCUMENT_BODY_MAX_BYTES,
+                )
+                .map_err(std::io::Error::other)?,
+            );
+            app.manage(
+                DesktopAssetImportSelectionRuntime::with_app_data_root_and_body_policy(
                     app_data_dir.clone(),
                     "workspace-1",
                     DEFAULT_ASSET_IMPORT_CHUNK_BYTES,
+                    DocumentBodyPolicy::new(DEFAULT_DOCUMENT_BODY_MAX_BYTES)
+                        .map_err(|_| std::io::Error::other("invalid document body policy"))?,
                 )
                 .map_err(std::io::Error::other)?,
             );
             let navigator = DesktopDocumentNavigatorRuntime::new(app_data_dir.clone(), 10_000)
                 .map_err(std::io::Error::other)?;
             app.manage(navigator);
-            let authoring =
-                DesktopDocumentAuthoringRuntime::new(app_data_dir, DEFAULT_DOCUMENT_BODY_MAX_BYTES)
-                    .map_err(std::io::Error::other)?;
+            let authoring = DesktopDocumentAuthoringRuntime::new(
+                app_data_dir.clone(),
+                DEFAULT_DOCUMENT_BODY_MAX_BYTES,
+            )
+            .map_err(std::io::Error::other)?;
             app.manage(authoring);
+            app.manage(
+                DesktopDocumentMutationRuntime::new(
+                    app_data_dir.clone(),
+                    DEFAULT_DOCUMENT_BODY_MAX_BYTES,
+                )
+                .map_err(std::io::Error::other)?,
+            );
+            app.manage(
+                DesktopDocumentQueryRuntime::new(
+                    app_data_dir.clone(),
+                    DEFAULT_DOCUMENT_BODY_MAX_BYTES,
+                )
+                .map_err(std::io::Error::other)?,
+            );
+            app.manage(
+                DesktopDocumentDiffRuntime::new(
+                    app_data_dir.clone(),
+                    DEFAULT_DOCUMENT_BODY_MAX_BYTES,
+                )
+                .map_err(std::io::Error::other)?,
+            );
+            app.manage(
+                DesktopDocumentDiffOperationRuntime::new(
+                    app_data_dir,
+                    DEFAULT_DOCUMENT_BODY_MAX_BYTES,
+                    DEFAULT_DOCUMENT_DIFF_OPERATION_CAPACITY,
+                )
+                .map_err(std::io::Error::other)?,
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -567,6 +712,12 @@ fn run_tauri_app(packaged_ui_smoke_root: Option<PathBuf>) {
             get_desktop_workspace_home,
             get_desktop_document_navigator,
             execute_desktop_document_authoring,
+            execute_desktop_document_mutation,
+            execute_desktop_document_query,
+            execute_desktop_document_diff,
+            start_desktop_document_diff_operation,
+            get_desktop_document_diff_operation_status,
+            cancel_desktop_document_diff_operation,
             execute_desktop_canvas,
             get_desktop_knowledge_graph,
             get_desktop_global_knowledge_graph,
@@ -574,6 +725,7 @@ fn run_tauri_app(packaged_ui_smoke_root: Option<PathBuf>) {
             get_desktop_workspace_assets,
             get_desktop_asset_detail,
             get_desktop_asset_preview,
+            open_desktop_asset_externally,
             link_desktop_asset,
             unlink_desktop_asset,
             select_desktop_asset_import_files,

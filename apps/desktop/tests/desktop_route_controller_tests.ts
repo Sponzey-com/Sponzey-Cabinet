@@ -37,6 +37,19 @@ test("routes to the backup surface with workspace identity only", () => {
   if (result.state.status === "Stable") assert.deepEqual(result.state.route, { kind: "Backup" });
 });
 
+test("routes to the document empty surface with workspace identity only", () => {
+  const initial = createDesktopRouteControllerState(home, { workspaceId: "workspace-1", originRoute: "Home" });
+  const result = transitionDesktopRoute(initial, {
+    type: "TransitionRequested",
+    target: { kind: "Document" },
+    selection: { workspaceId: "workspace-1", originRoute: "Home" },
+    blocker: { kind: "None" },
+  });
+
+  assert.equal(result.state.status, "Stable");
+  if (result.state.status === "Stable") assert.deepEqual(result.state.route, { kind: "Document" });
+});
+
 test("keeps current route while dirty document awaits a decision", () => {
   const initial = stableDocument();
   const result = transitionDesktopRoute(initial, { type: "TransitionRequested", target: graphRoute, selection: { workspaceId: "workspace-1", documentId: "doc-1", originRoute: "Document" }, blocker: { kind: "DirtyDocument", resourceId: "doc-1" } });
@@ -71,6 +84,10 @@ test("cancel and failed resolution preserve the current route", () => {
 
 test("rejects route and selection identity mismatch", () => {
   assert.throws(() => createDesktopRouteControllerState(documentRoute, { workspaceId: "workspace-1", originRoute: "Home" }), /INVALID_ROUTE_SELECTION/);
+  assert.throws(
+    () => createDesktopRouteControllerState({ kind: "Document" }, { workspaceId: "workspace-1", documentId: "doc-1", originRoute: "Home" }),
+    /INVALID_ROUTE_SELECTION/,
+  );
 });
 
 test("moves from an asset selection to a document without retaining the asset as target identity", () => {

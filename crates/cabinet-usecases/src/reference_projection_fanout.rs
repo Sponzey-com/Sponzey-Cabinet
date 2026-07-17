@@ -81,6 +81,12 @@ impl ReindexReferenceDependentsUsecase {
                 title,
                 ..
             } => (workspace_id, document_id, Some(title.as_str()), false),
+            DocumentChangeEvent::DocumentUpdated {
+                workspace_id,
+                document_id,
+                title,
+                ..
+            } => (workspace_id, document_id, Some(title.as_str()), true),
             DocumentChangeEvent::DocumentRenamed {
                 workspace_id,
                 document_id,

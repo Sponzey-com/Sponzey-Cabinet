@@ -11,7 +11,9 @@ pub struct GetAssetPreviewInput {
 }
 impl GetAssetPreviewInput {
     pub fn new(workspace: &str, asset: &str, max_bytes: usize) -> Result<Self, AssetPreviewError> {
-        if max_bytes == 0 { return Err(AssetPreviewError::InvalidInput); }
+        if max_bytes == 0 {
+            return Err(AssetPreviewError::InvalidInput);
+        }
         Ok(Self {
             workspace: WorkspaceId::new(workspace).map_err(|_| AssetPreviewError::InvalidInput)?,
             asset: AssetId::from_sha256_hex(asset).map_err(|_| AssetPreviewError::InvalidInput)?,
@@ -21,7 +23,10 @@ impl GetAssetPreviewInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AssetPreviewResult { Content(Vec<u8>), Unsupported }
+pub enum AssetPreviewResult {
+    Content(Vec<u8>),
+    Unsupported,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetAssetPreviewOutput {
@@ -30,34 +35,52 @@ pub struct GetAssetPreviewOutput {
     result: AssetPreviewResult,
 }
 impl GetAssetPreviewOutput {
-    pub fn capability(&self) -> AssetPreviewCapability { self.capability }
-    pub fn media_type(&self) -> &str { &self.media_type }
-    pub fn result(&self) -> &AssetPreviewResult { &self.result }
+    pub fn capability(&self) -> AssetPreviewCapability {
+        self.capability
+    }
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+    pub fn result(&self) -> &AssetPreviewResult {
+        &self.result
+    }
 }
 
 pub struct GetAssetPreviewUsecase;
 impl GetAssetPreviewUsecase {
-    pub const fn new() -> Self { Self }
+    pub const fn new() -> Self {
+        Self
+    }
     pub fn execute<M: AssetMetadataCatalog, R: AssetPreviewReader>(
         &self,
         input: GetAssetPreviewInput,
         metadata: &M,
         reader: &R,
     ) -> Result<GetAssetPreviewOutput, AssetPreviewError> {
-        let record = metadata.get(&input.workspace, &input.asset)
+        let record = metadata
+            .get(&input.workspace, &input.asset)
             .map_err(AssetPreviewError::Metadata)?
             .ok_or(AssetPreviewError::NotFound)?;
         let capability = record.preview();
         let media_type = record.metadata().media_type().as_str().to_string();
         if capability == AssetPreviewCapability::Unsupported {
-            return Ok(GetAssetPreviewOutput { capability, media_type, result: AssetPreviewResult::Unsupported });
+            return Ok(GetAssetPreviewOutput {
+                capability,
+                media_type,
+                result: AssetPreviewResult::Unsupported,
+            });
         }
         if record.metadata().byte_size() > input.max_bytes as u64 {
             return Err(AssetPreviewError::Read(AssetPreviewReadError::TooLarge));
         }
-        let bytes = reader.read(&input.workspace, &input.asset, input.max_bytes)
+        let bytes = reader
+            .read(&input.workspace, &input.asset, input.max_bytes)
             .map_err(AssetPreviewError::Read)?;
-        Ok(GetAssetPreviewOutput { capability, media_type, result: AssetPreviewResult::Content(bytes) })
+        Ok(GetAssetPreviewOutput {
+            capability,
+            media_type,
+            result: AssetPreviewResult::Content(bytes),
+        })
     }
 }
 
@@ -78,6 +101,10 @@ impl AssetPreviewError {
         }
     }
     pub const fn retryable(self) -> bool {
-        matches!(self, Self::Metadata(AssetMetadataCatalogError::StorageUnavailable) | Self::Read(AssetPreviewReadError::StorageUnavailable))
+        matches!(
+            self,
+            Self::Metadata(AssetMetadataCatalogError::StorageUnavailable)
+                | Self::Read(AssetPreviewReadError::StorageUnavailable)
+        )
     }
 }

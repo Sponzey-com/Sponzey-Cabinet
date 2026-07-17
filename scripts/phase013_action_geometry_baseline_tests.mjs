@@ -9,7 +9,7 @@ import {
 
 const fingerprint = "a".repeat(64);
 const routes = ["Home", "Search", "Document", "Graph", "Canvas", "Assets", "Backup"];
-const viewports = [{ width: 1024, height: 768 }, { width: 1280, height: 800 }, { width: 1440, height: 900 }, { width: 1728, height: 1117 }, { width: 1920, height: 1080 }];
+const viewports = [{ width: 1440, height: 900 }, { width: 1180, height: 800 }, { width: 960, height: 720 }, { width: 760, height: 640 }];
 
 test("action comparison classifies unregistered and hidden controls while allowing repeated actions", () => {
   const rendered = [
@@ -59,7 +59,7 @@ test("validator rejects stale incomplete malformed and sensitive reports", () =>
   report.diagnostics = "/Users/private/workspace";
   const result = validateActionGeometryReport(report, { fingerprint, routes, viewports });
   assert.equal(result.passed, false);
-  for (const id of ["stale_source_fingerprint", "sensitive_data", "malformed_geometry_Home_1024x768", "horizontal_overflow_Search_1024x768", "clipped_action_Document_1024x768", "missing_Backup_1920x1080", "action_gap_rendered_unregistered_Home_unregistered"]) {
+  for (const id of ["stale_source_fingerprint", "sensitive_data", "malformed_geometry_Home_1440x900", "horizontal_overflow_Search_1440x900", "clipped_action_Document_1440x900", "missing_Backup_760x640", "action_gap_rendered_unregistered_Home_unregistered"]) {
     assert.ok(result.findingIds.includes(id), id);
   }
 });

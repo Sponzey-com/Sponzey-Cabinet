@@ -1,4 +1,5 @@
 import React from "react";
+import { ChevronDown, ChevronRight, Plus, Search } from "lucide-react";
 
 import type { WorkspaceShellModel, WorkspaceShellRouteKind } from "./workspace_shell_contract.ts";
 import type { MessageCatalog } from "./ko_kr_catalog.ts";
@@ -27,9 +28,7 @@ export interface WorkspaceShellElementOptions {
   readonly content: React.ReactNode;
 }
 
-const tones: Readonly<Record<WorkspaceShellRouteKind, string>> = Object.freeze({
-  Home: "teal", Search: "blue", Document: "teal", Graph: "amber", Canvas: "rose", Assets: "slate", Backup: "teal",
-});
+const SHELL_ICON_PROPS = Object.freeze({ size: 15, strokeWidth: 2, "aria-hidden": true });
 
 export function createWorkspaceShellElement(options: WorkspaceShellElementOptions): React.ReactElement {
   const e = React.createElement;
@@ -54,8 +53,8 @@ export function createWorkspaceShellElement(options: WorkspaceShellElementOption
     e(
       "aside",
       { className: "desktop-sidebar" },
-      e("div", { className: "sidebar-brand-row" }, e("strong", { className: "desktop-wordmark" }, "Cabinet"), e("span", { className: "local-badge" }, message("shell.local"))),
-      e("button", { type: "button", className: "sidebar-new-document", "data-action": "new-document", onClick: options.onCreateDocument, disabled: !options.onCreateDocument }, e("span", { "aria-hidden": "true" }, "+"), message("shell.newDocument")),
+      e("div", { className: "sidebar-brand-row" }, e("strong", { className: "desktop-wordmark" }, message("shell.brand")), e("span", { className: "local-badge" }, message("shell.local"))),
+      e("button", { type: "button", className: "sidebar-new-document", "data-action": "new-document", onClick: options.onCreateDocument, disabled: !options.onCreateDocument }, e(Plus, SHELL_ICON_PROPS), message("shell.newDocument")),
       e("section", { className: "cabinet-summary", "aria-label": message("shell.cabinet") }, e("span", { className: "cabinet-summary-mark", "aria-hidden": "true" }), e("div", null, e("strong", null, message("shell.cabinet")), e("small", null, message("shell.cabinetStorage")))),
       e("nav", { className: "primary-navigation", "aria-label": message("shell.navigationLabel") }, options.model.navigation.map((item) => {
         const action = options.routeActions[item.route];
@@ -67,14 +66,14 @@ export function createWorkspaceShellElement(options: WorkspaceShellElementOption
           "aria-current": item.active ? "page" : undefined,
           disabled: item.active || !action,
           onClick: action,
-        }, e("span", { className: `nav-swatch tone-${tones[item.route]}`, "aria-hidden": "true" }), item.label);
+        }, e("span", { className: "nav-marker", "aria-hidden": "true" }), item.label);
       })),
-      e("section", { className: "sidebar-document-tree", "aria-label": message("shell.documentTreeLabel") }, e("p", { className: "sidebar-section-label" }, message("shell.documentTreeLabel")), e("strong", null, `⌄ ${message("shell.gettingStarted")}`), e("button", { type: "button", "data-action": "navigate-search", onClick: options.onSearch, disabled: !options.onSearch }, message("shell.welcomeDocument")), e("strong", null, `⌄ ${message("shell.projects")}`), ...(options.documentShortcuts ?? []).map((shortcut, index) => shortcut.onOpen
+      e("section", { className: "sidebar-document-tree", "aria-label": message("shell.documentTreeLabel") }, e("p", { className: "sidebar-section-label" }, message("shell.documentTreeLabel")), e("strong", { className: "tree-section-heading" }, e(ChevronDown, SHELL_ICON_PROPS), message("shell.gettingStarted")), e("button", { type: "button", "data-action": "navigate-search", onClick: options.onSearch, disabled: !options.onSearch }, message("shell.welcomeDocument")), e("strong", { className: "tree-section-heading" }, e(ChevronDown, SHELL_ICON_PROPS), message("shell.projects")), ...(options.documentShortcuts ?? []).map((shortcut, index) => shortcut.onOpen
         ? e("button", { key: `${shortcut.label}-${index}`, type: "button", "data-action": shortcut.actionId ?? "open-sidebar-document", onClick: shortcut.onOpen }, shortcut.label)
-        : e("span", { key: `${shortcut.label}-${index}`, className: "sidebar-current-document", "aria-current": "page" }, shortcut.label)), e("strong", null, `› ${message("shell.reading")}`)),
+        : e("span", { key: `${shortcut.label}-${index}`, className: "sidebar-current-document", "aria-current": "page" }, shortcut.label)), e("strong", { className: "tree-section-heading" }, e(ChevronRight, SHELL_ICON_PROPS), message("shell.reading"))),
       e("div", { className: "sidebar-footer" }, e("span", { className: "saved-indicator" }, e("i", { "aria-hidden": "true" }), options.savedStatus ?? message("shell.saved"))),
     ),
-    e("header", { className: `desktop-topbar${options.topbarClassName ? ` ${options.topbarClassName}` : ""}` }, options.topbarContent ?? e("button", { type: "button", className: "topbar-search", "data-action": options.searchActionId ?? "navigate-search", onClick: options.onSearch, disabled: !options.onSearch, "aria-label": message("shell.searchPrompt"), title: options.onSearch ? undefined : message("shell.searchUnavailable") }, e("span", null, message("shell.searchPlaceholder")), e("kbd", null, "⌘K"))),
+    e("header", { className: `desktop-topbar${options.topbarClassName ? ` ${options.topbarClassName}` : ""}` }, options.topbarContent ?? e("button", { type: "button", className: "topbar-search", "data-action": options.searchActionId ?? "navigate-search", onClick: options.onSearch, disabled: !options.onSearch, "aria-label": message("shell.searchPrompt"), title: options.onSearch ? message("shell.searchPrompt") : message("shell.searchUnavailable") }, e(Search, SHELL_ICON_PROPS), e("span", null, message("shell.searchPlaceholder")))),
     outlet,
     e("div", { className: "workspace-global-host", "data-workspace-global-host": "mounted" }, options.globalLayer),
   );

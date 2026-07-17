@@ -81,7 +81,10 @@ impl ResolveCanvasTargetPresentationsUsecase {
         let mut document_ids = Vec::new();
         for node in input.nodes {
             if let CanvasNodeTarget::Document(document) = node.target() {
-                if !document_ids.iter().any(|existing: &cabinet_domain::document::DocumentId| existing == document) {
+                if !document_ids
+                    .iter()
+                    .any(|existing: &cabinet_domain::document::DocumentId| existing == document)
+                {
                     document_ids.push(document.clone());
                 }
             }
@@ -96,18 +99,20 @@ impl ResolveCanvasTargetPresentationsUsecase {
         let mut presentations = Vec::with_capacity(input.nodes.len());
         for node in input.nodes {
             let (target_id, display_label, status) = match node.target() {
-                CanvasNodeTarget::Document(document) => match find_document_title(&document_titles, document) {
-                    Some(title) => (
-                        document.as_str(),
-                        title.as_str().to_string(),
-                        CanvasTargetStatus::Available,
-                    ),
-                    None => (
-                        document.as_str(),
-                        "찾을 수 없는 문서".to_string(),
-                        CanvasTargetStatus::Missing,
-                    ),
-                },
+                CanvasNodeTarget::Document(document) => {
+                    match find_document_title(&document_titles, document) {
+                        Some(title) => (
+                            document.as_str(),
+                            title.as_str().to_string(),
+                            CanvasTargetStatus::Available,
+                        ),
+                        None => (
+                            document.as_str(),
+                            "찾을 수 없는 문서".to_string(),
+                            CanvasTargetStatus::Missing,
+                        ),
+                    }
+                }
                 CanvasNodeTarget::Attachment(asset) => {
                     match assets.get(&workspace, asset).map_err(map_asset)? {
                         Some(record) => (

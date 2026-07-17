@@ -30,7 +30,7 @@ test("authoring controller opens edits and saves only at the 800ms boundary", as
   assert.equal(saves.length, 1);
   assert.equal(saves[0]?.body, "body two");
   assert.equal(saves[0]?.expectedVersionId, "v1");
-  assert.equal(saves[0]?.nextVersionId, "version-1-1");
+  assert.equal(saves[0]?.operationId, "save-operation-1");
   assert.equal(saves[0]?.revision, 1);
   assert.equal(controller.snapshot().saveState, DocumentSaveCoordinatorState.Saved);
   assert.equal(controller.snapshot().expectedVersionId, "v2");
@@ -60,6 +60,8 @@ test("authoring controller keeps one save in flight and queues a newer exact rev
   assert.equal(calls.length, 2);
   assert.equal(calls[1]?.body, "body three");
   assert.equal(calls[1]?.expectedVersionId, "v2");
+  assert.equal(calls[0]?.operationId, "save-operation-1");
+  assert.equal(calls[1]?.operationId, "save-operation-2");
   assert.equal(calls[1]?.revision, 2);
   assert.equal(controller.snapshot().revision, 2);
   assert.equal(controller.snapshot().persistedRevision, 2);
@@ -68,8 +70,10 @@ test("authoring controller keeps one save in flight and queues a newer exact rev
 
 test("authoring controller exposes retry close discard and repair-required read-only recovery", async () => {
   let attempts = 0;
+  const retryCommands: SaveDocumentRevisionCommand[] = [];
   const controller = controllerWith({
     async saveDocumentRevision(command) {
+      retryCommands.push(command);
       attempts += 1;
       if (attempts === 1) {
         throw new LocalDesktopCommandClientError("DOCUMENT_AUTHORING_STORAGE_UNAVAILABLE", true);
@@ -88,6 +92,9 @@ test("authoring controller exposes retry close discard and repair-required read-
   controller.cancelClose();
   await controller.retrySave();
   assert.equal(controller.snapshot().saveState, DocumentSaveCoordinatorState.Saved);
+  assert.equal(retryCommands.length, 2);
+  assert.equal(retryCommands[0]?.operationId, "save-operation-1");
+  assert.equal(retryCommands[1]?.operationId, "save-operation-1");
 
   const repair = controllerWith({
     async saveDocumentRevision() {
@@ -229,6 +236,7 @@ function controllerWith(client: {
   saveDocumentRevision: (command: SaveDocumentRevisionCommand) => Promise<SaveDocumentRevisionResult>;
 }) {
   let persisted = currentDocument();
+  let operationSequence = 0;
   return createDesktopDocumentAuthoringController({
     client: {
       getCurrentDocument: client.getCurrentDocument ?? (async () => persisted),
@@ -244,14 +252,7 @@ function controllerWith(client: {
         return result;
       },
     },
-    metadataGenerator: {
-      next(documentId, revision) {
-        return {
-          versionId: `version-${documentId.split("-").at(-1)}-${revision}`,
-          snapshotRef: `snapshot-${revision}`,
-        };
-      },
-    },
+    operationIdSource: () => `save-operation-${++operationSequence}`,
     author: "local-user",
     summary: "Updated",
     autosaveDelayMs: 800,

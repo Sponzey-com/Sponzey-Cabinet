@@ -75,17 +75,15 @@ test("restore preview model creates confirmed command only when restore is allow
   });
   const unconfirmed = createRestoreApplyCommand(preview, {
     confirmed: false,
+    operationId: "operation-restore-1",
     expectedCurrentVersionId: "version-current",
-    restoredVersionId: "version-restore-1",
-    restoredSnapshotRef: "snapshot-restore-1",
     author: "local-user",
     summary: "Restore version-1",
   });
   const confirmed = createRestoreApplyCommand(preview, {
     confirmed: true,
+    operationId: "operation-restore-1",
     expectedCurrentVersionId: "version-current",
-    restoredVersionId: "version-restore-1",
-    restoredSnapshotRef: "snapshot-restore-1",
     author: "local-user",
     summary: "Restore version-1",
   });
@@ -98,9 +96,8 @@ test("restore preview model creates confirmed command only when restore is allow
   });
   const blocked = createRestoreApplyCommand(blockedPreview, {
     confirmed: true,
+    operationId: "operation-restore-2",
     expectedCurrentVersionId: "version-current",
-    restoredVersionId: "version-restore-2",
-    restoredSnapshotRef: "snapshot-restore-2",
     author: "local-user",
     summary: "Restore version-2",
   });

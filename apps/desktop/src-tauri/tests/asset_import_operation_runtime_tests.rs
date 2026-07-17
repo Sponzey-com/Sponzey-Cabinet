@@ -8,11 +8,18 @@ use cabinet_adapters::durable_asset_metadata_catalog::DurableAssetMetadataCatalo
 use cabinet_adapters::durable_local_graph_projection::DurableLocalGraphProjectionStore;
 use cabinet_adapters::durable_projection_work_repository::DurableProjectionWorkRepository;
 use cabinet_adapters::local_asset_staging_writer::LocalAssetStagingWriter;
+use cabinet_adapters::local_create_document_revision_runtime::{
+    LOCAL_DOCUMENT_POINTER_ROOT, LOCAL_DOCUMENT_VERSION_ROOT,
+};
+use cabinet_adapters::local_current_document_revision_projection::LocalCurrentDocumentRevisionProjectionWriter;
+use cabinet_adapters::local_current_document_version_pointer::LocalCurrentDocumentVersionPointer;
 use cabinet_adapters::local_document_repository::LocalDocumentRepository;
+use cabinet_adapters::local_version_store::LocalVersionStore;
 use cabinet_desktop_shell::{
     DesktopAssetImportRequestDto, DesktopAssetImportSelectionRuntime, DesktopDocumentAssetsRuntime,
     DesktopDocumentAuthoringRequestDto, DesktopDocumentAuthoringRuntime,
     DesktopLocalCommandPayloadDto, DesktopLocalCommandRequestDto, DesktopProjectionRuntime,
+    DesktopRevisionGuardedAssetImportRequestDto,
 };
 use cabinet_domain::asset::AssetId;
 use cabinet_domain::asset_import_operation::{
@@ -22,15 +29,23 @@ use cabinet_domain::document::{
     DocumentBody, DocumentBodyPolicy, DocumentId, DocumentMetadata, DocumentPath, DocumentTitle,
 };
 use cabinet_domain::graph::GraphEdgeKind;
-use cabinet_domain::version::CurrentDocumentSnapshot;
+use cabinet_domain::version::{
+    AttachmentSnapshotState, CurrentDocumentSnapshot, DocumentRevisionNumber, DocumentSnapshotRef,
+    VersionAuthor, VersionEntry, VersionId, VersionSummary,
+};
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::asset_association_catalog::AssetAssociationCatalog;
 use cabinet_ports::asset_import_operation_repository::AssetImportOperationRepository;
 use cabinet_ports::asset_metadata_catalog::AssetMetadataCatalog;
 use cabinet_ports::asset_staging::AssetStagingWriter;
+use cabinet_ports::current_document_version::CurrentDocumentVersionPointerPort;
 use cabinet_ports::document_repository::{CurrentDocumentRecord, DocumentRepository};
 use cabinet_ports::graph_projection::GraphProjectionStore;
 use cabinet_ports::projection_work::ProjectionWorkRepository;
+use cabinet_ports::version_store::{HistoryPageRequest, VersionStore};
+use cabinet_usecases::project_current_document_revision::{
+    ProjectCurrentDocumentRevisionInput, ProjectCurrentDocumentRevisionUsecase,
+};
 
 #[test]
 fn native_import_runtime_persists_completed_operation_metadata_and_association_across_restart() {
@@ -94,6 +109,87 @@ fn native_import_runtime_persists_completed_operation_metadata_and_association_a
     let serialized = serde_json::to_string(&response).expect("response json");
     assert!(!serialized.contains(root.to_string_lossy().as_ref()));
     assert!(!serialized.contains("durable-pdf-content"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn revision_guarded_import_creates_attachment_revision_and_rejects_stale_second_link() {
+    let root = temp_root("revision-guarded");
+    seed_revisioned_document(&root, "doc-revisioned");
+    let first_source = root.join("first.txt");
+    fs::write(&first_source, b"first imported asset").unwrap();
+    let runtime = DesktopAssetImportSelectionRuntime::with_app_data_root_and_body_policy(
+        root.clone(),
+        "workspace-1",
+        4,
+        DocumentBodyPolicy::new(10 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    let first = runtime.register_selected_paths(vec![first_source]);
+    let first_response =
+        runtime.import_revision_guarded(DesktopRevisionGuardedAssetImportRequestDto {
+            import: DesktopAssetImportRequestDto {
+                workspace_id: "workspace-1".into(),
+                document_id: "doc-revisioned".into(),
+                handle: first.data.unwrap().files[0].handle.clone(),
+                label: "First".into(),
+            },
+            attachment_operation_id: "attachment-import-first".into(),
+            expected_current_version_token: "version-graph-1".into(),
+        });
+    assert!(first_response.ok, "first={first_response:?}");
+
+    let workspace = WorkspaceId::new("workspace-1").unwrap();
+    let document = DocumentId::new("doc-revisioned").unwrap();
+    let history = LocalVersionStore::new(root.join(LOCAL_DOCUMENT_VERSION_ROOT))
+        .list_history(
+            &workspace,
+            &document,
+            HistoryPageRequest::first(10).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(history.entries().len(), 2);
+    assert_eq!(
+        DurableAssetAssociationCatalog::new(root.clone())
+            .list_assets(&workspace, &document, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let second_source = root.join("second.txt");
+    fs::write(&second_source, b"second imported asset").unwrap();
+    let second = runtime.register_selected_paths(vec![second_source]);
+    let stale = runtime.import_revision_guarded(DesktopRevisionGuardedAssetImportRequestDto {
+        import: DesktopAssetImportRequestDto {
+            workspace_id: "workspace-1".into(),
+            document_id: "doc-revisioned".into(),
+            handle: second.data.unwrap().files[0].handle.clone(),
+            label: "Second".into(),
+        },
+        attachment_operation_id: "attachment-import-second".into(),
+        expected_current_version_token: "version-graph-1".into(),
+    });
+    assert!(!stale.ok);
+    assert_eq!(
+        stale.error_code.as_deref(),
+        Some("imported_asset_link.current_conflict")
+    );
+    let history = LocalVersionStore::new(root.join(LOCAL_DOCUMENT_VERSION_ROOT))
+        .list_history(
+            &workspace,
+            &document,
+            HistoryPageRequest::first(10).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(history.entries().len(), 2);
+    assert_eq!(
+        DurableAssetAssociationCatalog::new(root.clone())
+            .list_assets(&workspace, &document, 10)
+            .unwrap()
+            .len(),
+        1
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -172,6 +268,52 @@ fn seed_authored_document(root: &PathBuf, document_id: &str) {
         summary: "Created".into(),
     });
     assert!(response.ok, "authoring={response:?}");
+}
+
+fn seed_revisioned_document(root: &PathBuf, document_id: &str) {
+    let workspace = WorkspaceId::new("workspace-1").unwrap();
+    let document = DocumentId::new(document_id).unwrap();
+    let version = VersionId::new("version-graph-1").unwrap();
+    let snapshot_ref = DocumentSnapshotRef::new("snapshot-import-base").unwrap();
+    let policy = DocumentBodyPolicy::new(10 * 1024 * 1024).unwrap();
+    let entry = VersionEntry::new(
+        version.clone(),
+        document.clone(),
+        snapshot_ref.clone(),
+        VersionAuthor::new("local-user").unwrap(),
+        VersionSummary::new("Seed import target").unwrap(),
+    )
+    .unwrap()
+    .with_created_at_epoch_ms(1)
+    .unwrap()
+    .with_revision_number(DocumentRevisionNumber::new(1).unwrap())
+    .unwrap();
+    let record = cabinet_ports::version_store::VersionRecord::new(
+        entry,
+        cabinet_ports::version_store::VersionSnapshot::with_attachment_state(
+            document.clone(),
+            snapshot_ref,
+            DocumentBody::new("# Revisioned import target\n", policy).unwrap(),
+            AttachmentSnapshotState::known(Vec::new()).unwrap(),
+        ),
+    )
+    .unwrap();
+    LocalVersionStore::with_body_policy(root.join(LOCAL_DOCUMENT_VERSION_ROOT), policy)
+        .append_version(&workspace, record.clone())
+        .unwrap();
+    LocalCurrentDocumentVersionPointer::new(root.join(LOCAL_DOCUMENT_POINTER_ROOT))
+        .compare_and_set_current_version(&workspace, &document, None, version)
+        .unwrap();
+    ProjectCurrentDocumentRevisionUsecase::new()
+        .execute(
+            ProjectCurrentDocumentRevisionInput::new(
+                "workspace-1",
+                &format!("{document_id}.md"),
+                record,
+            ),
+            &mut LocalCurrentDocumentRevisionProjectionWriter::new(root.clone(), policy),
+        )
+        .unwrap();
 }
 
 #[test]

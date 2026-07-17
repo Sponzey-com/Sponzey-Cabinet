@@ -122,6 +122,7 @@ fn versioned_identity(
             workspace_id,
             document_id,
             version_id,
+            ..
         } => Ok((
             workspace_id,
             document_id,

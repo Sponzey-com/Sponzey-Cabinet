@@ -35,6 +35,9 @@ export interface DesktopAssetSurfaceSnapshot {
   readonly previewState?: "Idle" | "Loading" | "Ready" | "Unsupported" | "Failed";
   readonly previewGeneration?: number;
   readonly preview?: DesktopAssetPreview;
+  readonly openState?: "Idle" | "Opening" | "Opened" | "OpenFailed";
+  readonly openGeneration?: number;
+  readonly openErrorCode?: string;
 }
 
 export interface DesktopAssetPage {
@@ -120,8 +123,9 @@ export function beginDesktopAssetImport(snapshot: DesktopAssetSurfaceSnapshot): 
 
 export async function importDesktopDocumentAssets(
   importClient: DesktopAssetImportPickerClient,
-  queryClient: Pick<LocalDesktopCommandClient, "getAssetMetadata">,
+  queryClient: Pick<LocalDesktopCommandClient, "getAssetMetadata" | "getCurrentDocument">,
   selecting: DesktopAssetSurfaceSnapshot,
+  operationIdSource: () => string,
   onProgress: (snapshot: DesktopAssetSurfaceSnapshot) => void,
 ): Promise<DesktopAssetSurfaceSnapshot> {
   if (selecting.importState !== "Selecting" || !selecting.documentId) return selecting;
@@ -135,11 +139,26 @@ export async function importDesktopDocumentAssets(
     const importedAssetIds: string[] = [];
     const importedFileNames: string[] = [];
     for (const file of selection.files) {
+      const attachmentOperationId = operationIdSource().trim();
+      if (!attachmentOperationId) {
+        throw new DesktopAssetImportTransportError("asset_import.invalid_operation_id", false);
+      }
+      const current = await queryClient.getCurrentDocument({
+        queryName: "get-current-document",
+        workspaceId: selecting.workspaceId,
+        documentId: selecting.documentId,
+      });
+      const expectedCurrentVersionToken = current.versionId.trim();
+      if (!expectedCurrentVersionToken) {
+        throw new DesktopAssetImportTransportError("asset_import.invalid_current_version", false);
+      }
       let result: DesktopAssetImportStatus = await importClient.importFile({
         workspaceId: selecting.workspaceId,
         documentId: selecting.documentId,
         handle: file.handle,
         label: file.fileName,
+        attachmentOperationId,
+        expectedCurrentVersionToken,
       });
       onProgress(Object.freeze({ ...importing, importOperationId: result.operationId }));
       for (let poll = 0; result.state !== "completed" && poll < 200; poll += 1) {
@@ -271,19 +290,29 @@ export function applyDesktopAssetResult(
 
 export async function linkDesktopSelectedAsset(
   lifecycleClient: Pick<DesktopAssetImportPickerClient, "link">,
-  queryClient: Pick<LocalDesktopCommandClient, "getAssetMetadata">,
+  queryClient: Pick<LocalDesktopCommandClient, "getAssetMetadata" | "getCurrentDocument">,
   snapshot: DesktopAssetSurfaceSnapshot,
+  operationIdSource: () => string,
 ): Promise<DesktopAssetSurfaceSnapshot> {
   if (!snapshot.documentId || !snapshot.selectedAssetId || snapshot.mutationState === "Linking") return snapshot;
   const asset = snapshot.page?.assets.find((item) => item.assetId === snapshot.selectedAssetId);
   if (!asset) return snapshot;
   const linking = Object.freeze({ ...snapshot, mutationState: "Linking" as const });
   try {
+    const operationId = operationIdSource().trim();
+    if (!operationId) return Object.freeze({ ...snapshot, mutationState: "Failed" });
+    const current = await queryClient.getCurrentDocument({
+      queryName: "get-current-document",
+      workspaceId: snapshot.workspaceId,
+      documentId: snapshot.documentId,
+    });
     await lifecycleClient.link({
       workspaceId: snapshot.workspaceId,
       documentId: snapshot.documentId,
       assetId: asset.assetId,
       label: asset.label || asset.fileName,
+      operationId,
+      expectedCurrentVersionToken: current.versionId,
     });
     const readback = await loadDesktopDocumentAssets(
       queryClient,
@@ -320,7 +349,54 @@ export function selectDesktopAsset(
   assetId: string,
 ): DesktopAssetSurfaceSnapshot {
   if (!snapshot.page?.assets.some((asset) => asset.assetId === assetId)) return snapshot;
-  return Object.freeze({ ...snapshot, selectedAssetId: assetId, detailState: "Loading", detail: undefined, mutationState: "Idle", previewState: "Idle", preview: undefined });
+  return Object.freeze({
+    ...snapshot,
+    selectedAssetId: assetId,
+    detailState: "Loading",
+    detail: undefined,
+    mutationState: "Idle",
+    previewState: "Idle",
+    preview: undefined,
+    openState: "Idle",
+    openErrorCode: undefined,
+    openGeneration: (snapshot.openGeneration ?? 0) + 1,
+  });
+}
+
+export function requestDesktopAssetOpen(snapshot: DesktopAssetSurfaceSnapshot): DesktopAssetSurfaceSnapshot {
+  if (!snapshot.selectedAssetId || snapshot.openState === "Opening") return snapshot;
+  return Object.freeze({
+    ...snapshot,
+    openState: "Opening",
+    openGeneration: (snapshot.openGeneration ?? 0) + 1,
+    openErrorCode: undefined,
+  });
+}
+
+export async function openDesktopSelectedAsset(
+  client: Pick<DesktopAssetImportPickerClient, "openExternal">,
+  opening: DesktopAssetSurfaceSnapshot,
+): Promise<DesktopAssetSurfaceSnapshot> {
+  if (opening.openState !== "Opening" || !opening.selectedAssetId) return opening;
+  try {
+    const result = await client.openExternal({
+      workspaceId: opening.workspaceId,
+      assetId: opening.selectedAssetId,
+    });
+    return Object.freeze({
+      ...opening,
+      openState: result.opened ? "Opened" : "OpenFailed",
+      openErrorCode: result.opened ? undefined : "ASSET_EXTERNAL_OPEN_FAILED",
+    });
+  } catch (error) {
+    return Object.freeze({
+      ...opening,
+      openState: "OpenFailed",
+      openErrorCode: error instanceof DesktopAssetImportTransportError
+        ? error.code
+        : "COMMAND_BRIDGE_FAILED",
+    });
+  }
 }
 
 export function requestDesktopAssetPreview(snapshot: DesktopAssetSurfaceSnapshot): DesktopAssetSurfaceSnapshot {
@@ -366,16 +442,32 @@ export async function loadDesktopAssetDetail(
   }
 }
 
+export function applyDesktopAssetDetailResult(
+  current: DesktopAssetSurfaceSnapshot,
+  result: DesktopAssetSurfaceSnapshot,
+): DesktopAssetSurfaceSnapshot {
+  if (!result.selectedAssetId || current.selectedAssetId !== result.selectedAssetId) return current;
+  return Object.freeze({
+    ...current,
+    detailState: result.detailState,
+    detail: result.detail,
+  });
+}
+
 export async function unlinkDesktopSelectedAsset(
   lifecycleClient: DesktopAssetImportPickerClient,
-  queryClient: Pick<LocalDesktopCommandClient, "getAssetMetadata">,
+  queryClient: Pick<LocalDesktopCommandClient, "getAssetMetadata" | "getCurrentDocument">,
   snapshot: DesktopAssetSurfaceSnapshot,
+  operationIdSource: () => string,
 ): Promise<DesktopAssetSurfaceSnapshot> {
   if (!snapshot.documentId || !snapshot.selectedAssetId || snapshot.mutationState === "Unlinking") return snapshot;
   const assetId = snapshot.selectedAssetId;
   const unlinking = Object.freeze({ ...snapshot, mutationState: "Unlinking" as const });
   try {
-    await lifecycleClient.unlink({ workspaceId: snapshot.workspaceId, documentId: snapshot.documentId, assetId });
+    const operationId = operationIdSource().trim();
+    if (!operationId) return Object.freeze({ ...snapshot, mutationState: "Failed" });
+    const current = await queryClient.getCurrentDocument({ queryName: "get-current-document", workspaceId: snapshot.workspaceId, documentId: snapshot.documentId });
+    await lifecycleClient.unlink({ workspaceId: snapshot.workspaceId, documentId: snapshot.documentId, assetId, operationId, expectedCurrentVersionToken: current.versionId });
     const readback = await loadDesktopDocumentAssets(queryClient, requestDesktopAssetLoad(unlinking, snapshot.documentId));
     if (readback.page?.assets.some((asset) => asset.assetId === assetId)) {
       return Object.freeze({ ...readback, mutationState: "Failed" });

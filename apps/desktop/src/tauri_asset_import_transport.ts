@@ -19,6 +19,7 @@ export interface DesktopAssetImportPickerClient {
   cancelImport(request: DesktopAssetImportStatusRequest): Promise<DesktopAssetImportStatus>;
   getDetail(request: DesktopAssetDetailRequest): Promise<DesktopAssetDetail>;
   getPreview(request: DesktopAssetDetailRequest): Promise<DesktopAssetPreview>;
+  openExternal(request: DesktopAssetDetailRequest): Promise<DesktopAssetExternalOpenResult>;
   listWorkspaceAssets(request: DesktopWorkspaceAssetsRequest): Promise<DesktopWorkspaceAssetsPage>;
   link(request: DesktopAssetLinkRequest): Promise<DesktopAssetLinkResult>;
   unlink(request: DesktopAssetUnlinkRequest): Promise<DesktopAssetUnlinkResult>;
@@ -29,6 +30,8 @@ export interface DesktopAssetImportRequest {
   readonly documentId: string;
   readonly handle: string;
   readonly label: string;
+  readonly attachmentOperationId: string;
+  readonly expectedCurrentVersionToken: string;
 }
 
 export interface DesktopAssetImportResult {
@@ -50,6 +53,8 @@ export interface DesktopAssetDetailRequest {
 }
 export interface DesktopAssetUnlinkRequest extends DesktopAssetDetailRequest {
   readonly documentId: string;
+  readonly operationId: string;
+  readonly expectedCurrentVersionToken: string;
 }
 export interface DesktopAssetLinkRequest extends DesktopAssetUnlinkRequest {
   readonly label: string;
@@ -90,24 +95,27 @@ export interface DesktopAssetPreview {
   readonly presentation: "text" | "data_url" | "unsupported";
   readonly content?: string;
 }
+export interface DesktopAssetExternalOpenResult {
+  readonly opened: true;
+}
 export interface DesktopAssetUnlinkResult {
-  readonly removed: boolean;
-  readonly remainingReferences: number;
+  readonly outcome: "fresh" | "replayed" | "no_change";
+  readonly delta: "linked" | "relabeled" | "unlinked" | "unchanged";
+  readonly revisionNumber: number;
 }
-export interface DesktopAssetLinkResult {
-  readonly linked: boolean;
-  readonly referenceCount: number;
-}
+export type DesktopAssetLinkResult = DesktopAssetUnlinkResult;
 
 export class DesktopAssetImportTransportError extends Error {
   readonly code: string;
   readonly retryable: boolean;
+  readonly repairRequired: boolean;
 
-  constructor(code: string, retryable: boolean) {
+  constructor(code: string, retryable: boolean, repairRequired = false) {
     super(code);
     this.name = "DesktopAssetImportTransportError";
     this.code = code;
     this.retryable = retryable;
+    this.repairRequired = repairRequired;
   }
 }
 
@@ -121,10 +129,7 @@ export function createTauriAssetImportTransport(invoke: TauriInvoke): DesktopAss
         throw new DesktopAssetImportTransportError("COMMAND_BRIDGE_FAILED", false);
       }
       if (isSuccess(response)) return Object.freeze({ cancelled: response.data.cancelled, files: Object.freeze(response.data.files.map((file) => Object.freeze(file))) });
-      if (isRecord(response) && response.ok === false && typeof response.errorCode === "string" && typeof response.retryable === "boolean") {
-        throw new DesktopAssetImportTransportError(response.errorCode, response.retryable);
-      }
-      throw new DesktopAssetImportTransportError("COMMAND_BRIDGE_FAILED", false);
+      throw responseError(response);
     },
     async importFile(request) {
       let response: unknown;
@@ -140,10 +145,7 @@ export function createTauriAssetImportTransport(invoke: TauriInvoke): DesktopAss
           state: response.state,
         });
       }
-      if (isRecord(response) && response.ok === false && typeof response.errorCode === "string" && typeof response.retryable === "boolean") {
-        throw new DesktopAssetImportTransportError(response.errorCode, response.retryable);
-      }
-      throw new DesktopAssetImportTransportError("COMMAND_BRIDGE_FAILED", false);
+      throw responseError(response);
     },
     async getImportStatus(request) {
       const response = await safeInvoke(invoke, "get_desktop_asset_import_status", { request });
@@ -165,6 +167,11 @@ export function createTauriAssetImportTransport(invoke: TauriInvoke): DesktopAss
       if (isPreviewSuccess(response)) return Object.freeze({ ...response.data });
       throw responseError(response);
     },
+    async openExternal(request) {
+      const response = await safeInvoke(invoke, "open_desktop_asset_externally", { request });
+      if (isExternalOpenSuccess(response)) return Object.freeze({ opened: true });
+      throw responseError(response);
+    },
     async listWorkspaceAssets(request) {
       const response = await safeInvoke(invoke, "get_desktop_workspace_assets", { request });
       if (isWorkspacePageSuccess(response)) {
@@ -177,20 +184,37 @@ export function createTauriAssetImportTransport(invoke: TauriInvoke): DesktopAss
       throw responseError(response);
     },
     async link(request) {
-      const response = await safeInvoke(invoke, "link_desktop_asset", { request });
-      if (isRecord(response) && response.ok === true && typeof response.linked === "boolean" && isNonNegativeInteger(response.referenceCount)) {
-        return Object.freeze({ linked: response.linked, referenceCount: response.referenceCount });
-      }
+      const response = await safeInvoke(invoke, "link_desktop_asset", { request: { kind: "link", ...request } });
+      if (isAttachmentMutationSuccess(response)) return freezeAttachmentMutation(response);
       throw responseError(response);
     },
     async unlink(request) {
-      const response = await safeInvoke(invoke, "unlink_desktop_asset", { request });
-      if (isRecord(response) && response.ok === true && typeof response.removed === "boolean" && isNonNegativeInteger(response.remainingReferences)) {
-        return Object.freeze({ removed: response.removed, remainingReferences: response.remainingReferences });
-      }
+      const response = await safeInvoke(invoke, "unlink_desktop_asset", { request: { kind: "unlink", ...request } });
+      if (isAttachmentMutationSuccess(response)) return freezeAttachmentMutation(response);
       throw responseError(response);
     },
   });
+}
+
+function isAttachmentMutationSuccess(value: unknown): value is {
+  readonly ok: true;
+  readonly outcome: "fresh" | "replayed" | "no_change";
+  readonly delta: "linked" | "relabeled" | "unlinked" | "unchanged";
+  readonly revisionNumber: number;
+} {
+  return isRecord(value) && value.ok === true
+    && ["fresh", "replayed", "no_change"].includes(String(value.outcome))
+    && ["linked", "relabeled", "unlinked", "unchanged"].includes(String(value.delta))
+    && Number.isSafeInteger(value.revisionNumber) && Number(value.revisionNumber) > 0
+    && !("versionToken" in value) && !("snapshotRef" in value) && !("path" in value);
+}
+
+function freezeAttachmentMutation(value: {
+  readonly outcome: "fresh" | "replayed" | "no_change";
+  readonly delta: "linked" | "relabeled" | "unlinked" | "unchanged";
+  readonly revisionNumber: number;
+}): DesktopAssetLinkResult {
+  return Object.freeze({ outcome: value.outcome, delta: value.delta, revisionNumber: value.revisionNumber });
 }
 
 async function safeInvoke(invoke: TauriInvoke, command: string, payload: unknown): Promise<unknown> {
@@ -200,7 +224,7 @@ async function safeInvoke(invoke: TauriInvoke, command: string, payload: unknown
 
 function responseError(response: unknown): DesktopAssetImportTransportError {
   return isRecord(response) && response.ok === false && typeof response.errorCode === "string" && typeof response.retryable === "boolean"
-    ? new DesktopAssetImportTransportError(response.errorCode, response.retryable)
+    ? new DesktopAssetImportTransportError(response.errorCode, response.retryable, response.repairRequired === true)
     : new DesktopAssetImportTransportError("COMMAND_BRIDGE_FAILED", false);
 }
 
@@ -257,6 +281,15 @@ function isPreviewSuccess(value: unknown): value is { readonly ok: true; readonl
   if (data.presentation === "unsupported") return data.content == null;
   if (typeof data.content !== "string" || data.content.length > 3_000_000) return false;
   return data.presentation === "text" || data.content.startsWith(`data:${data.mediaType};base64,`);
+}
+
+function isExternalOpenSuccess(value: unknown): value is { readonly ok: true; readonly opened: true } {
+  return isRecord(value)
+    && value.ok === true
+    && value.opened === true
+    && !("path" in value)
+    && !("objectKey" in value)
+    && !("bytes" in value);
 }
 
 function isWorkspacePageSuccess(value: unknown): value is {

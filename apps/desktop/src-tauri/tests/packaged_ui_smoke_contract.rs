@@ -1,10 +1,11 @@
 use cabinet_desktop_shell::{
-    PackagedUiSmokeAssetFixture, PackagedUiSmokeCanvasFixture, PackagedUiSmokeErrorCode, PackagedUiSmokeFailureStage,
-    PackagedUiSmokeMode, PackagedUiSmokeReport, validate_packaged_ui_smoke_report,
+    PackagedUiSmokeAssetFixture, PackagedUiSmokeCanvasFixture, PackagedUiSmokeErrorCode,
+    PackagedUiSmokeFailureStage, PackagedUiSmokeMode, PackagedUiSmokeReport,
+    validate_packaged_ui_smoke_report,
 };
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn document_workflow_failures_have_stable_non_sensitive_substage_codes() {
@@ -34,8 +35,12 @@ fn graph_workflow_failures_have_stable_non_sensitive_action_codes() {
             "PHASE012_PACKAGED_UI_GRAPH_OPEN_FAILED",
         ),
         (
-            PackagedUiSmokeFailureStage::GraphScope,
-            "PHASE012_PACKAGED_UI_GRAPH_SCOPE_FAILED",
+            PackagedUiSmokeFailureStage::GraphScopeGlobal,
+            "PHASE012_PACKAGED_UI_GRAPH_SCOPE_GLOBAL_FAILED",
+        ),
+        (
+            PackagedUiSmokeFailureStage::GraphScopeLocal,
+            "PHASE012_PACKAGED_UI_GRAPH_SCOPE_LOCAL_FAILED",
         ),
         (
             PackagedUiSmokeFailureStage::GraphDepth,
@@ -264,8 +269,14 @@ fn canvas_corruption_fixture_is_fail_closed_and_changes_only_the_default_current
         Err("PACKAGED_UI_FIXTURE_DISABLED")
     );
 
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
-    let root = std::env::temp_dir().join(format!("cabinet-packaged-canvas-fixture-{}-{nonce}", std::process::id()));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "cabinet-packaged-canvas-fixture-{}-{nonce}",
+        std::process::id()
+    ));
     let current = root
         .join("canvases")
         .join("776f726b73706163652d31")
@@ -279,8 +290,14 @@ fn canvas_corruption_fixture_is_fail_closed_and_changes_only_the_default_current
     PackagedUiSmokeCanvasFixture::enabled(root.clone())
         .corrupt_default_current_pointer()
         .expect("corrupt pointer");
-    assert_eq!(fs::read_to_string(&current).expect("corrupt pointer read"), "corrupt packaged smoke pointer\n");
-    assert_eq!(fs::read_to_string(unrelated).expect("unrelated read"), "preserve");
+    assert_eq!(
+        fs::read_to_string(&current).expect("corrupt pointer read"),
+        "corrupt packaged smoke pointer\n"
+    );
+    assert_eq!(
+        fs::read_to_string(unrelated).expect("unrelated read"),
+        "preserve"
+    );
     fs::remove_dir_all(root).expect("fixture cleanup");
 }
 
@@ -303,6 +320,9 @@ fn valid_report_requires_all_real_surfaces_and_the_full_sample_count() {
         graph_ready: true,
         canvas_ready: true,
         assets_ready: true,
+        document_version_workflow_verified: true,
+        document_attachment_workflow_verified: true,
+        keyboard_document_workflow_verified: true,
         sample_count: 200,
         p95_ms: 299,
         error_count: 0,
@@ -321,6 +341,9 @@ fn invalid_report_returns_stable_non_sensitive_error_codes() {
         graph_ready: false,
         canvas_ready: true,
         assets_ready: true,
+        document_version_workflow_verified: true,
+        document_attachment_workflow_verified: true,
+        keyboard_document_workflow_verified: true,
         sample_count: 200,
         p95_ms: 20,
         error_count: 0,
@@ -335,6 +358,9 @@ fn invalid_report_returns_stable_non_sensitive_error_codes() {
         graph_ready: true,
         canvas_ready: true,
         assets_ready: true,
+        document_version_workflow_verified: true,
+        document_attachment_workflow_verified: true,
+        keyboard_document_workflow_verified: true,
         sample_count: 200,
         p95_ms: 301,
         error_count: 0,
@@ -355,6 +381,9 @@ fn report_rejects_route_only_coverage_without_mutation_readbacks() {
         graph_ready: true,
         canvas_ready: true,
         assets_ready: true,
+        document_version_workflow_verified: true,
+        document_attachment_workflow_verified: true,
+        keyboard_document_workflow_verified: true,
         sample_count: 200,
         p95_ms: 20,
         error_count: 0,
@@ -367,4 +396,101 @@ fn report_rejects_route_only_coverage_without_mutation_readbacks() {
         result,
         Err(PackagedUiSmokeErrorCode::ActionCoverageIncomplete)
     );
+}
+
+#[test]
+fn report_requires_document_version_workflow_evidence() {
+    let result = validate_packaged_ui_smoke_report(PackagedUiSmokeReport {
+        home_ready: true,
+        graph_ready: true,
+        canvas_ready: true,
+        assets_ready: true,
+        document_version_workflow_verified: false,
+        document_attachment_workflow_verified: true,
+        keyboard_document_workflow_verified: true,
+        sample_count: 200,
+        p95_ms: 20,
+        error_count: 0,
+        failure_stage: None,
+        action_count: 91,
+        durable_readback_count: 33,
+    });
+
+    assert_eq!(
+        result,
+        Err(PackagedUiSmokeErrorCode::DocumentVersionWorkflowMissing)
+    );
+}
+
+#[test]
+fn report_requires_document_attachment_workflow_evidence() {
+    let result = validate_packaged_ui_smoke_report(PackagedUiSmokeReport {
+        home_ready: true,
+        graph_ready: true,
+        canvas_ready: true,
+        assets_ready: true,
+        document_version_workflow_verified: true,
+        document_attachment_workflow_verified: false,
+        keyboard_document_workflow_verified: true,
+        sample_count: 200,
+        p95_ms: 20,
+        error_count: 0,
+        failure_stage: None,
+        action_count: 97,
+        durable_readback_count: 35,
+    });
+
+    assert_eq!(
+        result,
+        Err(PackagedUiSmokeErrorCode::DocumentAttachmentWorkflowMissing)
+    );
+}
+
+#[test]
+fn report_requires_keyboard_document_workflow_evidence() {
+    let result = validate_packaged_ui_smoke_report(PackagedUiSmokeReport {
+        home_ready: true,
+        graph_ready: true,
+        canvas_ready: true,
+        assets_ready: true,
+        document_version_workflow_verified: true,
+        document_attachment_workflow_verified: true,
+        keyboard_document_workflow_verified: false,
+        sample_count: 200,
+        p95_ms: 20,
+        error_count: 0,
+        failure_stage: None,
+        action_count: 97,
+        durable_readback_count: 35,
+    });
+
+    assert_eq!(
+        result,
+        Err(PackagedUiSmokeErrorCode::KeyboardDocumentWorkflowMissing)
+    );
+}
+
+#[test]
+fn document_attachment_failures_have_stable_non_sensitive_codes() {
+    let cases = [
+        (
+            PackagedUiSmokeFailureStage::DocumentAttachmentTab,
+            "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_TAB_FAILED",
+        ),
+        (
+            PackagedUiSmokeFailureStage::DocumentAttachmentOpen,
+            "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_OPEN_FAILED",
+        ),
+        (
+            PackagedUiSmokeFailureStage::DocumentAttachmentUnlinkRequest,
+            "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_UNLINK_REQUEST_FAILED",
+        ),
+        (
+            PackagedUiSmokeFailureStage::DocumentAttachmentUnlinkCancel,
+            "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_UNLINK_CANCEL_FAILED",
+        ),
+    ];
+    for (stage, code) in cases {
+        assert_eq!(stage.error_code(), code);
+    }
 }

@@ -56,7 +56,13 @@ test("desktop entry wires global shell actions into every routed surface", async
   for (const token of [
     "onCreateDocument: createNewDocument",
     "onBackup:",
-    "onDocument: openNavigator",
+    "onDocument: resumeDocument",
     "onSearch: openNavigator",
   ]) assert.match(source, new RegExp(token));
+  assert.match(source, /onResumeDocument: resumeDocument/);
+  assert.match(source, /resolveDesktopDocumentMenuTarget/);
+  assert.match(source, /target\.kind === "EmptyWorkspace"/);
+  assert.match(source, /requestDesktopRoute\(\{ kind: "Document" \}/);
+  assert.doesNotMatch(source, /if \(documentId\)[\s\S]{0,180}createNewDocument\(\)/);
+  assert.doesNotMatch(source, /onDocument: openNavigator/);
 });

@@ -16,6 +16,7 @@ export function validatePhase013PackagedProductReport(report, expectedSourceFing
   if (report?.errorCount !== 0) findingIds.push("error_count");
   if (!Number.isInteger(report?.actionCount) || report.actionCount < 15) findingIds.push("action_count");
   if (!Number.isInteger(report?.durableReadbackCount) || report.durableReadbackCount < 4) findingIds.push("durable_readback_count");
+  if (report?.keyboardDocumentWorkflowVerified !== true) findingIds.push("keyboard_document_workflow");
   const serialized = JSON.stringify(report ?? {});
   if (["/Users/", "C:\\Users\\", "documentBody", "assetBytes", "sessionToken", "provider_api_key"].some((token) => serialized.includes(token))) findingIds.push("sensitive_data");
   return Object.freeze({ passed: findingIds.length === 0, findingIds: Object.freeze(findingIds) });

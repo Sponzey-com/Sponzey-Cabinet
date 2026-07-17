@@ -8,12 +8,16 @@ export function validateResponsiveStressReport(report, expected) {
   if (report?.longContentFixture !== true) findingIds.push("long_content_fixture");
 
   const runs = Array.isArray(report?.runs) ? report.runs : [];
-  for (const route of expected.routes) {
-    const run = runs.find((candidate) => candidate.route === route);
-    if (!run) findingIds.push(`missing_${route}`);
-    else {
-      if (run.horizontalOverflow === true) findingIds.push(`horizontal_overflow_${route}`);
-      if (!Number.isInteger(run.clippedActionCount) || run.clippedActionCount > 0) findingIds.push(`clipped_action_${route}`);
+  for (const viewport of expected.viewports) {
+    for (const route of expected.routes) {
+      const suffix = `${route}_${viewport.width}x${viewport.height}`;
+      const run = runs.find((candidate) => candidate.route === route
+        && candidate.width === viewport.width && candidate.height === viewport.height);
+      if (!run) findingIds.push(`missing_${suffix}`);
+      else {
+        if (run.horizontalOverflow === true) findingIds.push(`horizontal_overflow_${suffix}`);
+        if (!Number.isInteger(run.clippedActionCount) || run.clippedActionCount > 0) findingIds.push(`clipped_action_${suffix}`);
+      }
     }
   }
   for (const action of Array.isArray(report?.actions) ? report.actions : []) {

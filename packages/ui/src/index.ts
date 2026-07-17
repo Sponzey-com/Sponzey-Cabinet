@@ -918,21 +918,19 @@ export interface RestorePreviewModel {
 
 export interface RestoreConfirmationInput {
   readonly confirmed: boolean;
+  readonly operationId: string;
   readonly expectedCurrentVersionId: string;
-  readonly restoredVersionId: string;
-  readonly restoredSnapshotRef: string;
   readonly author: string;
   readonly summary: string;
 }
 
 export interface RestoreApplyCommand {
   readonly commandName: "restore-document-version";
+  readonly operationId: string;
   readonly workspaceId: string;
   readonly documentId: string;
   readonly targetVersionId: string;
   readonly expectedCurrentVersionId: string;
-  readonly restoredVersionId: string;
-  readonly restoredSnapshotRef: string;
   readonly author: string;
   readonly summary: string;
 }
@@ -1320,7 +1318,7 @@ export function createRestoreApplyCommand(
       errorCode: RestoreFlowErrorCode.RestoreNotAllowed,
     };
   }
-  if (!confirmation.expectedCurrentVersionId.trim()) {
+  if (!confirmation.operationId.trim() || !confirmation.expectedCurrentVersionId.trim()) {
     return {
       status: "not-created",
       errorCode: RestoreFlowErrorCode.InvalidTransition,
@@ -1330,12 +1328,11 @@ export function createRestoreApplyCommand(
     status: "created",
     command: {
       commandName: "restore-document-version",
+      operationId: confirmation.operationId,
       workspaceId: preview.workspaceId,
       documentId: preview.documentId,
       targetVersionId: preview.targetVersionId,
       expectedCurrentVersionId: confirmation.expectedCurrentVersionId,
-      restoredVersionId: confirmation.restoredVersionId,
-      restoredSnapshotRef: confirmation.restoredSnapshotRef,
       author: confirmation.author,
       summary: confirmation.summary,
     },

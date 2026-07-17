@@ -610,6 +610,7 @@ function DesktopAttachments({
         "data-selected-asset-id": snapshot.selectedAssetId ?? "",
         "data-asset-reference-count": snapshot.detail?.referenceCount ?? -1,
         "data-asset-preview-state": snapshot.previewState ?? "Idle",
+        "data-asset-filter": filter,
       },
       e(
       "header",
@@ -637,7 +638,7 @@ function DesktopAttachments({
       snapshot.importState === "Importing" && snapshot.importOperationId ? e("div", { className: "asset-operation-status", role: "status" }, e("span", null, "파일을 가져오는 중입니다."), e("button", { type: "button", "data-action": "cancel-asset-import", onClick: callbacks.onAssetCancel }, "취소")) : null,
       snapshot.importState === "Cancelled" ? e("p", { className: "asset-operation-status", role: "status" }, "파일 가져오기를 취소했습니다.") : null,
       snapshot.importState === "Failed" ? e("div", { className: "asset-operation-status failed", role: "alert" }, e("span", null, "파일을 저장하지 못했습니다."), e("button", { type: "button", "data-action": "import-asset", onClick: callbacks.onAssetImport }, "다시 시도")) : null,
-      e("div", { className: "asset-controls" }, e("label", { className: "asset-search" }, e("span", { "aria-hidden": "true" }, "⌕"), e("input", { type: "search", "data-action": "search-assets", placeholder: "파일명으로 검색", value: query, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.currentTarget.value) })), e("div", { className: "asset-filters" }, [["전체 파일", "all"], ["이미지", "image"], ["PDF", "pdf"], ["문서", "document"], ["기타", "other"]].map(([label, id]) => e("button", { key: id, type: "button", "data-action": `filter-assets-${id}`, className: filter === label ? "active" : "", onClick: () => setFilter(label) }, label)))),
+      e("div", { className: "asset-controls" }, e("label", { className: "asset-search" }, e("span", { "aria-hidden": "true" }, "⌕"), e("input", { type: "search", "data-action": "search-assets", placeholder: "파일명으로 검색", value: query, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.currentTarget.value) })), e("div", { className: "asset-filters", role: "group", "aria-label": "파일 형식 필터" }, [["전체 파일", "all"], ["이미지", "image"], ["PDF", "pdf"], ["문서", "document"], ["기타", "other"]].map(([label, id]) => e("button", { key: id, type: "button", "data-action": `filter-assets-${id}`, className: filter === label ? "active" : "", "aria-pressed": filter === label, onClick: () => setFilter(label) }, label)))),
       e(
         "div",
         { className: "assets-layout" },

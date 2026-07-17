@@ -20,6 +20,7 @@ const interactionEvidence = "apps/desktop/tests/desktop_react_exploration_surfac
 export const EXPLORATION_UI_ACTION_MANIFEST: readonly ExplorationUiActionManifestEntry[] = Object.freeze([
   connected("navigate-home", "shell", "route", "DesktopRoute.Home", "onHome"),
   connected("navigate-search", "shell", "route", "DesktopRoute.Search", "onSearch"),
+  connected("navigate-document", "shell", "route", "DesktopRoute.Document", "onDocument"),
   connected("navigate-graph", "shell", "route", "DesktopRoute.Graph", "onGraph"),
   connected("navigate-canvas", "shell", "route", "DesktopRoute.Canvas", "onCanvas"),
   connected("navigate-assets", "shell", "route", "DesktopRoute.Assets", "onAssets"),

@@ -9,6 +9,7 @@ use cabinet_ports::current_document_projection_catalog::{
 };
 use cabinet_ports::current_document_version::CurrentDocumentVersionPointerPort;
 
+use crate::local_create_document_revision_runtime::LOCAL_DOCUMENT_POINTER_ROOT;
 use crate::local_current_document_version_pointer::LocalCurrentDocumentVersionPointer;
 
 #[derive(Debug, Clone)]
@@ -63,7 +64,7 @@ impl CurrentDocumentProjectionCatalog for LocalCurrentDocumentProjectionCatalog 
             return Err(CurrentDocumentProjectionCatalogError::LimitExceeded);
         }
         let pointers = LocalCurrentDocumentVersionPointer::new(
-            self.app_data_root.join("authoring-current-version"),
+            self.app_data_root.join(LOCAL_DOCUMENT_POINTER_ROOT),
         );
         documents
             .into_iter()

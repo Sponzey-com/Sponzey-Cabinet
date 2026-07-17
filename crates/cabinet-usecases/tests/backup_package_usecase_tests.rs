@@ -27,7 +27,10 @@ fn create_backup_package_returns_manifest_summary_and_safe_product_event() {
     assert_eq!(output.package_id(), "package-1");
     assert_eq!(output.schema_version(), 1);
     assert_eq!(output.entry_count(), 8);
-    assert_eq!(output.summary().created_at_epoch_ms(), Some(1_784_064_000_000));
+    assert_eq!(
+        output.summary().created_at_epoch_ms(),
+        Some(1_784_064_000_000)
+    );
     assert_eq!(output.authoritative_record_count(), 87);
     assert_eq!(output.rebuildable_record_count(), 20);
     assert_eq!(output.summary().entries().len(), 8);

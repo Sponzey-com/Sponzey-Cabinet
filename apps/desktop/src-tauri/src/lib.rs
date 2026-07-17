@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use cabinet_adapters::durable_asset_association_catalog::DurableAssetAssociationCatalog;
 use cabinet_adapters::durable_asset_import_operation_repository::DurableAssetImportOperationRepository;
 use cabinet_adapters::durable_asset_metadata_catalog::DurableAssetMetadataCatalog;
@@ -23,6 +24,8 @@ use cabinet_adapters::durable_local_link_index::DurableLocalLinkIndex;
 use cabinet_adapters::durable_local_search_index::DurableLocalSearchIndex;
 use cabinet_adapters::durable_projection_repair_repository::DurableProjectionRepairRepository;
 use cabinet_adapters::durable_projection_work_repository::DurableProjectionWorkRepository;
+use cabinet_adapters::local_asset_availability_resolver::LocalAssetAvailabilityResolver;
+use cabinet_adapters::local_asset_external_opener::LocalAssetExternalOpener;
 use cabinet_adapters::local_asset_import_source::{
     LocalAssetImportSource, LocalAssetImportSourceConfig,
 };
@@ -31,21 +34,32 @@ use cabinet_adapters::local_asset_staging_writer::LocalAssetStagingWriter;
 use cabinet_adapters::local_backup_restore_store::LocalBackupRestoreStore;
 use cabinet_adapters::local_backup_store::LocalBackupStore;
 use cabinet_adapters::local_content_addressed_asset_publisher::LocalContentAddressedAssetPublisher;
+use cabinet_adapters::local_create_document_revision_runtime::{
+    LOCAL_DOCUMENT_POINTER_ROOT, LOCAL_DOCUMENT_VERSION_ROOT, LocalCreateDocumentRevisionRuntime,
+};
 use cabinet_adapters::local_current_document_projection_catalog::LocalCurrentDocumentProjectionCatalog;
 use cabinet_adapters::local_current_document_version_pointer::LocalCurrentDocumentVersionPointer;
 use cabinet_adapters::local_document_navigator_projection::LocalDocumentNavigatorProjectionStore;
 use cabinet_adapters::local_document_repository::LocalDocumentRepository;
+use cabinet_adapters::local_imported_asset_document_revision_linker::LocalImportedAssetDocumentRevisionLinker;
 use cabinet_adapters::local_markdown_parser::LocalMarkdownParser;
+use cabinet_adapters::local_mutate_document_attachments_runtime::LocalMutateDocumentAttachmentsRuntime;
+use cabinet_adapters::local_restore_document_revision_runtime::LocalRestoreDocumentRevisionRuntime;
+use cabinet_adapters::local_restore_projection_recovery_runtime::LocalRestoreProjectionRecoveryRuntime;
+use cabinet_adapters::local_update_document_revision_runtime::LocalUpdateDocumentRevisionRuntime;
 use cabinet_adapters::local_version_store::LocalVersionStore;
 use cabinet_adapters::local_workspace_home_projection::LocalWorkspaceHomeProjectionStore;
 use cabinet_adapters::local_workspace_reopener::LocalWorkspaceReopener;
+use cabinet_adapters::process_local_document_diff_operation_registry::ProcessLocalDocumentDiffOperationRegistry;
 use cabinet_domain::asset::AssetImportHandle;
 use cabinet_domain::asset_import_operation::{
     AssetImportOperation, AssetImportOperationId, AssetImportState,
 };
 use cabinet_domain::backup::{BackupDataClass, BackupJobId, BackupJobState, RestoreState};
 use cabinet_domain::canvas::{CanvasGeometryPolicy, CanvasNodeTarget};
-use cabinet_domain::document::{DocumentBodyPolicy, DocumentId};
+use cabinet_domain::document::{DocumentBodyPolicy, DocumentId, DocumentTitle};
+use cabinet_domain::document_diff_operation::DocumentDiffOperationState;
+use cabinet_domain::document_revision::DocumentOperationId;
 use cabinet_domain::graph::{GraphEdgeKind, GraphNodeKind, GraphProjectionStatus};
 use cabinet_domain::projection_repair::{ProjectionRepairEvent, ProjectionRepairOperationId};
 use cabinet_domain::projection_work::ProjectionChangeKind;
@@ -69,12 +83,20 @@ use cabinet_platform::workspace_home_command::{
     WorkspaceHomeCommandFailure, WorkspaceHomeCommandLoadState, WorkspaceHomeCommandResult,
     execute_workspace_home_command,
 };
+use cabinet_ports::asset_external_open::AssetExternalOpener;
 use cabinet_ports::asset_import_operation_repository::AssetImportOperationRepository;
 use cabinet_ports::asset_import_source::AssetImportSource;
+use cabinet_ports::asset_metadata_catalog::AssetMetadataCatalog;
 use cabinet_ports::backup_restore::BackupRestoreStore;
 use cabinet_ports::current_document_version::CurrentDocumentVersionPointerPort;
+use cabinet_ports::document_repository::DocumentRepository;
+use cabinet_ports::imported_asset_document_link::ImportedAssetDocumentLinkPort;
 use cabinet_ports::projection_repair::ProjectionRepairRepository;
-use cabinet_ports::version_store::HistoryPage;
+use cabinet_ports::version_store::{HistoryPage, VersionStore, VersionStoreError};
+use cabinet_usecases::asset_external_open::{
+    AssetExternalOpenProductEvent, AssetExternalOpenProductLogger, OpenAssetExternallyError,
+    OpenAssetExternallyInput, OpenAssetExternallyUsecase,
+};
 use cabinet_usecases::asset_import::{
     CancelAssetImportInput, CancelAssetImportUsecase, ImportAssetError, ImportAssetInput,
     ImportAssetProductEvent, ImportAssetProductLogger, ImportAssetUsecase,
@@ -89,7 +111,18 @@ use cabinet_usecases::asset_lifecycle::{
 use cabinet_usecases::asset_preview::{
     AssetPreviewError, AssetPreviewResult, GetAssetPreviewInput, GetAssetPreviewUsecase,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use cabinet_usecases::authoritative_document_diff::{
+    CompareAuthoritativeDocumentRevisionsError, CompareAuthoritativeDocumentRevisionsInput,
+    CompareAuthoritativeDocumentRevisionsUsecase,
+};
+use cabinet_usecases::authoritative_document_query::{
+    GetAuthoritativeDocumentRevisionError, GetAuthoritativeDocumentRevisionInput,
+    GetAuthoritativeDocumentRevisionUsecase,
+};
+use cabinet_usecases::authoritative_restore_preview::{
+    PreviewAuthoritativeDocumentRestoreError, PreviewAuthoritativeDocumentRestoreInput,
+    PreviewAuthoritativeDocumentRestoreUsecase,
+};
 use cabinet_usecases::backup_package::{
     BackupPackageProductEvent, BackupPackageSummary, BackupPackageUsecaseLogger,
     CreateBackupPackageInput, CreateBackupPackageUsecase, PreviewBackupRestoreInput,
@@ -138,13 +171,28 @@ use cabinet_usecases::canvas_target_presentation::{
 use cabinet_usecases::canvas_viewport::{
     GetCanvasViewportError, GetCanvasViewportInput, GetCanvasViewportUsecase,
 };
+use cabinet_usecases::create_document_revision::{
+    CreateDocumentRevisionError, CreateDocumentRevisionInput,
+};
 use cabinet_usecases::document::{
     CreateDocumentProductEvent, DocumentChangeEvent, DocumentChangeEventPublisher,
     DocumentProductLogger, GetDocumentHistoryInput, GetDocumentHistoryUsecase,
     GetDocumentVersionInput, GetDocumentVersionUsecase, LineDiff, LineDiffKind,
-    PreviewDocumentRestoreInput, PreviewDocumentRestoreUsecase, RestoreDocumentVersionInput,
-    RestoreDocumentVersionState, RestoreDocumentVersionUsecase, RenameDocumentInput,
-    RenameDocumentUsecase,
+    RenameDocumentInput, RenameDocumentUsecase,
+};
+use cabinet_usecases::document_diff::{
+    DiffComputation as AuthoritativeDiffComputation,
+    DiffLimitReason as AuthoritativeDiffLimitReason, DiffPolicy as AuthoritativeDiffPolicy,
+    DocumentTitleDelta as AuthoritativeDocumentTitleDelta,
+    LineDiffKind as AuthoritativeLineDiffKind,
+};
+use cabinet_usecases::document_diff_operation::{
+    CancelDocumentDiffOperationError, CancelDocumentDiffOperationInput,
+    CancelDocumentDiffOperationUsecase, DocumentDiffOperationIdGenerator,
+    GetDocumentDiffOperationStatusError, GetDocumentDiffOperationStatusInput,
+    GetDocumentDiffOperationStatusUsecase, RunDocumentDiffOperationInput,
+    RunDocumentDiffOperationUsecase, StartDocumentDiffOperationError,
+    StartDocumentDiffOperationInput, StartDocumentDiffOperationUsecase,
 };
 use cabinet_usecases::document_link_catalog_projection::ApplyDocumentLinkCatalogChangeUsecase;
 use cabinet_usecases::global_graph::{
@@ -153,6 +201,10 @@ use cabinet_usecases::global_graph::{
 use cabinet_usecases::graph::{
     GetLocalKnowledgeGraphError, GetLocalKnowledgeGraphInput, GetLocalKnowledgeGraphUsecase,
     LocalGraphDirection,
+};
+use cabinet_usecases::mutate_document_attachments::{
+    MutateDocumentAttachmentsError, MutateDocumentAttachmentsInput,
+    MutateDocumentAttachmentsOutcomeKind,
 };
 use cabinet_usecases::projection_freshness::{
     GetCurrentProjectionFreshnessInput, GetCurrentProjectionFreshnessUsecase,
@@ -177,13 +229,28 @@ use cabinet_usecases::reindex_asset_graph_projection::{
 use cabinet_usecases::reindex_projection::{
     ReindexCurrentProjectionInput, ReindexCurrentProjectionUsecase,
 };
+use cabinet_usecases::resolve_attachment_diff_availability::{
+    ResolveAttachmentDiffAvailabilityError, ResolveAttachmentDiffAvailabilityInput,
+    ResolveAttachmentDiffAvailabilityUsecase, ResolvedAttachmentDiff,
+};
 use cabinet_usecases::resolved_link_graph_writer::{
     AssetGraphProjectionPolicy, ResolvedLinkGraphProjectionWriter,
 };
+use cabinet_usecases::restore_document_revision::{
+    RestoreDocumentRevisionError, RestoreDocumentRevisionInput,
+};
+use cabinet_usecases::restore_product_log::{RestoreProductEvent, RestoreProductLogger};
 use cabinet_usecases::restore_projection_rebuild::{
     RebuildRestoreProjectionsInput, RebuildRestoreProjectionsUsecase,
 };
+use cabinet_usecases::restore_target_asset_preflight::{
+    RestoreTargetAssetPreflightError, RestoreTargetAssetPreflightInput,
+    RestoreTargetAssetPreflightOutcome, RestoreTargetAssetPreflightUsecase,
+};
 use cabinet_usecases::search_projection_writer::SearchProjectionWriter;
+use cabinet_usecases::update_document_revision::{
+    UpdateDocumentRevisionError, UpdateDocumentRevisionInput,
+};
 use cabinet_usecases::versioned_projection_processor::VersionedMarkdownProjectionProcessor;
 use cabinet_usecases::workspace_home_update::UpdateWorkspaceHomeProjectionUsecase;
 use serde::{Deserialize, Serialize};
@@ -292,6 +359,9 @@ pub struct PackagedUiSmokeReport {
     pub graph_ready: bool,
     pub canvas_ready: bool,
     pub assets_ready: bool,
+    pub document_version_workflow_verified: bool,
+    pub document_attachment_workflow_verified: bool,
+    pub keyboard_document_workflow_verified: bool,
     pub sample_count: u32,
     pub p95_ms: u64,
     pub error_count: u32,
@@ -308,8 +378,23 @@ pub enum PackagedUiSmokeFailureStage {
     DocumentEdit,
     DocumentSave,
     DocumentReopen,
+    DocumentHistoryTab,
+    DocumentHistoryLoad,
+    DocumentHistoryReadback,
+    DocumentDiff,
+    DocumentRestorePreviewAction,
+    DocumentRestorePreviewReadback,
+    DocumentRestoreReview,
+    DocumentRestoreCancel,
+    DocumentRestoreConfirm,
+    DocumentRestoreReadback,
+    DocumentAttachmentTab,
+    DocumentAttachmentOpen,
+    DocumentAttachmentUnlinkRequest,
+    DocumentAttachmentUnlinkCancel,
     GraphOpen,
-    GraphScope,
+    GraphScopeGlobal,
+    GraphScopeLocal,
     GraphDepth,
     GraphDirection,
     GraphUnresolved,
@@ -345,6 +430,11 @@ pub enum PackagedUiSmokeFailureStage {
     AssetDetachedDetail,
     AssetRelink,
     AssetFilters,
+    AssetFilterAll,
+    AssetFilterImage,
+    AssetFilterPdf,
+    AssetFilterDocument,
+    AssetFilterOther,
     CanvasAsset,
     CanvasAssetRoute,
     AssetDocumentRoute,
@@ -364,8 +454,35 @@ impl PackagedUiSmokeFailureStage {
             Self::DocumentEdit => "PHASE012_PACKAGED_UI_DOCUMENT_EDIT_FAILED",
             Self::DocumentSave => "PHASE012_PACKAGED_UI_DOCUMENT_SAVE_FAILED",
             Self::DocumentReopen => "PHASE012_PACKAGED_UI_DOCUMENT_REOPEN_FAILED",
+            Self::DocumentHistoryTab => "PHASE012_PACKAGED_UI_DOCUMENT_HISTORY_TAB_FAILED",
+            Self::DocumentHistoryLoad => "PHASE012_PACKAGED_UI_DOCUMENT_HISTORY_LOAD_FAILED",
+            Self::DocumentHistoryReadback => {
+                "PHASE012_PACKAGED_UI_DOCUMENT_HISTORY_READBACK_FAILED"
+            }
+            Self::DocumentDiff => "PHASE012_PACKAGED_UI_DOCUMENT_DIFF_FAILED",
+            Self::DocumentRestorePreviewAction => {
+                "PHASE012_PACKAGED_UI_DOCUMENT_RESTORE_PREVIEW_ACTION_FAILED"
+            }
+            Self::DocumentRestorePreviewReadback => {
+                "PHASE012_PACKAGED_UI_DOCUMENT_RESTORE_PREVIEW_READBACK_FAILED"
+            }
+            Self::DocumentRestoreReview => "PHASE012_PACKAGED_UI_DOCUMENT_RESTORE_REVIEW_FAILED",
+            Self::DocumentRestoreCancel => "PHASE012_PACKAGED_UI_DOCUMENT_RESTORE_CANCEL_FAILED",
+            Self::DocumentRestoreConfirm => "PHASE012_PACKAGED_UI_DOCUMENT_RESTORE_CONFIRM_FAILED",
+            Self::DocumentRestoreReadback => {
+                "PHASE012_PACKAGED_UI_DOCUMENT_RESTORE_READBACK_FAILED"
+            }
+            Self::DocumentAttachmentTab => "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_TAB_FAILED",
+            Self::DocumentAttachmentOpen => "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_OPEN_FAILED",
+            Self::DocumentAttachmentUnlinkRequest => {
+                "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_UNLINK_REQUEST_FAILED"
+            }
+            Self::DocumentAttachmentUnlinkCancel => {
+                "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_UNLINK_CANCEL_FAILED"
+            }
             Self::GraphOpen => "PHASE012_PACKAGED_UI_GRAPH_OPEN_FAILED",
-            Self::GraphScope => "PHASE012_PACKAGED_UI_GRAPH_SCOPE_FAILED",
+            Self::GraphScopeGlobal => "PHASE012_PACKAGED_UI_GRAPH_SCOPE_GLOBAL_FAILED",
+            Self::GraphScopeLocal => "PHASE012_PACKAGED_UI_GRAPH_SCOPE_LOCAL_FAILED",
             Self::GraphDepth => "PHASE012_PACKAGED_UI_GRAPH_DEPTH_FAILED",
             Self::GraphDirection => "PHASE012_PACKAGED_UI_GRAPH_DIRECTION_FAILED",
             Self::GraphUnresolved => "PHASE012_PACKAGED_UI_GRAPH_UNRESOLVED_FAILED",
@@ -401,6 +518,11 @@ impl PackagedUiSmokeFailureStage {
             Self::AssetDetachedDetail => "PHASE012_PACKAGED_UI_ASSET_DETACHED_DETAIL_FAILED",
             Self::AssetRelink => "PHASE012_PACKAGED_UI_ASSET_RELINK_FAILED",
             Self::AssetFilters => "PHASE012_PACKAGED_UI_ASSET_FILTERS_FAILED",
+            Self::AssetFilterAll => "PHASE012_PACKAGED_UI_ASSET_FILTER_ALL_FAILED",
+            Self::AssetFilterImage => "PHASE012_PACKAGED_UI_ASSET_FILTER_IMAGE_FAILED",
+            Self::AssetFilterPdf => "PHASE012_PACKAGED_UI_ASSET_FILTER_PDF_FAILED",
+            Self::AssetFilterDocument => "PHASE012_PACKAGED_UI_ASSET_FILTER_DOCUMENT_FAILED",
+            Self::AssetFilterOther => "PHASE012_PACKAGED_UI_ASSET_FILTER_OTHER_FAILED",
             Self::CanvasAsset => "PHASE012_PACKAGED_UI_CANVAS_ASSET_FAILED",
             Self::CanvasAssetRoute => "PHASE012_PACKAGED_UI_CANVAS_ASSET_ROUTE_FAILED",
             Self::AssetDocumentRoute => "PHASE012_PACKAGED_UI_ASSET_DOCUMENT_ROUTE_FAILED",
@@ -421,6 +543,9 @@ pub enum PackagedUiSmokeErrorCode {
     PerformanceBudgetExceeded,
     UiErrorReported,
     ActionCoverageIncomplete,
+    DocumentVersionWorkflowMissing,
+    DocumentAttachmentWorkflowMissing,
+    KeyboardDocumentWorkflowMissing,
 }
 
 impl PackagedUiSmokeErrorCode {
@@ -431,6 +556,15 @@ impl PackagedUiSmokeErrorCode {
             Self::PerformanceBudgetExceeded => "PHASE012_PACKAGED_UI_PERFORMANCE_BUDGET_EXCEEDED",
             Self::UiErrorReported => "PHASE012_PACKAGED_UI_ERROR_REPORTED",
             Self::ActionCoverageIncomplete => "PHASE012_PACKAGED_UI_ACTION_COVERAGE_INCOMPLETE",
+            Self::DocumentVersionWorkflowMissing => {
+                "PHASE012_PACKAGED_UI_DOCUMENT_VERSION_WORKFLOW_MISSING"
+            }
+            Self::DocumentAttachmentWorkflowMissing => {
+                "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_WORKFLOW_MISSING"
+            }
+            Self::KeyboardDocumentWorkflowMissing => {
+                "PHASE012_PACKAGED_UI_KEYBOARD_DOCUMENT_WORKFLOW_MISSING"
+            }
         }
     }
 }
@@ -440,6 +574,15 @@ pub fn validate_packaged_ui_smoke_report(
 ) -> Result<(), PackagedUiSmokeErrorCode> {
     if !report.home_ready || !report.graph_ready || !report.canvas_ready || !report.assets_ready {
         return Err(PackagedUiSmokeErrorCode::SurfaceMissing);
+    }
+    if !report.document_version_workflow_verified {
+        return Err(PackagedUiSmokeErrorCode::DocumentVersionWorkflowMissing);
+    }
+    if !report.document_attachment_workflow_verified {
+        return Err(PackagedUiSmokeErrorCode::DocumentAttachmentWorkflowMissing);
+    }
+    if !report.keyboard_document_workflow_verified {
+        return Err(PackagedUiSmokeErrorCode::KeyboardDocumentWorkflowMissing);
     }
     if report.sample_count != 200 {
         return Err(PackagedUiSmokeErrorCode::SampleCountInvalid);
@@ -1816,21 +1959,35 @@ impl DesktopProjectionRuntime {
             .map_err(|_| "PROJECTION_INVALID_BODY_POLICY")?;
         let policy = ProjectionWorkerPolicy::new(batch_limit, max_attempts)
             .map_err(|_| "PROJECTION_INVALID_WORKER_POLICY")?;
+        let uses_authoritative_revision_store = app_data_root
+            .join(LOCAL_DOCUMENT_VERSION_ROOT)
+            .try_exists()
+            .map_err(|_| "PROJECTION_REVISION_STORE_UNAVAILABLE")?;
+        let version_root = if uses_authoritative_revision_store {
+            LOCAL_DOCUMENT_VERSION_ROOT
+        } else {
+            "authoring-versions"
+        };
+        let pointer_root = if uses_authoritative_revision_store {
+            LOCAL_DOCUMENT_POINTER_ROOT
+        } else {
+            "authoring-current-version"
+        };
+        let versions =
+            LocalVersionStore::with_body_policy(app_data_root.join(version_root), body_policy);
+        versions
+            .migrate_revision_numbers()
+            .map_err(|_| "PROJECTION_REVISION_MIGRATION_FAILED")?;
         Ok(Self {
             policy,
             state: Mutex::new(DesktopProjectionState {
                 work: DurableProjectionWorkRepository::new(app_data_root.clone()),
-                versions: LocalVersionStore::with_body_policy(
-                    app_data_root.join("authoring-versions"),
-                    body_policy,
-                ),
+                versions,
                 documents: LocalDocumentRepository::with_body_policy(
                     app_data_root.join("authoring-current"),
                     body_policy,
                 ),
-                pointer: LocalCurrentDocumentVersionPointer::new(
-                    app_data_root.join("authoring-current-version"),
-                ),
+                pointer: LocalCurrentDocumentVersionPointer::new(app_data_root.join(pointer_root)),
                 catalog: DurableDocumentLinkCatalog::new(app_data_root.clone()),
                 associations: DurableAssetAssociationCatalog::new(app_data_root.clone()),
                 search: DurableLocalSearchIndex::new(app_data_root.clone(), body_policy),
@@ -2064,6 +2221,1442 @@ const fn projection_worker_error_code(error: ProjectionWorkerError) -> &'static 
     }
 }
 
+pub struct DesktopDocumentMutationRuntime {
+    state: Mutex<DesktopDocumentMutationState>,
+}
+
+struct DesktopDocumentMutationState {
+    create: LocalCreateDocumentRevisionRuntime,
+    update: LocalUpdateDocumentRevisionRuntime,
+    events: DesktopDocumentChangeSink,
+}
+
+impl DesktopDocumentMutationRuntime {
+    pub fn new(app_data_root: PathBuf, max_body_bytes: usize) -> Result<Self, &'static str> {
+        let body_policy = DocumentBodyPolicy::new(max_body_bytes)
+            .map_err(|_| "DOCUMENT_REVISION_INVALID_BODY_POLICY")?;
+        Ok(Self {
+            state: Mutex::new(DesktopDocumentMutationState {
+                create: LocalCreateDocumentRevisionRuntime::new(app_data_root.clone(), body_policy),
+                update: LocalUpdateDocumentRevisionRuntime::new(app_data_root.clone(), body_policy),
+                events: DesktopDocumentChangeSink::with_authoritative_body_policy(
+                    app_data_root,
+                    body_policy,
+                ),
+            }),
+        })
+    }
+
+    pub fn execute(
+        &self,
+        request: DesktopDocumentMutationRequestDto,
+    ) -> DesktopDocumentAuthoringCommandResponse {
+        let Ok(mut state) = self.state.lock() else {
+            return DesktopDocumentAuthoringCommandResponse::runtime_unavailable();
+        };
+        match request {
+            DesktopDocumentMutationRequestDto::Create {
+                operation_id,
+                workspace_id,
+                document_id,
+                body,
+                author,
+                summary,
+            } => match state.create.execute(CreateDocumentRevisionInput::new(
+                &operation_id,
+                &workspace_id,
+                &document_id,
+                &body,
+                &author,
+                &summary,
+            )) {
+                Ok(output) => {
+                    if state
+                        .events
+                        .publish_authoritative_created(
+                            &workspace_id,
+                            &document_id,
+                            output.version_id().as_str(),
+                        )
+                        .is_err()
+                    {
+                        return DesktopDocumentAuthoringCommandResponse::revision_failure(
+                            "DOCUMENT_REVISION_RECOVERY_REQUIRED",
+                            true,
+                            true,
+                        );
+                    }
+                    DesktopDocumentAuthoringCommandResponse::success_data(
+                        DesktopDocumentAuthoringDataDto::without_content(
+                            "created",
+                            document_id,
+                            output.version_id().as_str().to_string(),
+                        ),
+                    )
+                }
+                Err(error) => map_create_revision_error(error),
+            },
+            DesktopDocumentMutationRequestDto::Update {
+                operation_id,
+                workspace_id,
+                document_id,
+                expected_current_version_id,
+                body,
+                author,
+                summary,
+            } => match state.update.execute(UpdateDocumentRevisionInput::new(
+                &operation_id,
+                &workspace_id,
+                &document_id,
+                &expected_current_version_id,
+                &body,
+                &author,
+                &summary,
+            )) {
+                Ok(output) => {
+                    if state
+                        .events
+                        .publish_authoritative_updated(
+                            &workspace_id,
+                            &document_id,
+                            output.version_id().as_str(),
+                        )
+                        .is_err()
+                    {
+                        return DesktopDocumentAuthoringCommandResponse::revision_failure(
+                            "DOCUMENT_REVISION_RECOVERY_REQUIRED",
+                            true,
+                            true,
+                        );
+                    }
+                    DesktopDocumentAuthoringCommandResponse::success_data(
+                        DesktopDocumentAuthoringDataDto::without_content(
+                            "updated",
+                            document_id,
+                            output.version_id().as_str().to_string(),
+                        ),
+                    )
+                }
+                Err(error) => map_update_revision_error(error),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum DesktopDocumentMutationRequestDto {
+    Create {
+        operation_id: String,
+        workspace_id: String,
+        document_id: String,
+        body: String,
+        author: String,
+        summary: String,
+    },
+    Update {
+        operation_id: String,
+        workspace_id: String,
+        document_id: String,
+        expected_current_version_id: String,
+        body: String,
+        author: String,
+        summary: String,
+    },
+}
+
+fn map_create_revision_error(
+    error: CreateDocumentRevisionError,
+) -> DesktopDocumentAuthoringCommandResponse {
+    match error {
+        CreateDocumentRevisionError::InvalidInput => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_REVISION_INVALID_INPUT",
+                false,
+                false,
+            )
+        }
+        CreateDocumentRevisionError::OperationConflict
+        | CreateDocumentRevisionError::CommitConflict => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_REVISION_CONFLICT",
+                false,
+                false,
+            )
+        }
+        CreateDocumentRevisionError::RecoveryRequired => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_REVISION_RECOVERY_REQUIRED",
+                true,
+                true,
+            )
+        }
+        CreateDocumentRevisionError::FingerprintUnavailable
+        | CreateDocumentRevisionError::MetadataUnavailable
+        | CreateDocumentRevisionError::JournalUnavailable
+        | CreateDocumentRevisionError::CommitUnavailable => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_REVISION_STORAGE_UNAVAILABLE",
+                true,
+                false,
+            )
+        }
+    }
+}
+
+fn map_update_revision_error(
+    error: UpdateDocumentRevisionError,
+) -> DesktopDocumentAuthoringCommandResponse {
+    match error {
+        UpdateDocumentRevisionError::InvalidInput => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_REVISION_INVALID_INPUT",
+                false,
+                false,
+            )
+        }
+        UpdateDocumentRevisionError::NotFound => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_REVISION_NOT_FOUND",
+                false,
+                false,
+            )
+        }
+        UpdateDocumentRevisionError::OperationConflict
+        | UpdateDocumentRevisionError::CommitConflict => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_REVISION_CONFLICT",
+                false,
+                false,
+            )
+        }
+        UpdateDocumentRevisionError::RecoveryRequired => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_REVISION_RECOVERY_REQUIRED",
+                true,
+                true,
+            )
+        }
+        UpdateDocumentRevisionError::StorageUnavailable
+        | UpdateDocumentRevisionError::FingerprintUnavailable
+        | UpdateDocumentRevisionError::MetadataUnavailable
+        | UpdateDocumentRevisionError::JournalUnavailable
+        | UpdateDocumentRevisionError::CommitUnavailable => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_REVISION_STORAGE_UNAVAILABLE",
+                true,
+                false,
+            )
+        }
+    }
+}
+
+pub struct DesktopDocumentQueryRuntime {
+    versions: LocalVersionStore,
+    pointer: LocalCurrentDocumentVersionPointer,
+}
+
+impl DesktopDocumentQueryRuntime {
+    pub fn new(app_data_root: PathBuf, max_body_bytes: usize) -> Result<Self, &'static str> {
+        let body_policy = DocumentBodyPolicy::new(max_body_bytes)
+            .map_err(|_| "DOCUMENT_QUERY_INVALID_BODY_POLICY")?;
+        Ok(Self {
+            versions: LocalVersionStore::with_body_policy(
+                app_data_root.join(LOCAL_DOCUMENT_VERSION_ROOT),
+                body_policy,
+            ),
+            pointer: LocalCurrentDocumentVersionPointer::new(
+                app_data_root.join(LOCAL_DOCUMENT_POINTER_ROOT),
+            ),
+        })
+    }
+
+    pub fn execute(&self, request: DesktopDocumentQueryRequestDto) -> DesktopDocumentQueryResponse {
+        match request {
+            DesktopDocumentQueryRequestDto::Current {
+                workspace_id,
+                document_id,
+            } => self.read_revision(
+                "current",
+                GetAuthoritativeDocumentRevisionInput::current(&workspace_id, &document_id),
+            ),
+            DesktopDocumentQueryRequestDto::Version {
+                workspace_id,
+                document_id,
+                version_token,
+            } => self.read_revision(
+                "version",
+                GetAuthoritativeDocumentRevisionInput::version(
+                    &workspace_id,
+                    &document_id,
+                    &version_token,
+                ),
+            ),
+            DesktopDocumentQueryRequestDto::History {
+                workspace_id,
+                document_id,
+                cursor,
+                limit,
+            } => match GetDocumentHistoryUsecase::new().execute(
+                GetDocumentHistoryInput::new(
+                    &workspace_id,
+                    &document_id,
+                    cursor.as_deref(),
+                    usize::from(limit),
+                ),
+                &self.versions,
+            ) {
+                Ok(output) => match DesktopDocumentQueryDataDto::history(output.page()) {
+                    Ok(data) => DesktopDocumentQueryResponse::success(data),
+                    Err(()) => DesktopDocumentQueryResponse::failure(
+                        "DOCUMENT_QUERY_CORRUPTED_DATA",
+                        false,
+                        true,
+                    ),
+                },
+                Err(error) => match error {
+                    cabinet_usecases::document::GetDocumentHistoryError::InvalidInput => {
+                        DesktopDocumentQueryResponse::failure(
+                            "DOCUMENT_QUERY_INVALID_INPUT",
+                            false,
+                            false,
+                        )
+                    }
+                    cabinet_usecases::document::GetDocumentHistoryError::StorageUnavailable => {
+                        DesktopDocumentQueryResponse::failure(
+                            "DOCUMENT_QUERY_STORAGE_UNAVAILABLE",
+                            true,
+                            false,
+                        )
+                    }
+                },
+            },
+        }
+    }
+
+    fn read_revision(
+        &self,
+        kind: &'static str,
+        input: GetAuthoritativeDocumentRevisionInput,
+    ) -> DesktopDocumentQueryResponse {
+        match GetAuthoritativeDocumentRevisionUsecase::new().execute(
+            input,
+            &self.pointer,
+            &self.versions,
+        ) {
+            Ok(output) => match DesktopDocumentQueryDataDto::revision(kind, output.record()) {
+                Ok(data) => DesktopDocumentQueryResponse::success(data),
+                Err(()) => DesktopDocumentQueryResponse::failure(
+                    "DOCUMENT_QUERY_CORRUPTED_DATA",
+                    false,
+                    true,
+                ),
+            },
+            Err(error) => map_authoritative_query_error(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum DesktopDocumentQueryRequestDto {
+    Current {
+        workspace_id: String,
+        document_id: String,
+    },
+    History {
+        workspace_id: String,
+        document_id: String,
+        cursor: Option<String>,
+        limit: u16,
+    },
+    Version {
+        workspace_id: String,
+        document_id: String,
+        version_token: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentQueryResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<DesktopDocumentQueryDataDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    pub retryable: bool,
+    pub repair_required: bool,
+}
+
+impl DesktopDocumentQueryResponse {
+    fn success(data: DesktopDocumentQueryDataDto) -> Self {
+        Self {
+            ok: true,
+            data: Some(data),
+            error_code: None,
+            retryable: false,
+            repair_required: false,
+        }
+    }
+
+    fn failure(error_code: &str, retryable: bool, repair_required: bool) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error_code: Some(error_code.to_string()),
+            retryable,
+            repair_required,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentQueryDataDto {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_version_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<DesktopDocumentQueryHistoryEntryDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+impl DesktopDocumentQueryDataDto {
+    fn revision(
+        kind: &'static str,
+        record: &cabinet_ports::version_store::VersionRecord,
+    ) -> Result<Self, ()> {
+        let revision_number = record.entry().revision_number().ok_or(())?.value();
+        let version_token = record.version_id().as_str().to_string();
+        let body = record.snapshot().body();
+        let title = DocumentTitle::from_markdown_body(body);
+        Ok(Self {
+            kind: kind.to_string(),
+            current_version_token: (kind == "current").then(|| version_token.clone()),
+            version_token: (kind == "version").then_some(version_token),
+            revision_number: Some(revision_number),
+            title: Some(title.as_str().to_string()),
+            body: Some(body.as_str().to_string()),
+            entries: Vec::new(),
+            next_cursor: None,
+            has_more: false,
+        })
+    }
+
+    fn history(page: &HistoryPage) -> Result<Self, ()> {
+        let entries = page
+            .entries()
+            .iter()
+            .map(|entry| {
+                Ok(DesktopDocumentQueryHistoryEntryDto {
+                    revision_number: entry.revision_number().ok_or(())?.value(),
+                    version_token: entry.version_id().as_str().to_string(),
+                    summary: entry.summary().as_str().to_string(),
+                    author: entry.author().as_str().to_string(),
+                    created_at_epoch_ms: entry.created_at_epoch_ms(),
+                })
+            })
+            .collect::<Result<Vec<_>, ()>>()?;
+        let next_cursor = page.next_cursor().map(|cursor| cursor.as_str().to_string());
+        Ok(Self {
+            kind: "history".to_string(),
+            current_version_token: None,
+            version_token: None,
+            revision_number: None,
+            title: None,
+            body: None,
+            entries,
+            has_more: next_cursor.is_some(),
+            next_cursor,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentQueryHistoryEntryDto {
+    pub revision_number: u64,
+    pub version_token: String,
+    pub summary: String,
+    pub author: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at_epoch_ms: Option<u64>,
+}
+
+fn map_authoritative_query_error(
+    error: GetAuthoritativeDocumentRevisionError,
+) -> DesktopDocumentQueryResponse {
+    match error {
+        GetAuthoritativeDocumentRevisionError::InvalidInput => {
+            DesktopDocumentQueryResponse::failure("DOCUMENT_QUERY_INVALID_INPUT", false, false)
+        }
+        GetAuthoritativeDocumentRevisionError::NotFound => {
+            DesktopDocumentQueryResponse::failure("DOCUMENT_QUERY_NOT_FOUND", false, false)
+        }
+        GetAuthoritativeDocumentRevisionError::StorageUnavailable => {
+            DesktopDocumentQueryResponse::failure("DOCUMENT_QUERY_STORAGE_UNAVAILABLE", true, false)
+        }
+        GetAuthoritativeDocumentRevisionError::CorruptedData => {
+            DesktopDocumentQueryResponse::failure("DOCUMENT_QUERY_CORRUPTED_DATA", false, true)
+        }
+    }
+}
+
+pub struct DesktopDocumentDiffRuntime {
+    versions: LocalVersionStore,
+    pointer: LocalCurrentDocumentVersionPointer,
+    usecase: CompareAuthoritativeDocumentRevisionsUsecase,
+    availability: LocalAssetAvailabilityResolver,
+    resolve_availability: ResolveAttachmentDiffAvailabilityUsecase,
+}
+
+impl DesktopDocumentDiffRuntime {
+    pub fn new(app_data_root: PathBuf, max_body_bytes: usize) -> Result<Self, &'static str> {
+        Self::with_policy(
+            app_data_root,
+            max_body_bytes,
+            AuthoritativeDiffPolicy::default(),
+        )
+    }
+
+    pub fn with_policy(
+        app_data_root: PathBuf,
+        max_body_bytes: usize,
+        policy: AuthoritativeDiffPolicy,
+    ) -> Result<Self, &'static str> {
+        let body_policy = DocumentBodyPolicy::new(max_body_bytes)
+            .map_err(|_| "DOCUMENT_DIFF_INVALID_BODY_POLICY")?;
+        Ok(Self {
+            versions: LocalVersionStore::with_body_policy(
+                app_data_root.join(LOCAL_DOCUMENT_VERSION_ROOT),
+                body_policy,
+            ),
+            pointer: LocalCurrentDocumentVersionPointer::new(
+                app_data_root.join(LOCAL_DOCUMENT_POINTER_ROOT),
+            ),
+            usecase: CompareAuthoritativeDocumentRevisionsUsecase::with_policy(policy),
+            availability: LocalAssetAvailabilityResolver::new(app_data_root),
+            resolve_availability: ResolveAttachmentDiffAvailabilityUsecase::new(),
+        })
+    }
+
+    pub fn execute(&self, request: DesktopDocumentDiffRequestDto) -> DesktopDocumentDiffResponse {
+        let (workspace_id, input) = match request {
+            DesktopDocumentDiffRequestDto::CurrentToVersion {
+                workspace_id,
+                document_id,
+                version_token,
+            } => {
+                let input = CompareAuthoritativeDocumentRevisionsInput::current_to_version(
+                    &workspace_id,
+                    &document_id,
+                    &version_token,
+                );
+                (workspace_id, input)
+            }
+            DesktopDocumentDiffRequestDto::Versions {
+                workspace_id,
+                document_id,
+                left_version_token,
+                right_version_token,
+            } => {
+                let input = CompareAuthoritativeDocumentRevisionsInput::versions(
+                    &workspace_id,
+                    &document_id,
+                    &left_version_token,
+                    &right_version_token,
+                );
+                (workspace_id, input)
+            }
+        };
+        match self.usecase.execute(input, &self.pointer, &self.versions) {
+            Ok(output) => {
+                let attachments = match self.resolve_availability.execute(
+                    ResolveAttachmentDiffAvailabilityInput::new(
+                        &workspace_id,
+                        output.attachment_diff().clone(),
+                    ),
+                    &self.availability,
+                ) {
+                    Ok(attachments) => attachments,
+                    Err(error) => return map_attachment_availability_error(error),
+                };
+                DesktopDocumentDiffResponse::success(DesktopDocumentDiffDataDto::from(
+                    output.left_version_id().as_str(),
+                    output.right_version_id().as_str(),
+                    output.computation(),
+                    &attachments,
+                ))
+            }
+            Err(error) => map_authoritative_diff_error(error),
+        }
+    }
+}
+
+const DEFAULT_BACKGROUND_DIFF_MAX_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_BACKGROUND_DIFF_MAX_LINES: usize = 500_000;
+const DEFAULT_BACKGROUND_DIFF_MAX_HUNKS: usize = 50_000;
+
+pub struct DesktopDocumentDiffOperationRuntime {
+    registry: ProcessLocalDocumentDiffOperationRegistry,
+    ids: Mutex<DesktopDocumentDiffOperationIdSource>,
+    pointer: LocalCurrentDocumentVersionPointer,
+    versions: LocalVersionStore,
+    worker: RunDocumentDiffOperationUsecase,
+    availability: LocalAssetAvailabilityResolver,
+    resolve_availability: ResolveAttachmentDiffAvailabilityUsecase,
+    product_events: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl DesktopDocumentDiffOperationRuntime {
+    pub fn new(
+        app_data_root: PathBuf,
+        max_body_bytes: usize,
+        capacity: usize,
+    ) -> Result<Self, &'static str> {
+        let policy = AuthoritativeDiffPolicy::new(
+            3,
+            DEFAULT_BACKGROUND_DIFF_MAX_BYTES,
+            DEFAULT_BACKGROUND_DIFF_MAX_LINES,
+            DEFAULT_BACKGROUND_DIFF_MAX_HUNKS,
+        )
+        .map_err(|_| "DOCUMENT_DIFF_OPERATION_INVALID_POLICY")?;
+        Self::with_policy(app_data_root, max_body_bytes, capacity, policy)
+    }
+
+    pub fn with_policy(
+        app_data_root: PathBuf,
+        max_body_bytes: usize,
+        capacity: usize,
+        policy: AuthoritativeDiffPolicy,
+    ) -> Result<Self, &'static str> {
+        let body_policy = DocumentBodyPolicy::new(max_body_bytes)
+            .map_err(|_| "DOCUMENT_DIFF_OPERATION_INVALID_BODY_POLICY")?;
+        let registry = ProcessLocalDocumentDiffOperationRegistry::new(capacity)
+            .map_err(|_| "DOCUMENT_DIFF_OPERATION_INVALID_CAPACITY")?;
+        let prefix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        Ok(Self {
+            registry,
+            ids: Mutex::new(DesktopDocumentDiffOperationIdSource { prefix, next: 0 }),
+            pointer: LocalCurrentDocumentVersionPointer::new(
+                app_data_root.join(LOCAL_DOCUMENT_POINTER_ROOT),
+            ),
+            versions: LocalVersionStore::with_body_policy(
+                app_data_root.join(LOCAL_DOCUMENT_VERSION_ROOT),
+                body_policy,
+            ),
+            worker: RunDocumentDiffOperationUsecase::with_diff_service(
+                cabinet_usecases::document_diff::DocumentLineDiffService::with_policy(policy),
+            ),
+            availability: LocalAssetAvailabilityResolver::new(app_data_root),
+            resolve_availability: ResolveAttachmentDiffAvailabilityUsecase::new(),
+            product_events: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    pub fn start(
+        &self,
+        request: DesktopDocumentDiffOperationRequestDto,
+    ) -> DesktopDocumentDiffOperationResponse {
+        let input = match request {
+            DesktopDocumentDiffOperationRequestDto::CurrentToVersion {
+                workspace_id,
+                document_id,
+                version_token,
+            } => StartDocumentDiffOperationInput::current_to_version(
+                &workspace_id,
+                &document_id,
+                &version_token,
+            ),
+            DesktopDocumentDiffOperationRequestDto::Versions {
+                workspace_id,
+                document_id,
+                left_version_token,
+                right_version_token,
+            } => StartDocumentDiffOperationInput::versions(
+                &workspace_id,
+                &document_id,
+                &left_version_token,
+                &right_version_token,
+            ),
+        };
+        let Ok(mut ids) = self.ids.lock() else {
+            return DesktopDocumentDiffOperationResponse::failure(
+                "DOCUMENT_DIFF_OPERATION_RUNTIME_UNAVAILABLE",
+                true,
+            );
+        };
+        let mut registry = self.registry.clone();
+        let output =
+            match StartDocumentDiffOperationUsecase::new().execute(input, &mut *ids, &mut registry)
+            {
+                Ok(output) => output,
+                Err(error) => return map_document_diff_operation_start_error(error),
+            };
+        drop(ids);
+        self.record_product_event(output.product_log_event());
+
+        let operation_token = output.operation_id().as_str().to_string();
+        let worker_token = operation_token.clone();
+        let worker = self.worker;
+        let pointer = self.pointer.clone();
+        let versions = self.versions.clone();
+        let product_events = Arc::clone(&self.product_events);
+        thread::spawn(move || {
+            if let Ok(output) = worker.execute(
+                RunDocumentDiffOperationInput::new(&worker_token),
+                &mut registry,
+                &pointer,
+                &versions,
+            ) {
+                if let Some(event) = output.product_log_event() {
+                    push_document_diff_product_event(&product_events, event);
+                }
+            }
+        });
+
+        DesktopDocumentDiffOperationResponse::success(DesktopDocumentDiffOperationDataDto {
+            operation_token,
+            state: document_diff_operation_state_name(output.state()).to_string(),
+            diff: None,
+            failure_code: None,
+        })
+    }
+
+    pub fn status(
+        &self,
+        request: DesktopDocumentDiffOperationTokenRequestDto,
+    ) -> DesktopDocumentDiffOperationResponse {
+        let registry = self.registry.clone();
+        let output = match GetDocumentDiffOperationStatusUsecase::new().execute(
+            GetDocumentDiffOperationStatusInput::new(&request.operation_token),
+            &registry,
+        ) {
+            Ok(output) => output,
+            Err(error) => return map_document_diff_operation_status_error(error),
+        };
+        let diff = match output.result() {
+            Some(result) => {
+                let Some(target) = output.target() else {
+                    return DesktopDocumentDiffOperationResponse::failure(
+                        "DOCUMENT_DIFF_OPERATION_RESULT_CORRUPTED",
+                        false,
+                    );
+                };
+                let attachments = match self.resolve_availability.execute(
+                    ResolveAttachmentDiffAvailabilityInput::new(
+                        target.workspace_id().as_str(),
+                        result.attachment_diff().clone(),
+                    ),
+                    &self.availability,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => return map_document_diff_operation_attachment_error(error),
+                };
+                Some(DesktopDocumentDiffDataDto::from(
+                    result.left_version_id().as_str(),
+                    result.right_version_id().as_str(),
+                    result.computation(),
+                    &attachments,
+                ))
+            }
+            None => None,
+        };
+        DesktopDocumentDiffOperationResponse::success(DesktopDocumentDiffOperationDataDto {
+            operation_token: output.operation_id().as_str().to_string(),
+            state: document_diff_operation_state_name(output.state()).to_string(),
+            diff,
+            failure_code: output.failure_code().map(str::to_string),
+        })
+    }
+
+    pub fn cancel(
+        &self,
+        request: DesktopDocumentDiffOperationTokenRequestDto,
+    ) -> DesktopDocumentDiffOperationResponse {
+        let mut registry = self.registry.clone();
+        match CancelDocumentDiffOperationUsecase::new().execute(
+            CancelDocumentDiffOperationInput::new(&request.operation_token),
+            &mut registry,
+        ) {
+            Ok(output) => {
+                if let Some(event) = output.product_log_event() {
+                    self.record_product_event(event);
+                }
+                DesktopDocumentDiffOperationResponse::success(DesktopDocumentDiffOperationDataDto {
+                    operation_token: output.operation_id().as_str().to_string(),
+                    state: document_diff_operation_state_name(output.state()).to_string(),
+                    diff: None,
+                    failure_code: None,
+                })
+            }
+            Err(error) => map_document_diff_operation_cancel_error(error),
+        }
+    }
+
+    fn record_product_event(&self, event: &'static str) {
+        push_document_diff_product_event(&self.product_events, event);
+    }
+}
+
+struct DesktopDocumentDiffOperationIdSource {
+    prefix: u128,
+    next: u64,
+}
+
+impl DocumentDiffOperationIdGenerator for DesktopDocumentDiffOperationIdSource {
+    fn next_id(&mut self) -> Result<String, ()> {
+        self.next = self.next.checked_add(1).ok_or(())?;
+        Ok(format!("diff-{:x}-{}", self.prefix, self.next))
+    }
+}
+
+fn push_document_diff_product_event(events: &Arc<Mutex<Vec<&'static str>>>, event: &'static str) {
+    if let Ok(mut events) = events.lock() {
+        events.push(event);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum DesktopDocumentDiffOperationRequestDto {
+    CurrentToVersion {
+        workspace_id: String,
+        document_id: String,
+        version_token: String,
+    },
+    Versions {
+        workspace_id: String,
+        document_id: String,
+        left_version_token: String,
+        right_version_token: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentDiffOperationTokenRequestDto {
+    pub operation_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentDiffOperationResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<DesktopDocumentDiffOperationDataDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    pub retryable: bool,
+    pub repair_required: bool,
+}
+
+impl DesktopDocumentDiffOperationResponse {
+    fn success(data: DesktopDocumentDiffOperationDataDto) -> Self {
+        Self {
+            ok: true,
+            data: Some(data),
+            error_code: None,
+            retryable: false,
+            repair_required: false,
+        }
+    }
+
+    fn failure(error_code: &str, retryable: bool) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error_code: Some(error_code.to_string()),
+            retryable,
+            repair_required: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentDiffOperationDataDto {
+    pub operation_token: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DesktopDocumentDiffDataDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+}
+
+const fn document_diff_operation_state_name(state: DocumentDiffOperationState) -> &'static str {
+    match state {
+        DocumentDiffOperationState::Accepted => "accepted",
+        DocumentDiffOperationState::Running => "running",
+        DocumentDiffOperationState::Completed => "completed",
+        DocumentDiffOperationState::Cancelled => "cancelled",
+        DocumentDiffOperationState::Expired => "expired",
+        DocumentDiffOperationState::Failed => "failed",
+    }
+}
+
+fn map_document_diff_operation_start_error(
+    error: StartDocumentDiffOperationError,
+) -> DesktopDocumentDiffOperationResponse {
+    let code = match error {
+        StartDocumentDiffOperationError::InvalidInput => "DOCUMENT_DIFF_OPERATION_INVALID_INPUT",
+        StartDocumentDiffOperationError::OperationIdUnavailable => {
+            "DOCUMENT_DIFF_OPERATION_ID_UNAVAILABLE"
+        }
+        StartDocumentDiffOperationError::AlreadyExists => "DOCUMENT_DIFF_OPERATION_ALREADY_EXISTS",
+        StartDocumentDiffOperationError::CapacityExceeded => {
+            "DOCUMENT_DIFF_OPERATION_CAPACITY_EXCEEDED"
+        }
+        StartDocumentDiffOperationError::RegistryUnavailable => {
+            "DOCUMENT_DIFF_OPERATION_RUNTIME_UNAVAILABLE"
+        }
+    };
+    DesktopDocumentDiffOperationResponse::failure(code, error.retryable())
+}
+
+fn map_document_diff_operation_status_error(
+    error: GetDocumentDiffOperationStatusError,
+) -> DesktopDocumentDiffOperationResponse {
+    let code = match error {
+        GetDocumentDiffOperationStatusError::InvalidInput => {
+            "DOCUMENT_DIFF_OPERATION_INVALID_INPUT"
+        }
+        GetDocumentDiffOperationStatusError::RegistryUnavailable => {
+            "DOCUMENT_DIFF_OPERATION_RUNTIME_UNAVAILABLE"
+        }
+    };
+    DesktopDocumentDiffOperationResponse::failure(code, error.retryable())
+}
+
+fn map_document_diff_operation_cancel_error(
+    error: CancelDocumentDiffOperationError,
+) -> DesktopDocumentDiffOperationResponse {
+    let code = match error {
+        CancelDocumentDiffOperationError::InvalidInput => "DOCUMENT_DIFF_OPERATION_INVALID_INPUT",
+        CancelDocumentDiffOperationError::InvalidTransition => {
+            "DOCUMENT_DIFF_OPERATION_INVALID_TRANSITION"
+        }
+        CancelDocumentDiffOperationError::CancellationTooLate => {
+            "DOCUMENT_DIFF_OPERATION_CANCELLATION_TOO_LATE"
+        }
+        CancelDocumentDiffOperationError::Conflict => "DOCUMENT_DIFF_OPERATION_CONFLICT",
+        CancelDocumentDiffOperationError::RegistryUnavailable => {
+            "DOCUMENT_DIFF_OPERATION_RUNTIME_UNAVAILABLE"
+        }
+    };
+    DesktopDocumentDiffOperationResponse::failure(code, error.retryable())
+}
+
+fn map_document_diff_operation_attachment_error(
+    error: ResolveAttachmentDiffAvailabilityError,
+) -> DesktopDocumentDiffOperationResponse {
+    match error {
+        ResolveAttachmentDiffAvailabilityError::InvalidInput => {
+            DesktopDocumentDiffOperationResponse::failure(
+                "DOCUMENT_DIFF_OPERATION_INVALID_INPUT",
+                false,
+            )
+        }
+        ResolveAttachmentDiffAvailabilityError::StorageUnavailable => {
+            DesktopDocumentDiffOperationResponse::failure(
+                "DOCUMENT_DIFF_OPERATION_STORAGE_UNAVAILABLE",
+                true,
+            )
+        }
+        ResolveAttachmentDiffAvailabilityError::CorruptedData => {
+            DesktopDocumentDiffOperationResponse::failure(
+                "DOCUMENT_DIFF_OPERATION_CORRUPTED_DATA",
+                false,
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum DesktopDocumentDiffRequestDto {
+    CurrentToVersion {
+        workspace_id: String,
+        document_id: String,
+        version_token: String,
+    },
+    Versions {
+        workspace_id: String,
+        document_id: String,
+        left_version_token: String,
+        right_version_token: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentDiffResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<DesktopDocumentDiffDataDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    pub retryable: bool,
+    pub repair_required: bool,
+}
+
+impl DesktopDocumentDiffResponse {
+    fn success(data: DesktopDocumentDiffDataDto) -> Self {
+        Self {
+            ok: true,
+            data: Some(data),
+            error_code: None,
+            retryable: false,
+            repair_required: false,
+        }
+    }
+
+    fn failure(error_code: &str, retryable: bool, repair_required: bool) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error_code: Some(error_code.to_string()),
+            retryable,
+            repair_required,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentDiffDataDto {
+    pub kind: String,
+    pub left_version_token: String,
+    pub right_version_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_reason: Option<String>,
+    pub added_count: usize,
+    pub removed_count: usize,
+    pub attachment_diff: DesktopDocumentAttachmentDiffDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_delta: Option<DesktopDocumentTitleDeltaDto>,
+    pub hunks: Vec<DesktopDocumentDiffHunkDto>,
+}
+
+impl DesktopDocumentDiffDataDto {
+    fn from(
+        left_version_token: &str,
+        right_version_token: &str,
+        computation: &AuthoritativeDiffComputation,
+        attachment_diff: &ResolvedAttachmentDiff,
+    ) -> Self {
+        match computation {
+            AuthoritativeDiffComputation::TooLarge(reason) => Self {
+                kind: "too_large".to_string(),
+                left_version_token: left_version_token.to_string(),
+                right_version_token: right_version_token.to_string(),
+                limit_reason: Some(diff_limit_reason(*reason).to_string()),
+                added_count: 0,
+                removed_count: 0,
+                attachment_diff: DesktopDocumentAttachmentDiffDto::from_resolved(attachment_diff),
+                title_delta: None,
+                hunks: Vec::new(),
+            },
+            AuthoritativeDiffComputation::Complete(result) => Self {
+                kind: "complete".to_string(),
+                left_version_token: left_version_token.to_string(),
+                right_version_token: right_version_token.to_string(),
+                limit_reason: None,
+                added_count: result.added_count(),
+                removed_count: result.removed_count(),
+                attachment_diff: DesktopDocumentAttachmentDiffDto::from_resolved(attachment_diff),
+                title_delta: Some(DesktopDocumentTitleDeltaDto::from(result.title_delta())),
+                hunks: result
+                    .hunks()
+                    .iter()
+                    .map(DesktopDocumentDiffHunkDto::from)
+                    .collect(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentAttachmentDiffDto {
+    pub kind: String,
+    pub added: Vec<DesktopDocumentAttachmentLabelDto>,
+    pub removed: Vec<DesktopDocumentAttachmentLabelDto>,
+    pub relabeled: Vec<DesktopDocumentAttachmentRelabelDto>,
+    pub unchanged_count: usize,
+}
+
+impl DesktopDocumentAttachmentDiffDto {
+    pub fn from_resolved(diff: &ResolvedAttachmentDiff) -> Self {
+        match diff {
+            ResolvedAttachmentDiff::Known(known) => Self {
+                kind: "known".to_string(),
+                added: known
+                    .added()
+                    .iter()
+                    .map(|reference| DesktopDocumentAttachmentLabelDto {
+                        label: reference.reference().label().to_string(),
+                        availability: attachment_availability(reference.availability()).to_string(),
+                    })
+                    .collect(),
+                removed: known
+                    .removed()
+                    .iter()
+                    .map(|reference| DesktopDocumentAttachmentLabelDto {
+                        label: reference.reference().label().to_string(),
+                        availability: attachment_availability(reference.availability()).to_string(),
+                    })
+                    .collect(),
+                relabeled: known
+                    .relabeled()
+                    .iter()
+                    .map(|change| DesktopDocumentAttachmentRelabelDto {
+                        before_label: change.before_label().to_string(),
+                        after_label: change.after_label().to_string(),
+                        availability: attachment_availability(change.availability()).to_string(),
+                    })
+                    .collect(),
+                unchanged_count: known.unchanged_count(),
+            },
+            ResolvedAttachmentDiff::LegacyUnknown => Self {
+                kind: "legacy_unknown".to_string(),
+                added: Vec::new(),
+                removed: Vec::new(),
+                relabeled: Vec::new(),
+                unchanged_count: 0,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentAttachmentLabelDto {
+    pub label: String,
+    pub availability: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentAttachmentRelabelDto {
+    pub before_label: String,
+    pub after_label: String,
+    pub availability: String,
+}
+
+const fn attachment_availability(
+    value: cabinet_ports::asset_availability::AssetAvailability,
+) -> &'static str {
+    match value {
+        cabinet_ports::asset_availability::AssetAvailability::Available => "available",
+        cabinet_ports::asset_availability::AssetAvailability::Missing => "missing",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentTitleDeltaDto {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+impl DesktopDocumentTitleDeltaDto {
+    fn from(delta: &AuthoritativeDocumentTitleDelta) -> Self {
+        match delta {
+            AuthoritativeDocumentTitleDelta::Unchanged => Self {
+                kind: "unchanged".to_string(),
+                before: None,
+                after: None,
+            },
+            AuthoritativeDocumentTitleDelta::Changed { before, after } => Self {
+                kind: "changed".to_string(),
+                before: Some(before.clone()),
+                after: Some(after.clone()),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentDiffHunkDto {
+    pub old_start_line: usize,
+    pub new_start_line: usize,
+    pub added_count: usize,
+    pub removed_count: usize,
+    pub lines: Vec<DesktopDocumentDiffLineDto>,
+}
+
+impl DesktopDocumentDiffHunkDto {
+    fn from(hunk: &cabinet_usecases::document_diff::DiffHunk) -> Self {
+        Self {
+            old_start_line: hunk.old_start_line(),
+            new_start_line: hunk.new_start_line(),
+            added_count: hunk.added_count(),
+            removed_count: hunk.removed_count(),
+            lines: hunk
+                .lines()
+                .iter()
+                .map(DesktopDocumentDiffLineDto::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentDiffLineDto {
+    pub kind: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_line_number: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_line_number: Option<usize>,
+}
+
+impl DesktopDocumentDiffLineDto {
+    fn from(line: &cabinet_usecases::document_diff::LineDiff) -> Self {
+        Self {
+            kind: match line.kind() {
+                AuthoritativeLineDiffKind::Equal => "unchanged",
+                AuthoritativeLineDiffKind::Added => "added",
+                AuthoritativeLineDiffKind::Removed => "removed",
+            }
+            .to_string(),
+            text: line.text().to_string(),
+            old_line_number: line.old_line_number(),
+            new_line_number: line.new_line_number(),
+        }
+    }
+}
+
+const fn diff_limit_reason(reason: AuthoritativeDiffLimitReason) -> &'static str {
+    match reason {
+        AuthoritativeDiffLimitReason::Bytes => "bytes",
+        AuthoritativeDiffLimitReason::Lines => "lines",
+        AuthoritativeDiffLimitReason::Hunks => "hunks",
+    }
+}
+
+fn map_authoritative_diff_error(
+    error: CompareAuthoritativeDocumentRevisionsError,
+) -> DesktopDocumentDiffResponse {
+    match error {
+        CompareAuthoritativeDocumentRevisionsError::InvalidInput => {
+            DesktopDocumentDiffResponse::failure("DOCUMENT_DIFF_INVALID_INPUT", false, false)
+        }
+        CompareAuthoritativeDocumentRevisionsError::NotFound => {
+            DesktopDocumentDiffResponse::failure("DOCUMENT_DIFF_NOT_FOUND", false, false)
+        }
+        CompareAuthoritativeDocumentRevisionsError::StorageUnavailable => {
+            DesktopDocumentDiffResponse::failure("DOCUMENT_DIFF_STORAGE_UNAVAILABLE", true, false)
+        }
+        CompareAuthoritativeDocumentRevisionsError::CorruptedData => {
+            DesktopDocumentDiffResponse::failure("DOCUMENT_DIFF_CORRUPTED_DATA", false, true)
+        }
+    }
+}
+
+fn map_attachment_availability_error(
+    error: ResolveAttachmentDiffAvailabilityError,
+) -> DesktopDocumentDiffResponse {
+    match error {
+        ResolveAttachmentDiffAvailabilityError::InvalidInput => {
+            DesktopDocumentDiffResponse::failure("DOCUMENT_DIFF_INVALID_INPUT", false, false)
+        }
+        ResolveAttachmentDiffAvailabilityError::StorageUnavailable => {
+            DesktopDocumentDiffResponse::failure("DOCUMENT_DIFF_STORAGE_UNAVAILABLE", true, false)
+        }
+        ResolveAttachmentDiffAvailabilityError::CorruptedData => {
+            DesktopDocumentDiffResponse::failure("DOCUMENT_DIFF_CORRUPTED_DATA", false, true)
+        }
+    }
+}
+
+fn map_authoritative_restore_preview_error(
+    error: PreviewAuthoritativeDocumentRestoreError,
+) -> DesktopDocumentAuthoringCommandResponse {
+    match error {
+        PreviewAuthoritativeDocumentRestoreError::InvalidInput => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_INVALID_INPUT",
+                false,
+            )
+        }
+        PreviewAuthoritativeDocumentRestoreError::NotFound => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_NOT_FOUND",
+                false,
+            )
+        }
+        PreviewAuthoritativeDocumentRestoreError::StorageUnavailable => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_STORAGE_UNAVAILABLE",
+                true,
+            )
+        }
+        PreviewAuthoritativeDocumentRestoreError::CorruptedData => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_RESTORE_CORRUPTED_DATA",
+                false,
+                true,
+            )
+        }
+    }
+}
+
+fn map_restore_preview_availability_error(
+    error: ResolveAttachmentDiffAvailabilityError,
+) -> DesktopDocumentAuthoringCommandResponse {
+    match error {
+        ResolveAttachmentDiffAvailabilityError::InvalidInput => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_INVALID_INPUT",
+                false,
+            )
+        }
+        ResolveAttachmentDiffAvailabilityError::StorageUnavailable => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_STORAGE_UNAVAILABLE",
+                true,
+            )
+        }
+        ResolveAttachmentDiffAvailabilityError::CorruptedData => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_RESTORE_CORRUPTED_DATA",
+                false,
+                true,
+            )
+        }
+    }
+}
+
+fn map_restore_target_preflight_error(
+    error: RestoreTargetAssetPreflightError,
+) -> DesktopDocumentAuthoringCommandResponse {
+    match error {
+        RestoreTargetAssetPreflightError::InvalidInput => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_INVALID_INPUT",
+                false,
+            )
+        }
+        RestoreTargetAssetPreflightError::StorageUnavailable => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_STORAGE_UNAVAILABLE",
+                true,
+            )
+        }
+        RestoreTargetAssetPreflightError::CorruptedData => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_RESTORE_CORRUPTED_DATA",
+                false,
+                true,
+            )
+        }
+    }
+}
+
+fn map_restore_target_snapshot_error(
+    error: VersionStoreError,
+) -> DesktopDocumentAuthoringCommandResponse {
+    match error {
+        VersionStoreError::CorruptedHistory | VersionStoreError::MismatchedVersionSnapshot => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_RESTORE_CORRUPTED_DATA",
+                false,
+                true,
+            )
+        }
+        _ => DesktopDocumentAuthoringCommandResponse::restore_failure(
+            "DOCUMENT_RESTORE_STORAGE_UNAVAILABLE",
+            true,
+        ),
+    }
+}
+
+fn map_restore_document_revision_error(
+    error: RestoreDocumentRevisionError,
+) -> DesktopDocumentAuthoringCommandResponse {
+    match error {
+        RestoreDocumentRevisionError::InvalidInput => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_INVALID_INPUT",
+                false,
+            )
+        }
+        RestoreDocumentRevisionError::NotFound => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_NOT_FOUND",
+                false,
+            )
+        }
+        RestoreDocumentRevisionError::MissingDependency => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_MISSING_DEPENDENCY",
+                false,
+            )
+        }
+        RestoreDocumentRevisionError::CommitConflict
+        | RestoreDocumentRevisionError::OperationConflict => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_VERSION_CONFLICT",
+                false,
+            )
+        }
+        RestoreDocumentRevisionError::StorageUnavailable
+        | RestoreDocumentRevisionError::FingerprintUnavailable
+        | RestoreDocumentRevisionError::MetadataUnavailable
+        | RestoreDocumentRevisionError::JournalUnavailable
+        | RestoreDocumentRevisionError::CommitUnavailable => {
+            DesktopDocumentAuthoringCommandResponse::restore_failure(
+                "DOCUMENT_RESTORE_STORAGE_UNAVAILABLE",
+                true,
+            )
+        }
+        RestoreDocumentRevisionError::RecoveryRequired => {
+            DesktopDocumentAuthoringCommandResponse::revision_failure(
+                "DOCUMENT_RESTORE_RECOVERY_REQUIRED",
+                true,
+                true,
+            )
+        }
+    }
+}
+
 pub struct DesktopDocumentAuthoringRuntime {
     executor: DocumentAuthoringCommandExecutor,
     state: Mutex<DesktopDocumentAuthoringState>,
@@ -2073,7 +3666,14 @@ struct DesktopDocumentAuthoringState {
     documents: LocalDocumentRepository,
     versions: LocalVersionStore,
     pointer: LocalCurrentDocumentVersionPointer,
+    authoritative_versions: LocalVersionStore,
+    authoritative_pointer: LocalCurrentDocumentVersionPointer,
+    availability: LocalAssetAvailabilityResolver,
+    resolve_availability: ResolveAttachmentDiffAvailabilityUsecase,
+    restore_preflight: RestoreTargetAssetPreflightUsecase,
+    restore: LocalRestoreDocumentRevisionRuntime,
     events: DesktopDocumentChangeSink,
+    authoritative_events: DesktopDocumentChangeSink,
     product_log: DesktopDocumentProductLogSink,
 }
 
@@ -2081,6 +3681,30 @@ impl DesktopDocumentAuthoringRuntime {
     pub fn new(app_data_root: PathBuf, max_body_bytes: usize) -> Result<Self, &'static str> {
         let body_policy = DocumentBodyPolicy::new(max_body_bytes)
             .map_err(|_| "DOCUMENT_AUTHORING_INVALID_BODY_POLICY")?;
+        let versions = LocalVersionStore::with_body_policy(
+            app_data_root.join("authoring-versions"),
+            body_policy,
+        );
+        versions
+            .migrate_revision_numbers()
+            .map_err(|_| "DOCUMENT_AUTHORING_REVISION_MIGRATION_FAILED")?;
+        let mut authoritative_events = DesktopDocumentChangeSink::with_authoritative_body_policy(
+            app_data_root.clone(),
+            body_policy,
+        );
+        let recovered =
+            LocalRestoreProjectionRecoveryRuntime::new(app_data_root.clone(), body_policy)
+                .recover(1000)
+                .map_err(|_| "DOCUMENT_RESTORE_STARTUP_RECOVERY_FAILED")?;
+        for candidate in recovered.recovered() {
+            authoritative_events
+                .publish_authoritative_updated(
+                    candidate.workspace_id().as_str(),
+                    candidate.document_id().as_str(),
+                    candidate.version_id().as_str(),
+                )
+                .map_err(|_| "DOCUMENT_RESTORE_STARTUP_RECOVERY_FAILED")?;
+        }
         Ok(Self {
             executor: DocumentAuthoringCommandExecutor::new(body_policy),
             state: Mutex::new(DesktopDocumentAuthoringState {
@@ -2088,17 +3712,29 @@ impl DesktopDocumentAuthoringRuntime {
                     app_data_root.join("authoring-current"),
                     body_policy,
                 ),
-                versions: LocalVersionStore::with_body_policy(
-                    app_data_root.join("authoring-versions"),
-                    body_policy,
-                ),
+                versions,
                 pointer: LocalCurrentDocumentVersionPointer::new(
                     app_data_root.join("authoring-current-version"),
+                ),
+                authoritative_versions: LocalVersionStore::with_body_policy(
+                    app_data_root.join(LOCAL_DOCUMENT_VERSION_ROOT),
+                    body_policy,
+                ),
+                authoritative_pointer: LocalCurrentDocumentVersionPointer::new(
+                    app_data_root.join(LOCAL_DOCUMENT_POINTER_ROOT),
+                ),
+                availability: LocalAssetAvailabilityResolver::new(app_data_root.clone()),
+                resolve_availability: ResolveAttachmentDiffAvailabilityUsecase::new(),
+                restore_preflight: RestoreTargetAssetPreflightUsecase::new(),
+                restore: LocalRestoreDocumentRevisionRuntime::new(
+                    app_data_root.clone(),
+                    body_policy,
                 ),
                 events: DesktopDocumentChangeSink::with_body_policy(
                     app_data_root.clone(),
                     body_policy,
                 ),
+                authoritative_events,
                 product_log: DesktopDocumentProductLogSink::default(),
             }),
         })
@@ -2115,7 +3751,14 @@ impl DesktopDocumentAuthoringRuntime {
             documents,
             versions,
             pointer,
+            authoritative_versions,
+            authoritative_pointer,
+            availability,
+            resolve_availability,
+            restore_preflight,
+            restore,
             events,
+            authoritative_events,
             product_log,
         } = &mut *state;
 
@@ -2220,9 +3863,17 @@ impl DesktopDocumentAuthoringRuntime {
                     versions,
                 );
                 match result {
-                    Ok(output) => DesktopDocumentAuthoringCommandResponse::success_data(
-                        DesktopDocumentAuthoringDataDto::history(&document_id, output.page()),
-                    ),
+                    Ok(output) => {
+                        match DesktopDocumentAuthoringDataDto::history(&document_id, output.page())
+                        {
+                            Ok(data) => DesktopDocumentAuthoringCommandResponse::success_data(data),
+                            Err(error_code) => {
+                                DesktopDocumentAuthoringCommandResponse::restore_failure(
+                                    error_code, false,
+                                )
+                            }
+                        }
+                    }
                     Err(_) => DesktopDocumentAuthoringCommandResponse::restore_failure(
                         "DOCUMENT_RESTORE_STORAGE_UNAVAILABLE",
                         true,
@@ -2256,129 +3907,161 @@ impl DesktopDocumentAuthoringRuntime {
                 workspace_id,
                 document_id,
                 target_version_id,
-                expected_current_version_id,
             } => {
-                let result = PreviewDocumentRestoreUsecase::new().execute(
-                    PreviewDocumentRestoreInput::new(
+                let result = PreviewAuthoritativeDocumentRestoreUsecase::new().execute(
+                    PreviewAuthoritativeDocumentRestoreInput::new(
                         &workspace_id,
                         &document_id,
                         &target_version_id,
                     ),
-                    documents,
-                    versions,
+                    authoritative_pointer,
+                    authoritative_versions,
                 );
                 match result {
-                    Ok(output) => DesktopDocumentAuthoringCommandResponse::success_data(
-                        DesktopDocumentAuthoringDataDto::restore_preview(
-                            &document_id,
+                    Ok(output) => {
+                        let workspace = match WorkspaceId::new(&workspace_id) {
+                            Ok(value) => value,
+                            Err(_) => {
+                                return DesktopDocumentAuthoringCommandResponse::restore_failure(
+                                    "DOCUMENT_RESTORE_INVALID_INPUT",
+                                    false,
+                                );
+                            }
+                        };
+                        let document = match DocumentId::new(&document_id) {
+                            Ok(value) => value,
+                            Err(_) => {
+                                return DesktopDocumentAuthoringCommandResponse::restore_failure(
+                                    "DOCUMENT_RESTORE_INVALID_INPUT",
+                                    false,
+                                );
+                            }
+                        };
+                        let target_version = match VersionId::new(&target_version_id) {
+                            Ok(value) => value,
+                            Err(_) => {
+                                return DesktopDocumentAuthoringCommandResponse::restore_failure(
+                                    "DOCUMENT_RESTORE_INVALID_INPUT",
+                                    false,
+                                );
+                            }
+                        };
+                        let target_snapshot = match authoritative_versions.get_version_snapshot(
+                            &workspace,
+                            &document,
+                            &target_version,
+                        ) {
+                            Ok(Some(snapshot)) => snapshot,
+                            Ok(None) => {
+                                return DesktopDocumentAuthoringCommandResponse::restore_failure(
+                                    "DOCUMENT_RESTORE_NOT_FOUND",
+                                    false,
+                                );
+                            }
+                            Err(error) => return map_restore_target_snapshot_error(error),
+                        };
+                        let preflight = match restore_preflight.execute(
+                            RestoreTargetAssetPreflightInput::new(
+                                &workspace_id,
+                                target_snapshot.attachment_state().clone(),
+                            ),
+                            availability,
+                        ) {
+                            Ok(value) => value,
+                            Err(error) => return map_restore_target_preflight_error(error),
+                        };
+                        let missing_asset_labels = match preflight {
+                            RestoreTargetAssetPreflightOutcome::BlockedMissingAssets(missing) => {
+                                missing
+                                    .into_iter()
+                                    .map(|reference| reference.label().to_string())
+                                    .collect::<Vec<_>>()
+                            }
+                            RestoreTargetAssetPreflightOutcome::Available
+                            | RestoreTargetAssetPreflightOutcome::LegacyPreserved => Vec::new(),
+                        };
+                        let attachments = match resolve_availability.execute(
+                            ResolveAttachmentDiffAvailabilityInput::new(
+                                &workspace_id,
+                                output.attachment_diff().clone(),
+                            ),
+                            availability,
+                        ) {
+                            Ok(attachments) => attachments,
+                            Err(error) => return map_restore_preview_availability_error(error),
+                        };
+                        let lines = match output.computation() {
+                            AuthoritativeDiffComputation::Complete(result) => result.lines(),
+                            AuthoritativeDiffComputation::TooLarge(_) => &[],
+                        };
+                        let diff = DesktopDocumentDiffDataDto::from(
+                            output.expected_current_version_id().as_str(),
                             output.target_version_id().as_str(),
-                            &expected_current_version_id,
-                            output.can_restore(),
-                            output.lines(),
-                        ),
-                    ),
-                    Err(_) => DesktopDocumentAuthoringCommandResponse::restore_failure(
-                        "DOCUMENT_RESTORE_NOT_FOUND",
-                        false,
-                    ),
+                            output.computation(),
+                            &attachments,
+                        );
+                        DesktopDocumentAuthoringCommandResponse::success_data(
+                            DesktopDocumentAuthoringDataDto::restore_preview(
+                                &document_id,
+                                output.target_version_id().as_str(),
+                                output.expected_current_version_id().as_str(),
+                                output.can_restore() && missing_asset_labels.is_empty(),
+                                missing_asset_labels,
+                                lines,
+                                diff,
+                            ),
+                        )
+                    }
+                    Err(error) => map_authoritative_restore_preview_error(error),
                 }
             }
             DesktopDocumentAuthoringRequestDto::Restore {
+                operation_id,
                 workspace_id,
                 document_id,
                 target_version_id,
                 expected_current_version_id,
-                restored_version_id,
-                restored_snapshot_ref,
                 author,
                 summary,
-            } => {
-                let workspace = match WorkspaceId::new(&workspace_id) {
-                    Ok(workspace) => workspace,
-                    Err(_) => {
-                        return DesktopDocumentAuthoringCommandResponse::restore_failure(
-                            "DOCUMENT_RESTORE_NOT_FOUND",
-                            false,
-                        );
-                    }
-                };
-                let document = match DocumentId::new(&document_id) {
-                    Ok(document) => document,
-                    Err(_) => {
-                        return DesktopDocumentAuthoringCommandResponse::restore_failure(
-                            "DOCUMENT_RESTORE_NOT_FOUND",
-                            false,
-                        );
-                    }
-                };
-                let expected = match VersionId::new(&expected_current_version_id) {
-                    Ok(expected) => expected,
-                    Err(_) => {
-                        return DesktopDocumentAuthoringCommandResponse::restore_failure(
-                            "DOCUMENT_RESTORE_VERSION_CONFLICT",
-                            false,
-                        );
-                    }
-                };
-                let current = match pointer.load_current_version(&workspace, &document) {
-                    Ok(current) => current,
-                    Err(_) => {
-                        return DesktopDocumentAuthoringCommandResponse::restore_failure(
-                            "DOCUMENT_RESTORE_STORAGE_UNAVAILABLE",
+            } => match restore.execute_with_logger(
+                RestoreDocumentRevisionInput::new(
+                    &operation_id,
+                    &workspace_id,
+                    &document_id,
+                    &target_version_id,
+                    &expected_current_version_id,
+                    &author,
+                    &summary,
+                ),
+                product_log,
+            ) {
+                Ok(output) => {
+                    if authoritative_events
+                        .publish_authoritative_updated(
+                            &workspace_id,
+                            &document_id,
+                            output.version_id().as_str(),
+                        )
+                        .is_err()
+                    {
+                        product_log.write_restore_product(RestoreProductEvent::RecoveryRequired);
+                        return DesktopDocumentAuthoringCommandResponse::revision_failure(
+                            "DOCUMENT_RESTORE_RECOVERY_REQUIRED",
+                            true,
                             true,
                         );
                     }
-                };
-                if current.as_ref() != Some(&expected) {
-                    return DesktopDocumentAuthoringCommandResponse::restore_failure(
-                        "DOCUMENT_RESTORE_VERSION_CONFLICT",
-                        false,
-                    );
+                    product_log.write_restore_product(RestoreProductEvent::Completed);
+                    DesktopDocumentAuthoringCommandResponse::success_data(
+                        DesktopDocumentAuthoringDataDto::restored(
+                            &document_id,
+                            output.version_id().as_str(),
+                            output.revision_number().value(),
+                        ),
+                    )
                 }
-                let result = RestoreDocumentVersionUsecase::new().execute(
-                    RestoreDocumentVersionInput::new(
-                        &workspace_id,
-                        &document_id,
-                        &target_version_id,
-                        &restored_version_id,
-                        &restored_snapshot_ref,
-                        &author,
-                        &summary,
-                    ),
-                    documents,
-                    versions,
-                    events,
-                    product_log,
-                );
-                match result {
-                    Ok(output)
-                        if output.final_state() == RestoreDocumentVersionState::Completed =>
-                    {
-                        let restored = output.restored_version_id().clone();
-                        match pointer.compare_and_set_current_version(
-                            &workspace,
-                            &document,
-                            Some(&expected),
-                            restored.clone(),
-                        ) {
-                            Ok(()) => DesktopDocumentAuthoringCommandResponse::success_data(
-                                DesktopDocumentAuthoringDataDto::restored(
-                                    &document_id,
-                                    restored.as_str(),
-                                ),
-                            ),
-                            Err(_) => DesktopDocumentAuthoringCommandResponse::restore_failure(
-                                "DOCUMENT_RESTORE_STORAGE_UNAVAILABLE",
-                                true,
-                            ),
-                        }
-                    }
-                    _ => DesktopDocumentAuthoringCommandResponse::restore_failure(
-                        "DOCUMENT_RESTORE_NOT_FOUND",
-                        false,
-                    ),
-                }
-            }
+                Err(error) => map_restore_document_revision_error(error),
+            },
         }
     }
 
@@ -2387,6 +4070,13 @@ impl DesktopDocumentAuthoringRuntime {
             .lock()
             .map(|state| state.product_log.event_count)
             .unwrap_or(0)
+    }
+
+    pub fn restore_product_event_names(&self) -> Vec<&'static str> {
+        self.state
+            .lock()
+            .map(|state| state.product_log.restore_event_names.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -2442,15 +4132,13 @@ pub enum DesktopDocumentAuthoringRequestDto {
         workspace_id: String,
         document_id: String,
         target_version_id: String,
-        expected_current_version_id: String,
     },
     Restore {
+        operation_id: String,
         workspace_id: String,
         document_id: String,
         target_version_id: String,
         expected_current_version_id: String,
-        restored_version_id: String,
-        restored_snapshot_ref: String,
         author: String,
         summary: String,
     },
@@ -2601,6 +4289,16 @@ impl DesktopDocumentAuthoringCommandResponse {
             repair_required: false,
         }
     }
+
+    fn revision_failure(error_code: &str, retryable: bool, repair_required: bool) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error_code: Some(error_code.to_string()),
+            retryable,
+            repair_required,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
@@ -2625,10 +4323,14 @@ pub struct DesktopDocumentAuthoringDataDto {
     pub expected_current_version_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub can_restore: Option<bool>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_diff: Option<DesktopDocumentDiffDataDto>,
+    pub missing_asset_labels: Vec<String>,
     pub lines: Vec<DesktopRestoreDiffLineDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restored_version_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_number: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_state: Option<String>,
 }
@@ -2662,8 +4364,11 @@ impl From<DocumentAuthoringCommandResult> for DesktopDocumentAuthoringDataDto {
                 target_version_id: None,
                 expected_current_version_id: None,
                 can_restore: None,
+                restore_diff: None,
+                missing_asset_labels: Vec::new(),
                 lines: Vec::new(),
                 restored_version_id: None,
+                revision_number: None,
                 final_state: None,
             },
         }
@@ -2684,8 +4389,11 @@ impl DesktopDocumentAuthoringDataDto {
             target_version_id: None,
             expected_current_version_id: None,
             can_restore: None,
+            restore_diff: None,
+            missing_asset_labels: Vec::new(),
             lines: Vec::new(),
             restored_version_id: None,
+            revision_number: None,
             final_state: None,
         }
     }
@@ -2703,24 +4411,25 @@ impl DesktopDocumentAuthoringDataDto {
             target_version_id: None,
             expected_current_version_id: None,
             can_restore: None,
+            restore_diff: None,
+            missing_asset_labels: Vec::new(),
             lines: Vec::new(),
             restored_version_id: None,
+            revision_number: None,
             final_state: None,
         }
     }
 
-    fn history(document_id: &str, page: &HistoryPage) -> Self {
-        Self {
-            kind: "history".to_string(),
-            document_id: document_id.to_string(),
-            current_version_id: String::new(),
-            title: None,
-            path: None,
-            body: None,
-            entries: page
-                .entries()
-                .iter()
-                .map(|entry| DesktopDocumentHistoryEntryDto {
+    fn history(document_id: &str, page: &HistoryPage) -> Result<Self, &'static str> {
+        let entries = page
+            .entries()
+            .iter()
+            .map(|entry| {
+                let revision_number = entry
+                    .revision_number()
+                    .ok_or("DOCUMENT_HISTORY_REVISION_UNAVAILABLE")?;
+                Ok(DesktopDocumentHistoryEntryDto {
+                    revision_number: revision_number.value(),
                     version_id: entry.version_id().as_str().to_string(),
                     summary: entry.summary().as_str().to_string(),
                     author: entry.author().as_str().to_string(),
@@ -2729,15 +4438,27 @@ impl DesktopDocumentAuthoringDataDto {
                         .map(|value| value.to_string())
                         .unwrap_or_default(),
                 })
-                .collect(),
+            })
+            .collect::<Result<Vec<_>, &'static str>>()?;
+        Ok(Self {
+            kind: "history".to_string(),
+            document_id: document_id.to_string(),
+            current_version_id: String::new(),
+            title: None,
+            path: None,
+            body: None,
+            entries,
             version_id: None,
             target_version_id: None,
             expected_current_version_id: None,
             can_restore: None,
+            restore_diff: None,
+            missing_asset_labels: Vec::new(),
             lines: Vec::new(),
             restored_version_id: None,
+            revision_number: None,
             final_state: None,
-        }
+        })
     }
 
     fn version(document_id: &str, version_id: &str, body: &str) -> Self {
@@ -2753,8 +4474,11 @@ impl DesktopDocumentAuthoringDataDto {
             target_version_id: None,
             expected_current_version_id: None,
             can_restore: None,
+            restore_diff: None,
+            missing_asset_labels: Vec::new(),
             lines: Vec::new(),
             restored_version_id: None,
+            revision_number: None,
             final_state: None,
         }
     }
@@ -2764,7 +4488,9 @@ impl DesktopDocumentAuthoringDataDto {
         target_version_id: &str,
         expected_current_version_id: &str,
         can_restore: bool,
+        missing_asset_labels: Vec<String>,
         lines: &[LineDiff],
+        restore_diff: DesktopDocumentDiffDataDto,
     ) -> Self {
         Self {
             kind: "restore_preview".to_string(),
@@ -2778,6 +4504,8 @@ impl DesktopDocumentAuthoringDataDto {
             target_version_id: Some(target_version_id.to_string()),
             expected_current_version_id: Some(expected_current_version_id.to_string()),
             can_restore: Some(can_restore),
+            restore_diff: Some(restore_diff),
+            missing_asset_labels,
             lines: lines
                 .iter()
                 .map(|line| DesktopRestoreDiffLineDto {
@@ -2790,11 +4518,12 @@ impl DesktopDocumentAuthoringDataDto {
                 })
                 .collect(),
             restored_version_id: None,
+            revision_number: None,
             final_state: None,
         }
     }
 
-    fn restored(document_id: &str, restored_version_id: &str) -> Self {
+    fn restored(document_id: &str, restored_version_id: &str, revision_number: u64) -> Self {
         Self {
             kind: "restored".to_string(),
             document_id: document_id.to_string(),
@@ -2807,8 +4536,11 @@ impl DesktopDocumentAuthoringDataDto {
             target_version_id: None,
             expected_current_version_id: None,
             can_restore: None,
+            restore_diff: None,
+            missing_asset_labels: Vec::new(),
             lines: Vec::new(),
             restored_version_id: Some(restored_version_id.to_string()),
+            revision_number: Some(revision_number),
             final_state: Some("Completed".to_string()),
         }
     }
@@ -2817,6 +4549,7 @@ impl DesktopDocumentAuthoringDataDto {
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopDocumentHistoryEntryDto {
+    pub revision_number: u64,
     pub version_id: String,
     pub summary: String,
     pub author: String,
@@ -2851,20 +4584,90 @@ impl DesktopDocumentChangeSink {
     }
 
     fn with_body_policy(app_data_root: PathBuf, body_policy: DocumentBodyPolicy) -> Self {
+        Self::with_pointer_root(app_data_root, body_policy, "authoring-current-version")
+    }
+
+    fn with_authoritative_body_policy(
+        app_data_root: PathBuf,
+        body_policy: DocumentBodyPolicy,
+    ) -> Self {
+        Self::with_pointer_root(app_data_root, body_policy, LOCAL_DOCUMENT_POINTER_ROOT)
+    }
+
+    fn with_pointer_root(
+        app_data_root: PathBuf,
+        body_policy: DocumentBodyPolicy,
+        pointer_root: &str,
+    ) -> Self {
         Self {
             event_count: 0,
             repository: DurableProjectionWorkRepository::new(app_data_root.clone()),
             catalog: DurableDocumentLinkCatalog::new(app_data_root.clone()),
             links: DurableLocalLinkIndex::new(app_data_root.clone()),
-            pointer: LocalCurrentDocumentVersionPointer::new(
-                app_data_root.join("authoring-current-version"),
-            ),
+            pointer: LocalCurrentDocumentVersionPointer::new(app_data_root.join(pointer_root)),
             documents: LocalDocumentRepository::with_body_policy(
                 app_data_root.join("authoring-current"),
                 body_policy,
             ),
             home: LocalWorkspaceHomeProjectionStore::new(app_data_root),
             last_error_code: None,
+        }
+    }
+
+    fn publish_authoritative_created(
+        &mut self,
+        workspace_id: &str,
+        document_id: &str,
+        version_id: &str,
+    ) -> Result<(), &'static str> {
+        let workspace =
+            WorkspaceId::new(workspace_id).map_err(|_| "DOCUMENT_REVISION_INVALID_INPUT")?;
+        let document =
+            DocumentId::new(document_id).map_err(|_| "DOCUMENT_REVISION_INVALID_INPUT")?;
+        let current = self
+            .documents
+            .get_current_by_id(&workspace, &document)
+            .map_err(|_| "DOCUMENT_REVISION_RECOVERY_REQUIRED")?
+            .ok_or("DOCUMENT_REVISION_RECOVERY_REQUIRED")?;
+        let event = DocumentChangeEvent::DocumentCreated {
+            workspace_id: workspace_id.to_string(),
+            document_id: document_id.to_string(),
+            version_id: version_id.to_string(),
+            title: current.metadata().title().as_str().to_string(),
+            path: current.path().as_str().to_string(),
+        };
+        self.publish_checked(event)
+    }
+
+    fn publish_authoritative_updated(
+        &mut self,
+        workspace_id: &str,
+        document_id: &str,
+        version_id: &str,
+    ) -> Result<(), &'static str> {
+        let workspace =
+            WorkspaceId::new(workspace_id).map_err(|_| "DOCUMENT_REVISION_INVALID_INPUT")?;
+        let document =
+            DocumentId::new(document_id).map_err(|_| "DOCUMENT_REVISION_INVALID_INPUT")?;
+        let current = self
+            .documents
+            .get_current_by_id(&workspace, &document)
+            .map_err(|_| "DOCUMENT_REVISION_RECOVERY_REQUIRED")?
+            .ok_or("DOCUMENT_REVISION_RECOVERY_REQUIRED")?;
+        self.publish_checked(DocumentChangeEvent::DocumentUpdated {
+            workspace_id: workspace_id.to_string(),
+            document_id: document_id.to_string(),
+            version_id: version_id.to_string(),
+            title: current.metadata().title().as_str().to_string(),
+            path: current.path().as_str().to_string(),
+        })
+    }
+
+    fn publish_checked(&mut self, event: DocumentChangeEvent) -> Result<(), &'static str> {
+        self.publish(event);
+        match self.last_error_code {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
@@ -2900,6 +4703,7 @@ impl DocumentChangeEventPublisher for DesktopDocumentChangeSink {
 struct DesktopDocumentProductLogSink {
     event_count: usize,
     last_error_code: Option<&'static str>,
+    restore_event_names: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -2907,6 +4711,7 @@ pub struct DesktopAssetImportSelectionRuntime {
     app_data_root: PathBuf,
     local_workspace_id: String,
     chunk_bytes: usize,
+    document_body_policy: DocumentBodyPolicy,
     source: Arc<Mutex<LocalAssetImportSource>>,
     next_handle: Arc<Mutex<u64>>,
     next_operation: Arc<Mutex<u64>>,
@@ -2922,6 +4727,21 @@ impl DesktopAssetImportSelectionRuntime {
         app_data_root: PathBuf,
         local_workspace_id: &str,
         max_chunk_bytes: usize,
+    ) -> Result<Self, &'static str> {
+        Self::with_app_data_root_and_body_policy(
+            app_data_root,
+            local_workspace_id,
+            max_chunk_bytes,
+            DocumentBodyPolicy::new(10 * 1024 * 1024)
+                .map_err(|_| "asset_import.invalid_body_policy")?,
+        )
+    }
+
+    pub fn with_app_data_root_and_body_policy(
+        app_data_root: PathBuf,
+        local_workspace_id: &str,
+        max_chunk_bytes: usize,
+        document_body_policy: DocumentBodyPolicy,
     ) -> Result<Self, &'static str> {
         let config =
             LocalAssetImportSourceConfig::new(max_chunk_bytes).map_err(|error| error.code())?;
@@ -2948,6 +4768,7 @@ impl DesktopAssetImportSelectionRuntime {
             app_data_root,
             local_workspace_id: local_workspace_id.to_string(),
             chunk_bytes: max_chunk_bytes,
+            document_body_policy,
             source: Arc::new(Mutex::new(LocalAssetImportSource::new(config))),
             next_handle: Arc::new(Mutex::new(0)),
             next_operation: Arc::new(Mutex::new(0)),
@@ -3009,6 +4830,32 @@ impl DesktopAssetImportSelectionRuntime {
             Some(operation_id) => self.run_started(request, operation_id),
             None => started,
         }
+    }
+
+    pub fn import_revision_guarded(
+        &self,
+        request: DesktopRevisionGuardedAssetImportRequestDto,
+    ) -> DesktopAssetImportResponse {
+        let started = self.start_revision_guarded(&request);
+        match started.operation_id.as_deref() {
+            Some(operation_id) => self.run_started_revision_guarded(request, operation_id),
+            None => started,
+        }
+    }
+
+    pub fn start_revision_guarded(
+        &self,
+        request: &DesktopRevisionGuardedAssetImportRequestDto,
+    ) -> DesktopAssetImportResponse {
+        if DocumentOperationId::new(&request.attachment_operation_id).is_err()
+            || VersionId::new(&request.expected_current_version_token).is_err()
+        {
+            return DesktopAssetImportResponse::failure(
+                "asset_import.invalid_revision_guard",
+                false,
+            );
+        }
+        self.start(request.import.clone())
     }
 
     pub fn start(&self, request: DesktopAssetImportRequestDto) -> DesktopAssetImportResponse {
@@ -3075,6 +4922,34 @@ impl DesktopAssetImportSelectionRuntime {
         request: DesktopAssetImportRequestDto,
         operation_id: &str,
     ) -> DesktopAssetImportResponse {
+        let mut associations = DurableAssetAssociationCatalog::new(self.app_data_root.clone());
+        self.run_started_with_linker(request, operation_id, &mut associations)
+    }
+
+    pub fn run_started_revision_guarded(
+        &self,
+        request: DesktopRevisionGuardedAssetImportRequestDto,
+        operation_id: &str,
+    ) -> DesktopAssetImportResponse {
+        let mut linker = LocalImportedAssetDocumentRevisionLinker::new(
+            LocalMutateDocumentAttachmentsRuntime::new(
+                self.app_data_root.clone(),
+                self.document_body_policy,
+            ),
+            &request.attachment_operation_id,
+            &request.expected_current_version_token,
+            "local-user",
+            "첨부 파일 가져오기",
+        );
+        self.run_started_with_linker(request.import, operation_id, &mut linker)
+    }
+
+    fn run_started_with_linker<A: ImportedAssetDocumentLinkPort>(
+        &self,
+        request: DesktopAssetImportRequestDto,
+        operation_id: &str,
+        linker: &mut A,
+    ) -> DesktopAssetImportResponse {
         let input = match ImportAssetInput::new(
             &request.workspace_id,
             &request.document_id,
@@ -3105,7 +4980,6 @@ impl DesktopAssetImportSelectionRuntime {
             Err(error) => return DesktopAssetImportResponse::failure(error.code(), false),
         };
         let mut metadata = DurableAssetMetadataCatalog::new(self.app_data_root.clone());
-        let mut associations = DurableAssetAssociationCatalog::new(self.app_data_root.clone());
         let mut operations = DurableAssetImportOperationRepository::new(self.app_data_root.clone());
         let mut logger = DesktopAssetImportProductLogSink::default();
         match ImportAssetUsecase::new().execute(
@@ -3115,7 +4989,7 @@ impl DesktopAssetImportSelectionRuntime {
             &mut staging,
             &mut publisher,
             &mut metadata,
-            &mut associations,
+            linker,
             &mut operations,
             &mut logger,
         ) {
@@ -3229,6 +5103,15 @@ pub struct DesktopAssetImportRequestDto {
     pub document_id: String,
     pub handle: String,
     pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopRevisionGuardedAssetImportRequestDto {
+    #[serde(flatten)]
+    pub import: DesktopAssetImportRequestDto,
+    pub attachment_operation_id: String,
+    pub expected_current_version_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -3436,6 +5319,13 @@ impl DocumentProductLogger for DesktopDocumentProductLogSink {
     }
 }
 
+impl RestoreProductLogger for DesktopDocumentProductLogSink {
+    fn write_restore_product(&mut self, event: RestoreProductEvent) {
+        self.event_count += 1;
+        self.restore_event_names.push(event.name());
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DesktopDocumentNavigatorRuntime {
     projection_store: LocalDocumentNavigatorProjectionStore,
@@ -3593,13 +5483,254 @@ const fn navigator_view_name(view: DocumentNavigatorCommandView) -> &'static str
     }
 }
 
-#[derive(Debug, Clone)]
+pub struct DesktopDocumentAttachmentMutationRuntime {
+    runtime: Mutex<LocalMutateDocumentAttachmentsRuntime>,
+    metadata: DurableAssetMetadataCatalog,
+}
+
+impl DesktopDocumentAttachmentMutationRuntime {
+    pub fn new(app_data_root: PathBuf, max_body_bytes: usize) -> Result<Self, &'static str> {
+        let body_policy = DocumentBodyPolicy::new(max_body_bytes)
+            .map_err(|_| "DOCUMENT_ATTACHMENT_INVALID_BODY_POLICY")?;
+        Ok(Self {
+            runtime: Mutex::new(LocalMutateDocumentAttachmentsRuntime::new(
+                app_data_root.clone(),
+                body_policy,
+            )),
+            metadata: DurableAssetMetadataCatalog::new(app_data_root),
+        })
+    }
+
+    pub fn execute(
+        &self,
+        request: DesktopDocumentAttachmentMutationRequestDto,
+    ) -> DesktopDocumentAttachmentMutationResponse {
+        let input = match request {
+            DesktopDocumentAttachmentMutationRequestDto::Link {
+                operation_id,
+                workspace_id,
+                document_id,
+                expected_current_version_token,
+                asset_id,
+                label,
+            } => {
+                let workspace = match WorkspaceId::new(&workspace_id) {
+                    Ok(value) => value,
+                    Err(_) => return DesktopDocumentAttachmentMutationResponse::invalid_input(),
+                };
+                let asset = match cabinet_domain::asset::AssetId::from_sha256_hex(&asset_id) {
+                    Ok(value) => value,
+                    Err(_) => return DesktopDocumentAttachmentMutationResponse::invalid_input(),
+                };
+                match self.metadata.get(&workspace, &asset) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        return DesktopDocumentAttachmentMutationResponse::failure(
+                            "DOCUMENT_ATTACHMENT_ASSET_NOT_FOUND",
+                            false,
+                            false,
+                        );
+                    }
+                    Err(_) => {
+                        return DesktopDocumentAttachmentMutationResponse::failure(
+                            "DOCUMENT_ATTACHMENT_STORAGE_UNAVAILABLE",
+                            true,
+                            false,
+                        );
+                    }
+                }
+                MutateDocumentAttachmentsInput::link(
+                    &operation_id,
+                    &workspace_id,
+                    &document_id,
+                    &expected_current_version_token,
+                    &asset_id,
+                    &label,
+                    "local-user",
+                    "첨부 파일 연결",
+                )
+            }
+            DesktopDocumentAttachmentMutationRequestDto::Unlink {
+                operation_id,
+                workspace_id,
+                document_id,
+                expected_current_version_token,
+                asset_id,
+            } => MutateDocumentAttachmentsInput::unlink(
+                &operation_id,
+                &workspace_id,
+                &document_id,
+                &expected_current_version_token,
+                &asset_id,
+                "local-user",
+                "첨부 파일 해제",
+            ),
+        };
+        let mut runtime = match self.runtime.lock() {
+            Ok(value) => value,
+            Err(_) => {
+                return DesktopDocumentAttachmentMutationResponse::failure(
+                    "DOCUMENT_ATTACHMENT_RECOVERY_REQUIRED",
+                    true,
+                    true,
+                );
+            }
+        };
+        match runtime.execute(input) {
+            Ok(output) => DesktopDocumentAttachmentMutationResponse::success(
+                match output.kind() {
+                    MutateDocumentAttachmentsOutcomeKind::Fresh => "fresh",
+                    MutateDocumentAttachmentsOutcomeKind::Replayed => "replayed",
+                    MutateDocumentAttachmentsOutcomeKind::NoChange => "no_change",
+                },
+                match output.delta() {
+                    cabinet_domain::attachment_snapshot_mutation::AttachmentSnapshotDelta::Linked => "linked",
+                    cabinet_domain::attachment_snapshot_mutation::AttachmentSnapshotDelta::Relabeled => "relabeled",
+                    cabinet_domain::attachment_snapshot_mutation::AttachmentSnapshotDelta::Unlinked => "unlinked",
+                    cabinet_domain::attachment_snapshot_mutation::AttachmentSnapshotDelta::Unchanged => "unchanged",
+                },
+                output.revision_number().value(),
+            ),
+            Err(error) => map_document_attachment_mutation_error(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum DesktopDocumentAttachmentMutationRequestDto {
+    Link {
+        operation_id: String,
+        workspace_id: String,
+        document_id: String,
+        expected_current_version_token: String,
+        asset_id: String,
+        label: String,
+    },
+    Unlink {
+        operation_id: String,
+        workspace_id: String,
+        document_id: String,
+        expected_current_version_token: String,
+        asset_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentAttachmentMutationResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    pub retryable: bool,
+    pub repair_required: bool,
+}
+
+impl DesktopDocumentAttachmentMutationResponse {
+    fn success(outcome: &str, delta: &str, revision_number: u64) -> Self {
+        Self {
+            ok: true,
+            outcome: Some(outcome.to_string()),
+            delta: Some(delta.to_string()),
+            revision_number: Some(revision_number),
+            error_code: None,
+            retryable: false,
+            repair_required: false,
+        }
+    }
+
+    fn invalid_input() -> Self {
+        Self::failure("DOCUMENT_ATTACHMENT_INVALID_INPUT", false, false)
+    }
+
+    fn failure(error_code: &str, retryable: bool, repair_required: bool) -> Self {
+        Self {
+            ok: false,
+            outcome: None,
+            delta: None,
+            revision_number: None,
+            error_code: Some(error_code.to_string()),
+            retryable,
+            repair_required,
+        }
+    }
+}
+
+fn map_document_attachment_mutation_error(
+    error: MutateDocumentAttachmentsError,
+) -> DesktopDocumentAttachmentMutationResponse {
+    match error {
+        MutateDocumentAttachmentsError::InvalidInput => {
+            DesktopDocumentAttachmentMutationResponse::invalid_input()
+        }
+        MutateDocumentAttachmentsError::NotFound => {
+            DesktopDocumentAttachmentMutationResponse::failure(
+                "DOCUMENT_ATTACHMENT_DOCUMENT_NOT_FOUND",
+                false,
+                false,
+            )
+        }
+        MutateDocumentAttachmentsError::LegacyBaselineRequired => {
+            DesktopDocumentAttachmentMutationResponse::failure(
+                "DOCUMENT_ATTACHMENT_LEGACY_BASELINE_REQUIRED",
+                false,
+                true,
+            )
+        }
+        MutateDocumentAttachmentsError::OperationConflict
+        | MutateDocumentAttachmentsError::CommitConflict => {
+            DesktopDocumentAttachmentMutationResponse::failure(
+                "DOCUMENT_ATTACHMENT_CONFLICT",
+                false,
+                false,
+            )
+        }
+        MutateDocumentAttachmentsError::RecoveryRequired => {
+            DesktopDocumentAttachmentMutationResponse::failure(
+                "DOCUMENT_ATTACHMENT_RECOVERY_REQUIRED",
+                true,
+                true,
+            )
+        }
+        MutateDocumentAttachmentsError::CorruptedData => {
+            DesktopDocumentAttachmentMutationResponse::failure(
+                "DOCUMENT_ATTACHMENT_CORRUPTED_DATA",
+                false,
+                true,
+            )
+        }
+        MutateDocumentAttachmentsError::StorageUnavailable
+        | MutateDocumentAttachmentsError::FingerprintUnavailable
+        | MutateDocumentAttachmentsError::MetadataUnavailable
+        | MutateDocumentAttachmentsError::JournalUnavailable
+        | MutateDocumentAttachmentsError::CommitUnavailable => {
+            DesktopDocumentAttachmentMutationResponse::failure(
+                "DOCUMENT_ATTACHMENT_STORAGE_UNAVAILABLE",
+                true,
+                false,
+            )
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct DesktopDocumentAssetsRuntime {
     app_data_root: PathBuf,
     documents: LocalDocumentRepository,
     metadata: DurableAssetMetadataCatalog,
     page_limit: usize,
     preview_max_bytes: usize,
+    external_opener: Arc<dyn AssetExternalOpener>,
 }
 
 impl DesktopDocumentAssetsRuntime {
@@ -3607,8 +5738,28 @@ impl DesktopDocumentAssetsRuntime {
         Self::with_preview_limit(app_data_root, max_body_bytes, 2 * 1024 * 1024)
     }
 
-    pub fn with_preview_limit(app_data_root: PathBuf, max_body_bytes: usize, preview_max_bytes: usize) -> Result<Self, &'static str> {
-        if preview_max_bytes == 0 { return Err("ASSET_INVALID_PREVIEW_POLICY"); }
+    pub fn with_preview_limit(
+        app_data_root: PathBuf,
+        max_body_bytes: usize,
+        preview_max_bytes: usize,
+    ) -> Result<Self, &'static str> {
+        Self::with_preview_limit_and_opener(
+            app_data_root.clone(),
+            max_body_bytes,
+            preview_max_bytes,
+            Arc::new(LocalAssetExternalOpener::new(app_data_root)),
+        )
+    }
+
+    pub fn with_preview_limit_and_opener(
+        app_data_root: PathBuf,
+        max_body_bytes: usize,
+        preview_max_bytes: usize,
+        external_opener: Arc<dyn AssetExternalOpener>,
+    ) -> Result<Self, &'static str> {
+        if preview_max_bytes == 0 {
+            return Err("ASSET_INVALID_PREVIEW_POLICY");
+        }
         let policy =
             DocumentBodyPolicy::new(max_body_bytes).map_err(|_| "ASSET_INVALID_BODY_POLICY")?;
         Ok(Self {
@@ -3620,6 +5771,7 @@ impl DesktopDocumentAssetsRuntime {
             metadata: DurableAssetMetadataCatalog::new(app_data_root.clone()),
             page_limit: 200,
             preview_max_bytes,
+            external_opener,
         })
     }
 
@@ -3684,7 +5836,11 @@ impl DesktopDocumentAssetsRuntime {
     }
 
     pub fn preview(&self, request: DesktopAssetDetailRequestDto) -> DesktopAssetPreviewResponse {
-        let input = match GetAssetPreviewInput::new(&request.workspace_id, &request.asset_id, self.preview_max_bytes) {
+        let input = match GetAssetPreviewInput::new(
+            &request.workspace_id,
+            &request.asset_id,
+            self.preview_max_bytes,
+        ) {
             Ok(value) => value,
             Err(error) => return DesktopAssetPreviewResponse::failure(error),
         };
@@ -3695,6 +5851,26 @@ impl DesktopDocumentAssetsRuntime {
         ) {
             Ok(output) => DesktopAssetPreviewResponse::success(&request.asset_id, output),
             Err(error) => DesktopAssetPreviewResponse::failure(error),
+        }
+    }
+
+    pub fn open_external(
+        &self,
+        request: DesktopAssetDetailRequestDto,
+    ) -> DesktopAssetExternalOpenResponse {
+        let input = match OpenAssetExternallyInput::new(&request.workspace_id, &request.asset_id) {
+            Ok(value) => value,
+            Err(error) => return DesktopAssetExternalOpenResponse::failure(error),
+        };
+        let mut product_logger = DesktopAssetExternalOpenProductLogSink::default();
+        match OpenAssetExternallyUsecase::new().execute(
+            input,
+            &self.metadata,
+            self.external_opener.as_ref(),
+            &mut product_logger,
+        ) {
+            Ok(output) => DesktopAssetExternalOpenResponse::success(output.opened()),
+            Err(error) => DesktopAssetExternalOpenResponse::failure(error),
         }
     }
 
@@ -3932,6 +6108,35 @@ pub struct DesktopAssetPreviewResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DesktopAssetExternalOpenResponse {
+    pub ok: bool,
+    pub opened: bool,
+    pub error_code: Option<String>,
+    pub retryable: bool,
+}
+
+impl DesktopAssetExternalOpenResponse {
+    fn success(opened: bool) -> Self {
+        Self {
+            ok: true,
+            opened,
+            error_code: None,
+            retryable: false,
+        }
+    }
+
+    fn failure(error: OpenAssetExternallyError) -> Self {
+        Self {
+            ok: false,
+            opened: false,
+            error_code: Some(error.code().to_string()),
+            retryable: error.retryable(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopAssetPreviewDto {
     pub asset_id: String,
     pub capability: String,
@@ -3941,15 +6146,24 @@ pub struct DesktopAssetPreviewDto {
 }
 
 impl DesktopAssetPreviewResponse {
-    fn success(asset_id: &str, output: cabinet_usecases::asset_preview::GetAssetPreviewOutput) -> Self {
+    fn success(
+        asset_id: &str,
+        output: cabinet_usecases::asset_preview::GetAssetPreviewOutput,
+    ) -> Self {
         let capability = asset_preview_name(output.capability()).to_string();
         let media_type = output.media_type().to_string();
         let (presentation, content) = match output.result() {
             AssetPreviewResult::Unsupported => ("unsupported".to_string(), None),
-            AssetPreviewResult::Content(bytes) if output.capability() == cabinet_domain::asset::AssetPreviewCapability::Text => {
+            AssetPreviewResult::Content(bytes)
+                if output.capability() == cabinet_domain::asset::AssetPreviewCapability::Text =>
+            {
                 match String::from_utf8(bytes.clone()) {
                     Ok(text) => ("text".to_string(), Some(text)),
-                    Err(_) => return Self::failure(AssetPreviewError::Read(cabinet_ports::asset_preview::AssetPreviewReadError::Corrupted)),
+                    Err(_) => {
+                        return Self::failure(AssetPreviewError::Read(
+                            cabinet_ports::asset_preview::AssetPreviewReadError::Corrupted,
+                        ));
+                    }
                 }
             }
             AssetPreviewResult::Content(bytes) => (
@@ -3957,10 +6171,26 @@ impl DesktopAssetPreviewResponse {
                 Some(format!("data:{media_type};base64,{}", BASE64.encode(bytes))),
             ),
         };
-        Self { ok: true, data: Some(DesktopAssetPreviewDto { asset_id: asset_id.to_string(), capability, media_type, presentation, content }), error_code: None, retryable: false }
+        Self {
+            ok: true,
+            data: Some(DesktopAssetPreviewDto {
+                asset_id: asset_id.to_string(),
+                capability,
+                media_type,
+                presentation,
+                content,
+            }),
+            error_code: None,
+            retryable: false,
+        }
     }
     fn failure(error: AssetPreviewError) -> Self {
-        Self { ok: false, data: None, error_code: Some(error.code().to_string()), retryable: error.retryable() }
+        Self {
+            ok: false,
+            data: None,
+            error_code: Some(error.code().to_string()),
+            retryable: error.retryable(),
+        }
     }
 }
 impl DesktopAssetDetailResponse {
@@ -4050,6 +6280,20 @@ impl AssetLifecycleProductLogger for DesktopAssetLifecycleProductLogSink {
             AssetLifecycleProductEvent::Linked { .. }
             | AssetLifecycleProductEvent::Unlinked { .. } => self.0 = self.0.saturating_add(1),
         }
+    }
+}
+
+#[derive(Default)]
+struct DesktopAssetExternalOpenProductLogSink {
+    event_count: usize,
+    last_error_code: Option<&'static str>,
+}
+
+impl AssetExternalOpenProductLogger for DesktopAssetExternalOpenProductLogSink {
+    fn write_product(&mut self, event: AssetExternalOpenProductEvent) {
+        self.event_count = self.event_count.saturating_add(1);
+        let AssetExternalOpenProductEvent::Failed { error_code } = event;
+        self.last_error_code = Some(error_code);
     }
 }
 
@@ -5843,7 +8087,7 @@ mod tests {
                 workspace_id: "workspace-1".into(),
                 document_id: "source".into(),
                 path: "source.md".into(),
-                body: "[[Target]]".into(),
+                body: "# Source\n[[Target]]".into(),
                 version_id: "sv1".into(),
                 snapshot_ref: "snapshot-sv1".into(),
                 author: "local-user".into(),
@@ -5854,7 +8098,15 @@ mod tests {
         }
         drop(authoring);
         let projection = DesktopProjectionRuntime::new(root.clone(), 4096, 20, 3).unwrap();
-        assert_eq!(projection.run_once().ready_count, 6);
+        let initial_projection = projection.run_once();
+        assert_eq!(
+            (
+                initial_projection.ready_count,
+                initial_projection.retry_scheduled_count,
+                initial_projection.failed_count,
+            ),
+            (6, 0, 0)
+        );
         drop(projection);
 
         let mut sink = DesktopDocumentChangeSink::new(root.clone());
