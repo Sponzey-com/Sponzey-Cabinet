@@ -14,7 +14,7 @@ use cabinet_adapters::local_create_document_revision_runtime::{
 use cabinet_adapters::local_current_document_revision_projection::LocalCurrentDocumentRevisionProjectionWriter;
 use cabinet_adapters::local_current_document_version_pointer::LocalCurrentDocumentVersionPointer;
 use cabinet_adapters::local_document_repository::LocalDocumentRepository;
-use cabinet_adapters::local_version_store::LocalVersionStore;
+use cabinet_adapters::local_version_store::{LocalVersionStore, VERSION_ATTACHMENTS_FILE};
 use cabinet_desktop_shell::{
     DesktopAssetImportRequestDto, DesktopAssetImportSelectionRuntime, DesktopDocumentAssetsRuntime,
     DesktopDocumentAuthoringRequestDto, DesktopDocumentAuthoringRuntime,
@@ -67,14 +67,18 @@ fn native_import_runtime_persists_completed_operation_metadata_and_association_a
     });
 
     assert!(response.ok, "response={response:?}");
-    assert_eq!(response.state.as_deref(), Some("completed"));
+    assert_eq!(response.state.as_deref(), Some("recovery_required"));
+    assert!(response.repair_required);
+    assert_eq!(
+        response.error_code.as_deref(),
+        Some("asset_graph_reindex.current_version_not_found")
+    );
     let workspace = WorkspaceId::new("workspace-1").expect("workspace");
     let document = DocumentId::new("doc-1").expect("document");
     let asset = AssetId::from_sha256_hex(response.asset_id.as_deref().expect("asset id"))
         .expect("asset id");
-    let operation =
-        AssetImportOperationId::new(response.operation_id.as_deref().expect("operation id"))
-            .expect("operation id");
+    let operation_id = response.operation_id.clone().expect("operation id");
+    let operation = AssetImportOperationId::new(&operation_id).expect("operation id");
 
     let metadata = DurableAssetMetadataCatalog::new(root.clone())
         .get(&workspace, &asset)
@@ -106,6 +110,24 @@ fn native_import_runtime_persists_completed_operation_metadata_and_association_a
     assert_eq!(queried.assets.len(), 1);
     assert_eq!(queried.assets[0].asset_id, asset.as_str());
     assert_eq!(queried.assets[0].status, "available");
+    drop(runtime);
+    let restarted_import =
+        DesktopAssetImportSelectionRuntime::with_app_data_root(root.clone(), "workspace-1", 4)
+            .expect("restart import runtime");
+    let restarted_status = restarted_import.status("workspace-1", &operation_id);
+    assert!(restarted_status.ok, "restart status={restarted_status:?}");
+    assert_eq!(restarted_status.state.as_deref(), Some("recovery_required"));
+    let restarted_query = DesktopDocumentAssetsRuntime::new(root.clone(), 10 * 1024 * 1024)
+        .expect("restart query runtime")
+        .execute(DesktopLocalCommandRequestDto {
+            command_name: "list_document_assets".into(),
+            payload: DesktopLocalCommandPayloadDto::DocumentIdentity {
+                workspace_id: "workspace-1".into(),
+                document_id: "doc-1".into(),
+            },
+        });
+    assert!(restarted_query.ok, "restart query={restarted_query:?}");
+    assert_eq!(restarted_query.data.expect("restart data").assets.len(), 1);
     let serialized = serde_json::to_string(&response).expect("response json");
     assert!(!serialized.contains(root.to_string_lossy().as_ref()));
     assert!(!serialized.contains("durable-pdf-content"));
@@ -138,6 +160,13 @@ fn revision_guarded_import_creates_attachment_revision_and_rejects_stale_second_
             expected_current_version_token: "version-graph-1".into(),
         });
     assert!(first_response.ok, "first={first_response:?}");
+    assert_eq!(first_response.state.as_deref(), Some("completed"));
+    assert!(!first_response.repair_required);
+    let first_operation_id = first_response.operation_id.clone().expect("operation id");
+    let first_status = runtime.status("workspace-1", &first_operation_id);
+    assert!(first_status.ok, "first status={first_status:?}");
+    assert_eq!(first_status.state.as_deref(), Some("completed"));
+    assert!(!first_status.repair_required);
 
     let workspace = WorkspaceId::new("workspace-1").unwrap();
     let document = DocumentId::new("doc-revisioned").unwrap();
@@ -194,6 +223,76 @@ fn revision_guarded_import_creates_attachment_revision_and_rejects_stale_second_
 }
 
 #[test]
+fn revision_guarded_import_upgrades_legacy_attachment_baseline_without_rewriting_history() {
+    let root = temp_root("revision-guarded-legacy");
+    seed_legacy_revisioned_document(&root, "doc-legacy");
+    let source = root.join("legacy-source.txt");
+    fs::write(&source, b"legacy document imported asset").unwrap();
+    let legacy_snapshot = root
+        .join(LOCAL_DOCUMENT_VERSION_ROOT)
+        .join("workspace-1/documents/doc-legacy/snapshots/version-graph-1");
+    let legacy_body = fs::read(legacy_snapshot.join("body.md")).unwrap();
+    assert!(!legacy_snapshot.join(VERSION_ATTACHMENTS_FILE).exists());
+
+    let runtime = DesktopAssetImportSelectionRuntime::with_app_data_root_and_body_policy(
+        root.clone(),
+        "workspace-1",
+        4,
+        DocumentBodyPolicy::new(10 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    let selection = runtime.register_selected_paths(vec![source]);
+    let response = runtime.import_revision_guarded(DesktopRevisionGuardedAssetImportRequestDto {
+        import: DesktopAssetImportRequestDto {
+            workspace_id: "workspace-1".into(),
+            document_id: "doc-legacy".into(),
+            handle: selection.data.unwrap().files[0].handle.clone(),
+            label: "Legacy import".into(),
+        },
+        attachment_operation_id: "attachment-import-legacy".into(),
+        expected_current_version_token: "version-graph-1".into(),
+    });
+
+    assert!(response.ok, "response={response:?}");
+    assert_eq!(response.state.as_deref(), Some("completed"));
+    assert_eq!(
+        fs::read(legacy_snapshot.join("body.md")).unwrap(),
+        legacy_body
+    );
+    assert!(!legacy_snapshot.join(VERSION_ATTACHMENTS_FILE).exists());
+    let workspace = WorkspaceId::new("workspace-1").unwrap();
+    let document = DocumentId::new("doc-legacy").unwrap();
+    let history = LocalVersionStore::new(root.join(LOCAL_DOCUMENT_VERSION_ROOT))
+        .list_history(
+            &workspace,
+            &document,
+            HistoryPageRequest::first(10).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(history.entries().len(), 2);
+    assert_eq!(
+        DurableAssetAssociationCatalog::new(root.clone())
+            .list_assets(&workspace, &document, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(runtime);
+    let restarted = DesktopDocumentAssetsRuntime::new(root.clone(), 10 * 1024 * 1024)
+        .unwrap()
+        .execute(DesktopLocalCommandRequestDto {
+            command_name: "list_document_assets".into(),
+            payload: DesktopLocalCommandPayloadDto::DocumentIdentity {
+                workspace_id: "workspace-1".into(),
+                document_id: "doc-legacy".into(),
+            },
+        });
+    assert!(restarted.ok, "restarted={restarted:?}");
+    assert_eq!(restarted.data.unwrap().assets.len(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn native_import_hands_completed_association_to_graph_projection_idempotently() {
     let root = temp_root("graph-handoff");
     seed_authored_document(&root, "doc-graph");
@@ -216,6 +315,8 @@ fn native_import_hands_completed_association_to_graph_projection_idempotently() 
         label: "Graph import".into(),
     });
     assert!(imported.ok, "imported={imported:?}");
+    assert_eq!(imported.state.as_deref(), Some("completed"));
+    assert!(!imported.repair_required);
     let operation_id = imported.operation_id.clone().expect("operation");
 
     assert!(projection.run_once().ok);
@@ -295,6 +396,51 @@ fn seed_revisioned_document(root: &PathBuf, document_id: &str) {
             snapshot_ref,
             DocumentBody::new("# Revisioned import target\n", policy).unwrap(),
             AttachmentSnapshotState::known(Vec::new()).unwrap(),
+        ),
+    )
+    .unwrap();
+    LocalVersionStore::with_body_policy(root.join(LOCAL_DOCUMENT_VERSION_ROOT), policy)
+        .append_version(&workspace, record.clone())
+        .unwrap();
+    LocalCurrentDocumentVersionPointer::new(root.join(LOCAL_DOCUMENT_POINTER_ROOT))
+        .compare_and_set_current_version(&workspace, &document, None, version)
+        .unwrap();
+    ProjectCurrentDocumentRevisionUsecase::new()
+        .execute(
+            ProjectCurrentDocumentRevisionInput::new(
+                "workspace-1",
+                &format!("{document_id}.md"),
+                record,
+            ),
+            &mut LocalCurrentDocumentRevisionProjectionWriter::new(root.clone(), policy),
+        )
+        .unwrap();
+}
+
+fn seed_legacy_revisioned_document(root: &PathBuf, document_id: &str) {
+    let workspace = WorkspaceId::new("workspace-1").unwrap();
+    let document = DocumentId::new(document_id).unwrap();
+    let version = VersionId::new("version-graph-1").unwrap();
+    let snapshot_ref = DocumentSnapshotRef::new("snapshot-import-base").unwrap();
+    let policy = DocumentBodyPolicy::new(10 * 1024 * 1024).unwrap();
+    let entry = VersionEntry::new(
+        version.clone(),
+        document.clone(),
+        snapshot_ref.clone(),
+        VersionAuthor::new("local-user").unwrap(),
+        VersionSummary::new("Legacy import target").unwrap(),
+    )
+    .unwrap()
+    .with_created_at_epoch_ms(1)
+    .unwrap()
+    .with_revision_number(DocumentRevisionNumber::new(1).unwrap())
+    .unwrap();
+    let record = cabinet_ports::version_store::VersionRecord::new(
+        entry,
+        cabinet_ports::version_store::VersionSnapshot::new(
+            document.clone(),
+            snapshot_ref,
+            DocumentBody::new("# Legacy import target\n", policy).unwrap(),
         ),
     )
     .unwrap();
@@ -453,13 +599,9 @@ fn native_import_runtime_start_returns_durable_selected_status_before_execution(
 
     let completed = runtime.run_started(request, &operation_id);
     assert!(completed.ok, "completed={completed:?}");
-    assert_eq!(
-        runtime
-            .status("workspace-1", &operation_id)
-            .state
-            .as_deref(),
-        Some("completed")
-    );
+    let status = runtime.status("workspace-1", &operation_id);
+    assert_eq!(status.state.as_deref(), Some("recovery_required"));
+    assert!(status.repair_required);
     let _ = fs::remove_dir_all(root);
 }
 

@@ -3,7 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  WORKSPACE_SHELL_GLOBAL_TOOL_ROUTES,
   WORKSPACE_SHELL_LAYOUT,
+  WORKSPACE_SHELL_PRIMARY_ROUTES,
   WorkspaceShellContractError,
   createWorkspaceShellModel,
   type WorkspaceShellRouteKind,
@@ -12,13 +14,19 @@ import { KO_KR_MESSAGES, type MessageCatalog } from "../src/ko_kr_catalog.ts";
 
 const routes: readonly WorkspaceShellRouteKind[] = ["Home", "Search", "Document", "Graph", "Canvas", "Assets", "Backup"];
 
+test("Search is a global tool route and never a primary navigation route", () => {
+  assert.deepEqual(WORKSPACE_SHELL_PRIMARY_ROUTES, ["Home", "Document", "Graph", "Canvas", "Assets", "Backup"]);
+  assert.deepEqual(WORKSPACE_SHELL_GLOBAL_TOOL_ROUTES, ["Search"]);
+  assert.equal(WORKSPACE_SHELL_PRIMARY_ROUTES.includes("Search" as never), false);
+});
+
 test("every route uses one Korean navigation order and exactly one active item", () => {
   for (const route of routes) {
     const model = createWorkspaceShellModel({ route, availableActions: routes, messages: KO_KR_MESSAGES });
-    assert.deepEqual(model.navigation.map((item) => item.label), ["홈", "검색", "문서", "지식 지도", "캔버스", "첨부 파일", "백업 및 복원"]);
-    assert.deepEqual(model.navigation.map((item) => item.route), routes);
-    assert.equal(model.navigation.filter((item) => item.active).length, 1);
-    assert.equal(model.navigation.find((item) => item.active)?.route, route);
+    assert.deepEqual(model.navigation.map((item) => item.label), ["홈", "문서", "지식 지도", "캔버스", "첨부 파일", "백업과 복원"]);
+    assert.deepEqual(model.navigation.map((item) => item.route), WORKSPACE_SHELL_PRIMARY_ROUTES);
+    assert.equal(model.navigation.filter((item) => item.active).length, route === "Search" ? 0 : 1);
+    assert.equal(model.navigation.find((item) => item.active)?.route, route === "Search" ? undefined : route);
     assert.equal(Object.isFrozen(model), true);
     assert.equal(Object.isFrozen(model.navigation), true);
   }
@@ -35,6 +43,7 @@ test("shell model exposes public context without durable identity", () => {
 test("shell contract rejects an unknown route and missing route action", () => {
   assert.throws(() => createWorkspaceShellModel({ route: "Unknown" as WorkspaceShellRouteKind, availableActions: routes, messages: KO_KR_MESSAGES }), (error: unknown) => error instanceof WorkspaceShellContractError && error.code === "SHELL_ROUTE_UNKNOWN");
   assert.throws(() => createWorkspaceShellModel({ route: "Home", availableActions: routes.filter((route) => route !== "Backup"), messages: KO_KR_MESSAGES }), (error: unknown) => error instanceof WorkspaceShellContractError && error.code === "SHELL_ACTION_MISSING");
+  assert.doesNotThrow(() => createWorkspaceShellModel({ route: "Search", availableActions: WORKSPACE_SHELL_PRIMARY_ROUTES, messages: KO_KR_MESSAGES }));
 });
 
 test("shell model resolves route labels and contexts through the injected catalog", () => {
@@ -44,7 +53,7 @@ test("shell model resolves route labels and contexts through the injected catalo
   const model = createWorkspaceShellModel({ route: "Graph", availableActions: routes, messages });
   assert.equal(model.pageTitle, "fixture:route.graph");
   assert.equal(model.pageContext, "fixture:routeContext.graph");
-  assert.deepEqual(model.navigation.map((item) => item.label), routes.map((route) => `fixture:route.${route.toLowerCase()}`));
+  assert.deepEqual(model.navigation.map((item) => item.label), WORKSPACE_SHELL_PRIMARY_ROUTES.map((route) => `fixture:route.${route.toLowerCase()}`));
 });
 
 test("layout tokens preserve the measured desktop baseline", async () => {

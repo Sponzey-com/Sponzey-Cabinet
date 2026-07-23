@@ -148,6 +148,40 @@ fn reopen_failure_rolls_back_and_never_finalizes() {
 }
 
 #[test]
+fn rollback_failure_is_recorded_as_recovery_required_and_never_finalizes() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut packages = FakePorts::new(Rc::clone(&calls));
+    let mut restores = FakePorts::with_rollback_failure(Rc::clone(&calls));
+    let mut reopener = FakePorts::with_reopen_failure(Rc::clone(&calls));
+    let mut logger = Logger::default();
+
+    let output = ConfirmBackupRestoreUsecase::new()
+        .execute(
+            ConfirmBackupRestoreInput::new(
+                "user-1",
+                "workspace-1",
+                "package-1",
+                "operation-1",
+                true,
+            ),
+            &mut packages,
+            &mut restores,
+            &mut reopener,
+            &mut logger,
+        )
+        .expect("rollback failure becomes a durable recovery result");
+
+    assert_eq!(output.state(), RestoreState::RecoveryRequired);
+    assert_eq!(output.error_code(), Some("RESTORE_ROLLBACK_FAILED"));
+    assert_eq!(calls.borrow().last(), Some(&"mark_recovery_required"));
+    assert!(!calls.borrow().contains(&"finalize"));
+    assert_eq!(
+        logger.events.last().unwrap().event_name(),
+        "restore.recovery_required"
+    );
+}
+
+#[test]
 fn cancel_usecase_delegates_to_staging_operation_and_logs_cancelled() {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let mut restores = FakePorts::new(Rc::clone(&calls));
@@ -170,18 +204,28 @@ fn cancel_usecase_delegates_to_staging_operation_and_logs_cancelled() {
 struct FakePorts {
     calls: Rc<RefCell<Vec<&'static str>>>,
     reopen_fails: bool,
+    rollback_fails: bool,
 }
 impl FakePorts {
     fn new(calls: Rc<RefCell<Vec<&'static str>>>) -> Self {
         Self {
             calls,
             reopen_fails: false,
+            rollback_fails: false,
         }
     }
     fn with_reopen_failure(calls: Rc<RefCell<Vec<&'static str>>>) -> Self {
         Self {
             calls,
             reopen_fails: true,
+            rollback_fails: false,
+        }
+    }
+    fn with_rollback_failure(calls: Rc<RefCell<Vec<&'static str>>>) -> Self {
+        Self {
+            calls,
+            reopen_fails: false,
+            rollback_fails: true,
         }
     }
 }
@@ -253,6 +297,9 @@ impl BackupRestoreStore for FakePorts {
         _: &BackupJobId,
     ) -> Result<BackupRestoreOperationSnapshot, BackupRestoreStoreError> {
         self.calls.borrow_mut().push("rollback");
+        if self.rollback_fails {
+            return Err(BackupRestoreStoreError::StorageUnavailable);
+        }
         Ok(snapshot(RestoreState::RolledBack))
     }
     fn finalize_restore(
@@ -285,6 +332,14 @@ impl BackupRestoreStore for FakePorts {
         _: &BackupJobId,
     ) -> Result<BackupRestoreOperationSnapshot, BackupRestoreStoreError> {
         Ok(snapshot(RestoreState::CleanupRequired))
+    }
+    fn mark_recovery_required(
+        &mut self,
+        _: &WorkspaceId,
+        _: &BackupJobId,
+    ) -> Result<BackupRestoreOperationSnapshot, BackupRestoreStoreError> {
+        self.calls.borrow_mut().push("mark_recovery_required");
+        Ok(snapshot(RestoreState::RecoveryRequired))
     }
 }
 impl WorkspaceReopener for FakePorts {

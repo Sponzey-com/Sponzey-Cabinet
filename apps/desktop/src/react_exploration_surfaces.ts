@@ -1,23 +1,44 @@
-import React, { useMemo, useState } from "react";
+import React from "react";
 
 import type { PersonalWorkspaceHomeModel } from "@sponzey-cabinet/ui";
-import type { DesktopAssetSurfaceSnapshot } from "./desktop_asset_controller.ts";
+import {
+  visibleDesktopAssets,
+  type DesktopAssetMediaFilter,
+  type DesktopAssetSurfaceSnapshot,
+} from "./desktop_asset_controller.ts";
 import type { DesktopCanvasSurfaceSnapshot } from "./desktop_canvas_controller.ts";
+import type { DesktopCanvasCatalogSnapshot } from "./desktop_canvas_catalog_controller.ts";
 import type { DesktopGraphQueryState, DesktopGraphSurfaceSnapshot } from "./desktop_graph_controller.ts";
 import { createCanvasWorldTransform, projectDesktopCanvasViewport } from "./canvas_viewport_projection.ts";
+import { projectCanvasMinimap } from "./canvas_minimap_projection.ts";
 import { createWorkspaceShellModel, type WorkspaceShellRouteKind } from "./workspace_shell_contract.ts";
-import { createWorkspaceShellElement } from "./react_workspace_shell.ts";
+import {
+  createWorkspaceShellElement,
+  type WorkspaceShellDocumentShortcut,
+} from "./react_workspace_shell.ts";
 import { KO_KR_MESSAGES } from "./ko_kr_catalog.ts";
-import { filterGraphDisplayNodes, presentGraphNodes } from "./graph_display_presenter.ts";
+import { presentGraphNodes } from "./graph_display_presenter.ts";
 import type { DisplayReference } from "./display_reference_resolver.ts";
 import { presentAssetMetadata, presentLinkedDocuments } from "./asset_display_presenter.ts";
 import { mapUserFacingError } from "./user_facing_error_presenter.ts";
 import { handleModalKeyboard } from "./modal_keyboard_policy.ts";
 import { browserModalFocusEnvironment, createFocusRestoringModalAction } from "./modal_focus_restoration.ts";
+import { ReactTopologyVisualHost } from "./react_topology_visual_host.ts";
+import { createTopologyRendererModel } from "./topology_visual_orchestrator.ts";
+import { filterTopologyVisualGraph } from "./topology_visual_filter.ts";
+import type { DesktopGraphCameraPreference } from "./desktop_graph_preference.ts";
+import {
+  createCanvasTextEditIntent,
+  type CanvasTextEditDialogState,
+} from "./canvas_text_edit_dialog.ts";
+import { presentTopologyEmptyState } from "./topology_empty_state_presenter.ts";
+import { createAttachmentOperationListElement } from "./react_document_attachment_panel.ts";
 
 export interface DesktopExplorationCallbacks {
+  readonly documentShortcuts?: readonly WorkspaceShellDocumentShortcut[];
   readonly onHome: () => void;
-  readonly onSearch: () => void;
+  readonly onSearchOpen?: () => void;
+  readonly onSearch: (query?: string) => void;
   readonly onGraph: () => void;
   readonly onCanvas: () => void;
   readonly onAssets: () => void;
@@ -35,9 +56,16 @@ export function createDesktopKnowledgeGraphElement(
   snapshot: DesktopGraphSurfaceSnapshot,
   callbacks: DesktopExplorationCallbacks & {
     readonly onGraphQuery: (patch: Partial<DesktopGraphQueryState>) => void;
+    readonly onGraphScopeChange?: (scope: "local" | "global") => void;
     readonly onGraphNodeSelect: (nodeId: string) => void;
     readonly onGraphRetry: () => void;
     readonly onGraphReindex: () => void;
+    readonly graphVisualSearch?: string;
+    readonly onGraphVisualSearch?: (query: string) => void;
+    readonly graphCameraPreference?: DesktopGraphCameraPreference;
+    readonly onGraphCameraPreferenceChanged?: (camera: DesktopGraphCameraPreference) => void;
+    readonly graphIncludeExternal?: boolean;
+    readonly onGraphIncludeExternalChange?: (include: boolean) => void;
   },
 ): React.ReactElement {
   return React.createElement(DesktopKnowledgeGraph, { model, snapshot, callbacks });
@@ -76,6 +104,11 @@ export function createDesktopCanvasElement(
     readonly onCanvasRenameDraftChange: (title: string) => void;
     readonly onCanvasRenameCancel: () => void;
     readonly onCanvasRename: (title: string) => void;
+    readonly canvasTextEditDialog: CanvasTextEditDialogState;
+    readonly onCanvasTextEditRequest: (nodeId: string, text: string) => void;
+    readonly onCanvasTextEditDraftChange: (text: string) => void;
+    readonly onCanvasTextEditCancel: () => void;
+    readonly onCanvasTextEdit: (nodeId: string, text: string) => void;
     readonly onCanvasArchive: () => void;
     readonly onCanvasNodeSelect: (nodeId: string) => void;
     readonly onCanvasEdgeSelect: (edgeId: string) => void;
@@ -85,6 +118,10 @@ export function createDesktopCanvasElement(
     readonly onCanvasResizeEnd: (nodeId: string, clientX: number, clientY: number) => void;
     readonly canPlaceDocument: boolean;
     readonly canPlaceAsset: boolean;
+    readonly canvasCatalog?: DesktopCanvasCatalogSnapshot;
+    readonly displayedCanvasId?: string;
+    readonly onCanvasCatalogRetry?: () => void;
+    readonly onCanvasSelect?: (canvasId: string) => void;
   },
 ): React.ReactElement {
   return React.createElement(DesktopCanvas, { model, snapshot, callbacks });
@@ -108,6 +145,10 @@ export function createDesktopAttachmentsElement(
     readonly onAssetCancel: () => void;
     readonly onAssetPreview: () => void;
     readonly onAssetPreviewClose: () => void;
+    readonly onAssetQueryChange: (query: string) => void;
+    readonly onAssetMediaFilterChange: (filter: DesktopAssetMediaFilter) => void;
+    readonly onAssetLoadMore: () => void;
+    readonly onAssetRepair: (operationId: string) => void;
   },
 ): React.ReactElement {
   return React.createElement(DesktopAttachments, { model, snapshot, callbacks });
@@ -136,33 +177,27 @@ function DesktopKnowledgeGraph({
   };
 }): React.ReactElement {
   const e = React.createElement;
-  const [query, setQuery] = useState("");
-  const [cameraZoom, setCameraZoom] = useState(100);
-  const cameraScale = cameraZoom / 100;
+  const query = typeof callbacks.graphVisualSearch === "string" ? callbacks.graphVisualSearch : "";
   const graph = snapshot.graph;
-  const documentReferences: readonly DisplayReference[] = model.recentDocuments.map((document) => Object.freeze({
-    category: "document" as const,
-    identity: document.documentId,
-    label: document.title,
-    breadcrumbLabel: document.path.split("/").slice(0, -1).join(" / "),
-    statusLabel: "",
-    state: "resolved" as const,
-  }));
-  const presentedNodes = presentGraphNodes(graph?.nodes ?? [], documentReferences);
-  const visibleNodes = filterGraphDisplayNodes(presentedNodes, query);
-  const visibleIds = new Set(visibleNodes.map((node) => node.identity));
-  const visibleEdges = (graph?.edges ?? []).filter((edge) =>
-    visibleIds.has(edge.sourceId) && visibleIds.has(edge.targetId),
+  const presentedNodes = presentGraphNodes(graph?.nodes ?? []);
+  const visibleGraph = filterTopologyVisualGraph(presentedNodes, graph?.edges ?? [], query, { includeExternal: callbacks.graphIncludeExternal });
+  const visibleNodes = visibleGraph.nodes;
+  const visibleEdges = visibleGraph.edges;
+  const emptyState = presentTopologyEmptyState({
+    sourceNodeCount: graph?.nodes.length ?? 0,
+    sourceEdgeCount: graph?.edges.length ?? 0,
+    visibleNodeCount: visibleNodes.length,
+    visualFilterActive: Boolean(query.trim()) || (graph?.stats?.filteredCount ?? 0) > 0 || ((graph?.candidateCount ?? 0) > (graph?.nodes.length ?? 0)),
+  });
+  const rendererModel = createTopologyRendererModel(
+    visibleNodes,
+    visibleEdges,
+    snapshot.selectedNodeId,
+    graph?.centerDocumentId,
   );
-  const positions = new Map(visibleNodes.map((node, index) => [
-    node.identity,
-    node.identity === graph?.centerDocumentId
-      ? { x: 500, y: 310 }
-      : graphPosition(index, visibleNodes.length),
-  ]));
-  const selected = presentedNodes.find((node) => node.identity === snapshot.selectedNodeId);
-  const incoming = selected ? graph?.edges.filter((edge) => edge.targetId === selected.identity).length ?? 0 : 0;
-  const outgoing = selected ? graph?.edges.filter((edge) => edge.sourceId === selected.identity).length ?? 0 : 0;
+  const selected = visibleNodes.find((node) => node.identity === snapshot.selectedNodeId);
+  const incoming = selected ? visibleEdges.filter((edge) => edge.targetId === selected.identity).length : 0;
+  const outgoing = selected ? visibleEdges.filter((edge) => edge.sourceId === selected.identity).length : 0;
 
   return surfaceShell(
     "graph",
@@ -185,53 +220,44 @@ function DesktopKnowledgeGraph({
         e("label", { className: "graph-search" }, e("span", { "aria-hidden": "true" }, "⌕"), e("input", {
           type: "search",
           "data-action": "filter-graph-nodes",
+          "aria-label": "지도에서 문서 찾기",
           value: query,
           placeholder: "지도에서 문서 찾기",
-          onChange: (event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.currentTarget.value),
+          onChange: (event: React.ChangeEvent<HTMLInputElement>) => callbacks.onGraphVisualSearch?.(event.currentTarget.value),
         })),
-        e("button", { type: "button", "data-action": "graph-scope-local", className: `filter-chip${snapshot.query.scope !== "global" ? " active" : ""}`, onClick: () => callbacks.onGraphQuery({ scope: "local" }) }, "로컬"),
-        e("button", { type: "button", "data-action": "graph-scope-global", className: `filter-chip${snapshot.query.scope === "global" ? " active" : ""}`, onClick: () => callbacks.onGraphQuery({ scope: "global" }) }, "전체"),
+        e("button", { type: "button", "data-action": "graph-scope-local", className: `filter-chip${snapshot.query.scope !== "global" ? " active" : ""}`, onClick: () => callbacks.onGraphScopeChange?.("local") }, "로컬"),
+        e("button", { type: "button", "data-action": "graph-scope-global", className: `filter-chip${snapshot.query.scope === "global" ? " active" : ""}`, onClick: () => callbacks.onGraphScopeChange?.("global") }, "전체"),
         e("button", { type: "button", "data-action": "graph-toggle-depth", disabled: snapshot.query.scope === "global", className: `filter-chip${snapshot.query.depth === 2 ? " active" : ""}`, onClick: () => callbacks.onGraphQuery({ depth: snapshot.query.depth === 1 ? 2 : 1 }) }, `${snapshot.query.depth}단계`),
         e("button", { type: "button", "data-action": "graph-toggle-direction", className: `filter-chip${snapshot.query.direction === "incoming" ? " active" : ""}`, onClick: () => callbacks.onGraphQuery({ direction: snapshot.query.direction === "incoming" ? "both" : "incoming" }) }, "들어오는 링크"),
         e("button", { type: "button", "data-action": "graph-toggle-unresolved", className: `filter-chip${snapshot.query.includeUnresolved ? " active" : ""}`, onClick: () => callbacks.onGraphQuery({ includeUnresolved: !snapshot.query.includeUnresolved }) }, "미해결 링크"),
         e("button", { type: "button", "data-action": "graph-toggle-assets", className: `filter-chip${snapshot.query.includeAssets ? " active" : ""}`, onClick: () => callbacks.onGraphQuery({ includeAssets: !snapshot.query.includeAssets }) }, "첨부 포함"),
+        e("button", { type: "button", "data-action": "graph-toggle-external", className: `filter-chip${callbacks.graphIncludeExternal ? " active" : ""}`, "aria-pressed": callbacks.graphIncludeExternal === true, onClick: () => callbacks.onGraphIncludeExternalChange?.(!callbacks.graphIncludeExternal) }, "외부 링크"),
       ),
       e(
         "section",
-        { className: "graph-stage", "aria-label": "문서 관계 그래프", "data-graph-camera-zoom": cameraZoom },
+        { className: "graph-stage", "aria-label": "문서 관계 그래프" },
         e("div", { className: "graph-grid" }),
         e(
-          "svg",
-          { className: "graph-edges", viewBox: "0 0 1000 620", preserveAspectRatio: "none", "aria-hidden": "true", style: { transform: `scale(${cameraScale})`, transformOrigin: "50% 50%" } },
-          visibleEdges.map((edge) => {
-            const source = positions.get(edge.sourceId);
-            const target = positions.get(edge.targetId);
-            return source && target ? e("line", { key: edge.id, x1: source.x, y1: source.y, x2: target.x, y2: target.y, "data-edge-id": edge.id }) : null;
-          }),
-        ),
-        visibleNodes.map((node, index) => {
-          const position = positions.get(node.identity) ?? graphPosition(index, visibleNodes.length);
-          return e(
-            "button",
-            {
-              key: node.identity,
-              type: "button",
-              className: `graph-node ${node.identity === graph?.centerDocumentId ? "graph-node-root" : "graph-node-document"} tone-${index % 4}${selected?.identity === node.identity ? " selected" : ""}`,
-              "data-action": "select-graph-node",
-              "data-graph-node-id": node.identity,
-              style: { left: `${(500 + (position.x - 500) * cameraScale) / 10}%`, top: `${(310 + (position.y - 310) * cameraScale) / 6.2}%` },
-              onClick: () => callbacks.onGraphNodeSelect(node.identity),
+          ReactTopologyVisualHost,
+          {
+            model: rendererModel,
+            semanticNodes: visibleNodes,
+            onNodeSelected: callbacks.onGraphNodeSelect,
+            onNodeActivated: (nodeId: string) => {
+              const node = visibleNodes.find((candidate) => candidate.identity === nodeId);
+              if (node?.kind === "document" && node.canNavigate) callbacks.onOpenDocument(nodeId);
+              if (node?.kind === "attachment" && node.canNavigate) callbacks.onOpenAsset(nodeId);
             },
-            e("i", null),
-            e("strong", null, node.label),
-            e("small", null, node.kindLabel),
-          );
-        }),
+            cameraPreference: callbacks.graphCameraPreference,
+            onCameraPreferenceChanged: callbacks.onGraphCameraPreferenceChanged,
+          },
+        ),
         e("div", { className: "graph-legend" }, e("span", null, e("i", { className: "legend-document" }), "문서"), e("span", null, e("i", { className: "legend-tag" }), "미해결/첨부"), e("span", null, e("i", { className: "legend-link" }), "링크")),
-        e("div", { className: "graph-zoom-controls" }, e("button", { type: "button", "data-action": "graph-zoom-in", disabled: cameraZoom >= 200, "aria-label": `확대, 현재 ${cameraZoom}%`, onClick: () => setCameraZoom((value) => Math.min(200, value + 25)) }, "+"), e("button", { type: "button", "data-action": "graph-zoom-out", disabled: cameraZoom <= 50, "aria-label": `축소, 현재 ${cameraZoom}%`, onClick: () => setCameraZoom((value) => Math.max(50, value - 25)) }, "−"), e("button", { type: "button", "data-action": "graph-fit-view", "aria-label": "화면에 맞춤", onClick: () => setCameraZoom(100) }, "⌗")),
         snapshot.state === "Loading" ? e("p", { className: "graph-empty", role: "status" }, "지식 지도를 불러오는 중입니다.") : null,
         snapshot.state === "Failed" ? e("div", { className: "graph-empty", role: "alert" }, e("strong", null, "지식 지도를 불러오지 못했습니다."), e("button", { type: "button", "data-action": snapshot.retryable && snapshot.query.scope !== "global" ? "reindex-graph" : "retry-graph", onClick: snapshot.retryable && snapshot.query.scope !== "global" ? callbacks.onGraphReindex : callbacks.onGraphRetry }, snapshot.retryable && snapshot.query.scope !== "global" ? "다시 만들기 재시도" : "다시 시도")) : null,
-        snapshot.state === "Empty" ? e("p", { className: "graph-empty" }, "표시할 문서 관계가 없습니다.") : null,
+        (snapshot.state === "Ready" || snapshot.state === "Empty") && emptyState
+          ? e("p", { className: "graph-empty", role: "status", "data-topology-empty-kind": emptyState.kind }, emptyState.message)
+          : null,
         snapshot.state === "Stale" && snapshot.query.scope === "global"
           ? e("div", { className: "graph-stale", role: "status" }, e("span", null, "전체 관계 인덱스 일부가 오래되었습니다."), e("button", { type: "button", "data-action": "retry-graph", onClick: callbacks.onGraphRetry }, "다시 불러오기"))
           : snapshot.state === "Stale" ? e("div", { className: "graph-stale", role: "status" }, e("span", null, "문서 관계를 갱신해야 합니다."), e("button", { type: "button", "data-action": "reindex-graph", onClick: callbacks.onGraphReindex }, "관계 다시 만들기")) : null,
@@ -242,14 +268,17 @@ function DesktopKnowledgeGraph({
         selected
           ? e(
               "aside",
-              { className: "graph-detail", "aria-label": "선택한 문서" },
+              { className: "graph-detail", "aria-label": "선택한 항목" },
               e("span", { className: "detail-type" }, selected.kindLabel),
               e("h2", null, selected.label),
               e("p", null, selected.breadcrumbLabel || selected.kindLabel),
               e("dl", null, e("div", null, e("dt", null, "들어오는 링크"), e("dd", null, `${incoming}`)), e("div", null, e("dt", null, "나가는 링크"), e("dd", null, `${outgoing}`))),
-              selected.kind === "document" && selected.state !== "missing" ? e("button", { type: "button", className: "primary", "data-action": "open-graph-document", onClick: () => callbacks.onOpenDocument(selected.identity) }, "문서 열기") : null,
+              selected.kind === "document" && selected.canNavigate ? e("button", { type: "button", className: "primary", "data-action": "open-graph-document", onClick: () => callbacks.onOpenDocument(selected.identity) }, "문서 열기") : null,
+              selected.kind === "attachment" && selected.canNavigate ? e("button", { type: "button", className: "primary", "data-action": "open-graph-asset", onClick: () => callbacks.onOpenAsset(selected.identity) }, "파일 열기") : null,
             )
-          : snapshot.state === "Ready" || snapshot.state === "Stale" ? e("p", { className: "graph-empty" }, "선택할 노드가 없습니다.") : null,
+          : (snapshot.state === "Ready" || snapshot.state === "Stale") && !emptyState
+            ? e("p", { className: "graph-empty" }, "노드를 선택하면 연결 정보를 확인할 수 있습니다.")
+            : null,
       ),
     ),
   );
@@ -292,6 +321,11 @@ function DesktopCanvas({
     readonly onCanvasRenameDraftChange: (title: string) => void;
     readonly onCanvasRenameCancel: () => void;
     readonly onCanvasRename: (title: string) => void;
+    readonly canvasTextEditDialog: CanvasTextEditDialogState;
+    readonly onCanvasTextEditRequest: (nodeId: string, text: string) => void;
+    readonly onCanvasTextEditDraftChange: (text: string) => void;
+    readonly onCanvasTextEditCancel: () => void;
+    readonly onCanvasTextEdit: (nodeId: string, text: string) => void;
     readonly onCanvasArchive: () => void;
     readonly onCanvasNodeSelect: (nodeId: string) => void;
     readonly onCanvasEdgeSelect: (edgeId: string) => void;
@@ -301,6 +335,10 @@ function DesktopCanvas({
     readonly onCanvasResizeEnd: (nodeId: string, clientX: number, clientY: number) => void;
     readonly canPlaceDocument: boolean;
     readonly canPlaceAsset: boolean;
+    readonly canvasCatalog?: DesktopCanvasCatalogSnapshot;
+    readonly displayedCanvasId?: string;
+    readonly onCanvasCatalogRetry?: () => void;
+    readonly onCanvasSelect?: (canvasId: string) => void;
   };
 }): React.ReactElement {
   const e = React.createElement;
@@ -308,6 +346,12 @@ function DesktopCanvas({
   const confirmRename = createFocusRestoringModalAction(() => callbacks.onCanvasRename(renameDraft.trim()), browserModalFocusEnvironment("rename-canvas"));
   const cancelArchive = createFocusRestoringModalAction(callbacks.onCanvasArchiveCancel, browserModalFocusEnvironment("archive-canvas"));
   const confirmArchive = createFocusRestoringModalAction(callbacks.onCanvasArchive, browserModalFocusEnvironment("archive-canvas"));
+  const cancelTextEdit = createFocusRestoringModalAction(callbacks.onCanvasTextEditCancel, browserModalFocusEnvironment("edit-canvas-text-card"));
+  const textEditDialog = callbacks.canvasTextEditDialog ?? { kind: "Closed" as const };
+  const textEditIntent = createCanvasTextEditIntent(textEditDialog);
+  const confirmTextEdit = createFocusRestoringModalAction(() => {
+    if (textEditIntent) callbacks.onCanvasTextEdit(textEditIntent.nodeId, textEditIntent.text);
+  }, browserModalFocusEnvironment("edit-canvas-text-card"));
   const documentPlacementOptions = Array.isArray(callbacks.documentPlacementOptions)
     ? callbacks.documentPlacementOptions
     : [];
@@ -321,6 +365,7 @@ function DesktopCanvas({
     ? callbacks.selectedAssetPlacementId ?? ""
     : assetPlacementOptions[0]?.identity ?? "";
   const canvas = snapshot.canvas;
+  const catalog = callbacks.canvasCatalog;
   const renameDialogOpen = callbacks.canvasRenameDialogOpen === true;
   const renameDraft = typeof callbacks.canvasRenameDraft === "string"
     ? callbacks.canvasRenameDraft
@@ -335,6 +380,7 @@ function DesktopCanvas({
     nodeLimit: 250,
     edgeLimit: 500,
   }) : undefined;
+  const minimap = canvas ? projectCanvasMinimap(canvas.nodes, canvas.viewport) : undefined;
   const nodesById = new Map(projection?.nodes.map((node) => [node.nodeId, node]) ?? []);
   const targetKindLabels = Object.freeze({ document: "문서", attachment: "첨부 파일", external: "외부 링크", text: "메모" });
   const saveLabel = archived
@@ -372,6 +418,17 @@ function DesktopCanvas({
       node.targetStatus === "missing" ? e("span", { key: "missing", className: "canvas-card-status" }, "대상을 찾을 수 없음") : null,
       node.targetKind === "document" && targetStatus === "available" ? e("button", { key: "open-document", type: "button", className: "canvas-card-open", "data-action": "open-canvas-document", onClick: (event?: React.MouseEvent) => { event?.stopPropagation(); callbacks.onOpenDocument(node.targetId); } }, "문서 열기") : null,
       node.targetKind === "attachment" && targetStatus === "available" ? e("button", { key: "open-asset", type: "button", className: "canvas-card-open", "data-action": "open-canvas-asset", onClick: (event?: React.MouseEvent) => { event?.stopPropagation(); callbacks.onOpenAsset(node.targetId); } }, "파일 열기") : null,
+      node.targetKind === "text" ? e("button", {
+        key: "edit-text",
+        type: "button",
+        className: "canvas-card-open",
+        "data-action": "edit-canvas-text-card",
+        disabled: mutationDisabled,
+        onClick: (event?: React.MouseEvent) => {
+          event?.stopPropagation();
+          if (!mutationDisabled) callbacks.onCanvasTextEditRequest(node.nodeId, node.displayLabel);
+        },
+      }, "✎", e("span", null, "메모 편집")) : null,
       e("button", { key: "remove", type: "button", className: "canvas-card-remove", "data-action": "remove-canvas-node", disabled: mutationDisabled, "aria-label": "카드 제거", onClick: (event?: React.MouseEvent) => { event?.stopPropagation(); callbacks.onCanvasRemoveNode(node.nodeId); } }, "×"),
       snapshot.selectedNodeIds.includes(node.nodeId) ? e("span", {
         key: "resize",
@@ -442,7 +499,32 @@ function DesktopCanvas({
       e(
         "header",
         { className: "canvas-header" },
-        e("div", null, e("span", { className: "canvas-breadcrumb" }, "캔버스 /"), e("h1", null, canvas?.title ?? "캔버스")),
+        e(
+          "div",
+          null,
+          e("span", { className: "canvas-breadcrumb" }, "캔버스 /"),
+          e("h1", null, canvas?.title ?? "캔버스"),
+          catalog?.entries && catalog.entries.length > 0 ? e(
+            "label",
+            { className: "canvas-catalog-picker" },
+            e("span", null, "캔버스 선택"),
+            e(
+              "select",
+              {
+                "data-action": "select-canvas-catalog",
+                "aria-label": "캔버스 선택",
+                value: callbacks.displayedCanvasId ?? catalog.selectedCanvasId ?? "",
+                disabled: catalog.state === "Loading" || catalog.state === "Selecting",
+                onChange: (event: React.ChangeEvent<HTMLSelectElement>) => callbacks.onCanvasSelect?.(event.currentTarget.value),
+              },
+              catalog.entries.map((entry) => e(
+                "option",
+                { key: entry.canvasId, value: entry.canvasId },
+                `${entry.title}${entry.lifecycle === "archived" ? " (보관됨)" : ""}`,
+              )),
+            ),
+          ) : null,
+        ),
         e("span", { className: "canvas-save-state", "data-canvas-state": snapshot.state }, e("i", null), saveLabel),
       ),
       e(
@@ -477,11 +559,36 @@ function DesktopCanvas({
           nodeElements,
         ) : null,
         canvas && canvas.nodes.length === 0 ? e("div", { className: "canvas-empty" }, e("strong", null, "비어 있는 캔버스입니다"), e("p", null, "메모를 추가하거나 문서와 파일을 배치하세요.")) : null,
-        snapshot.state === "Conflict" || !canvas ? canvasStateMessage(snapshot, callbacks) : null,
+        !canvas && snapshot.state !== "RecoveryRequired" && catalog && ["Idle", "Loading", "Selecting", "Empty", "Failed"].includes(catalog.state)
+          ? canvasCatalogStateMessage(catalog, callbacks)
+          : snapshot.state === "Conflict" || !canvas ? canvasStateMessage(snapshot, callbacks) : null,
         projection ? e("output", { className: "canvas-viewport-status", "aria-live": "polite" }, projection.truncated
           ? `${projection.nodes.length}/${projection.totalNodeCount} 카드 · ${projection.edges.length}/${projection.totalEdgeCount} 연결 표시`
           : `${projection.nodes.length} 카드 · ${projection.edges.length} 연결`) : null,
-        e("div", { className: "canvas-minimap", "aria-label": "캔버스 미니맵" }, e("i", null), e("i", null), e("i", null)),
+        minimap ? e(
+          "div",
+          {
+            className: "canvas-minimap",
+            role: "img",
+            "aria-label": `캔버스 미니맵: 카드 ${minimap.nodes.length}개와 현재 보기 영역`,
+          },
+          minimap.nodes.map((node, index) => e("span", {
+            key: index,
+            className: "canvas-minimap-node",
+            "aria-hidden": "true",
+            style: { left: node.left, top: node.top, width: node.width, height: node.height },
+          })),
+          e("span", {
+            className: "canvas-minimap-viewport",
+            "aria-hidden": "true",
+            style: {
+              left: minimap.viewport.left,
+              top: minimap.viewport.top,
+              width: minimap.viewport.width,
+              height: minimap.viewport.height,
+            },
+          }),
+        ) : null,
         e("div", { className: "canvas-zoom-controls" },
           e("button", { type: "button", "data-action": "pan-canvas-left", disabled: mutationDisabled, onClick: () => callbacks.onCanvasPan(-120, 0), "aria-label": "왼쪽으로 이동" }, "←"),
           e("button", { type: "button", "data-action": "pan-canvas-up", disabled: mutationDisabled, onClick: () => callbacks.onCanvasPan(0, -120), "aria-label": "위로 이동" }, "↑"),
@@ -517,9 +624,65 @@ function DesktopCanvas({
           onClick: confirmRename,
         }, "변경"),
       ) : null,
+      textEditDialog.kind === "Editing" ? e(
+        "div",
+        {
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-label": "캔버스 메모 편집",
+          className: "canvas-text-edit-dialog",
+          onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => handleModalKeyboard(event, cancelTextEdit),
+        },
+        e("label", null, "메모 내용", e("textarea", {
+          "data-action": "edit-canvas-text",
+          value: textEditDialog.draft,
+          maxLength: 20_000,
+          autoFocus: true,
+          "aria-label": "메모 내용",
+          onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => callbacks.onCanvasTextEditDraftChange(event.currentTarget.value),
+        })),
+        e("small", null, `${textEditDialog.draft.length.toLocaleString("ko-KR")} / 20,000`),
+        e("button", { type: "button", "data-action": "cancel-canvas-text-edit", onClick: cancelTextEdit }, "취소"),
+        e("button", {
+          type: "button",
+          "data-action": "confirm-canvas-text-edit",
+          disabled: mutationDisabled || !textEditIntent,
+          onClick: confirmTextEdit,
+        }, "저장"),
+      ) : null,
       callbacks.canvasArchiveConfirmationOpen ? e("div", { role: "dialog", "aria-modal": "true", "aria-label": "캔버스 보관 확인", className: "canvas-archive-dialog", onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => handleModalKeyboard(event, cancelArchive) }, e("p", null, "이 캔버스를 읽기 전용으로 보관합니다."), e("button", { type: "button", "data-action": "cancel-canvas-archive", onClick: cancelArchive }, "취소"), e("button", { type: "button", "data-action": "confirm-canvas-archive", onClick: confirmArchive }, "보관")) : null,
     ),
   );
+}
+
+function canvasCatalogStateMessage(
+  catalog: DesktopCanvasCatalogSnapshot,
+  callbacks: {
+    readonly onCanvasCreate: () => void;
+    readonly onCanvasCatalogRetry?: () => void;
+  },
+): React.ReactElement {
+  const e = React.createElement;
+  if (catalog.state === "Empty") {
+    return e(
+      "div",
+      { className: "canvas-empty" },
+      e("strong", null, "아직 캔버스가 없습니다"),
+      e("p", null, "첫 캔버스를 만들어 문서와 파일을 자유롭게 배치하세요."),
+      e("button", { type: "button", "data-action": "create-canvas", onClick: callbacks.onCanvasCreate }, "새 캔버스 만들기"),
+    );
+  }
+  if (catalog.state === "Failed") {
+    return e(
+      "div",
+      { className: "canvas-empty", role: "alert" },
+      e("strong", null, "캔버스 목록을 불러오지 못했습니다"),
+      e("p", null, "로컬 저장소 상태를 확인한 뒤 다시 시도하세요."),
+      e("button", { type: "button", "data-action": "retry-canvas-catalog", onClick: callbacks.onCanvasCatalogRetry }, "다시 시도"),
+    );
+  }
+  const label = catalog.state === "Selecting" ? "선택한 캔버스를 여는 중입니다" : "캔버스 목록을 불러오는 중입니다";
+  return e("div", { className: "canvas-empty", role: "status" }, e("strong", null, label));
 }
 
 function canvasStateMessage(
@@ -564,16 +727,29 @@ function DesktopAttachments({
     readonly onAssetCancel: () => void;
     readonly onAssetPreview: () => void;
     readonly onAssetPreviewClose: () => void;
+    readonly onAssetQueryChange: (query: string) => void;
+    readonly onAssetMediaFilterChange: (filter: DesktopAssetMediaFilter) => void;
+    readonly onAssetLoadMore: () => void;
+    readonly onAssetRepair: (operationId: string) => void;
   };
 }): React.ReactElement {
   const e = React.createElement;
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("전체 파일");
   const assets = snapshot.page?.assets ?? [];
-  const selected = assets.find((asset) => asset.assetId === snapshot.selectedAssetId);
+  const query = snapshot.query ?? "";
+  const filter = snapshot.mediaFilter ?? "all";
+  const filtered = visibleDesktopAssets(snapshot);
+  const selected = filtered.find((asset) => asset.assetId === snapshot.selectedAssetId);
   const documentReferences: readonly DisplayReference[] = model.recentDocuments.map((document) => Object.freeze({
     category: "document" as const, identity: document.documentId, label: document.title,
     breadcrumbLabel: document.path.split("/").slice(0, -1).join(" / "), statusLabel: "", state: "resolved" as const,
+  }));
+  const linkedDocumentReferences: readonly DisplayReference[] = (snapshot.detail?.linkedDocuments ?? []).map((document) => Object.freeze({
+    category: "document" as const,
+    identity: document.documentId,
+    label: document.state === "available" ? document.title ?? "제목 없는 문서" : "찾을 수 없는 문서",
+    breadcrumbLabel: "",
+    statusLabel: document.state === "available" ? "" : "대상을 찾을 수 없습니다",
+    state: document.state === "available" ? "resolved" as const : "missing" as const,
   }));
   const selectedPresentation = selected ? presentAssetMetadata({
     mediaType: selected.mediaType,
@@ -584,14 +760,11 @@ function DesktopAttachments({
   }) : undefined;
   const currentDocumentLabel = documentReferences.find((reference) => reference.identity === snapshot.documentId)?.label
     ?? (snapshot.documentId ? "선택한 문서" : "연결 없음");
-  const filtered = useMemo(() => assets.filter((asset) => {
-    if (!asset.fileName.toLocaleLowerCase().includes(query.toLocaleLowerCase())) return false;
-    if (filter === "이미지") return asset.mediaType.startsWith("image/");
-    if (filter === "PDF") return asset.mediaType === "application/pdf";
-    if (filter === "문서") return /text|word|document/.test(asset.mediaType);
-    if (filter === "기타") return !/image|pdf|text|word|document/.test(asset.mediaType);
-    return true;
-  }), [assets, filter, query]);
+  const filterOptions: readonly (readonly [string, DesktopAssetMediaFilter])[] = Object.freeze([
+    ["전체 파일", "all"], ["이미지", "image"], ["PDF", "pdf"], ["문서", "document"], ["기타", "other"],
+  ]);
+  const filterLabel = filterOptions.find(([, value]) => value === filter)?.[0] ?? "전체 파일";
+  const scopeLabel = snapshot.scope === "Document" ? "현재 문서 파일" : "전체 파일 보관함";
 
   return surfaceShell(
     "assets",
@@ -605,17 +778,19 @@ function DesktopAttachments({
         className: "desktop-main assets-main",
         "data-asset-scope": snapshot.scope ?? "Unknown",
         "data-asset-import-state": snapshot.importState,
+        "data-asset-import-error-code": snapshot.importErrorCode ?? "",
+        "data-asset-surface-state": snapshot.state,
         "data-asset-detail-state": snapshot.detailState ?? "Idle",
         "data-asset-mutation-state": snapshot.mutationState ?? "Idle",
         "data-selected-asset-id": snapshot.selectedAssetId ?? "",
         "data-asset-reference-count": snapshot.detail?.referenceCount ?? -1,
         "data-asset-preview-state": snapshot.previewState ?? "Idle",
-        "data-asset-filter": filter,
+        "data-asset-filter": filterLabel,
       },
       e(
       "header",
       { className: "assets-heading" },
-      e("div", null, e("h1", null, "첨부 파일"), e("p", null, "문서와 연결된 파일을 한곳에서 확인하고 정리합니다.")),
+      e("div", null, e("h1", null, "첨부 파일"), e("p", null, scopeLabel), e("small", { className: "asset-query-scope" }, `현재 불러온 ${assets.length}개 파일에서 검색`)),
         e(
           "div",
           { className: "assets-heading-actions" },
@@ -635,10 +810,18 @@ function DesktopAttachments({
         ),
       ),
       snapshot.importState === "Completed" ? e("p", { className: "asset-operation-status", role: "status" }, "파일이 이 문서에 저장되었습니다.") : null,
-      snapshot.importState === "Importing" && snapshot.importOperationId ? e("div", { className: "asset-operation-status", role: "status" }, e("span", null, "파일을 가져오는 중입니다."), e("button", { type: "button", "data-action": "cancel-asset-import", onClick: callbacks.onAssetCancel }, "취소")) : null,
+      snapshot.importState === "Importing" && snapshot.importOperationId ? e("div", { className: "asset-operation-status", role: "status" }, e("span", null, "파일을 가져오는 중입니다."), (snapshot.importOperations?.length ?? 0) === 0 ? e("button", { type: "button", "data-action": "cancel-asset-import", onClick: callbacks.onAssetCancel }, "취소") : null) : null,
       snapshot.importState === "Cancelled" ? e("p", { className: "asset-operation-status", role: "status" }, "파일 가져오기를 취소했습니다.") : null,
       snapshot.importState === "Failed" ? e("div", { className: "asset-operation-status failed", role: "alert" }, e("span", null, "파일을 저장하지 못했습니다."), e("button", { type: "button", "data-action": "import-asset", onClick: callbacks.onAssetImport }, "다시 시도")) : null,
-      e("div", { className: "asset-controls" }, e("label", { className: "asset-search" }, e("span", { "aria-hidden": "true" }, "⌕"), e("input", { type: "search", "data-action": "search-assets", placeholder: "파일명으로 검색", value: query, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.currentTarget.value) })), e("div", { className: "asset-filters", role: "group", "aria-label": "파일 형식 필터" }, [["전체 파일", "all"], ["이미지", "image"], ["PDF", "pdf"], ["문서", "document"], ["기타", "other"]].map(([label, id]) => e("button", { key: id, type: "button", "data-action": `filter-assets-${id}`, className: filter === label ? "active" : "", "aria-pressed": filter === label, onClick: () => setFilter(label) }, label)))),
+      createAttachmentOperationListElement(snapshot, {
+        onCancel: callbacks.onAssetCancel,
+        onRepair: callbacks.onAssetRepair,
+        onStartNewAttempt: callbacks.onAssetImport,
+        cancelActionId: "cancel-asset-import",
+        repairActionId: "repair-asset-import",
+        restartActionId: "restart-asset-import",
+      }),
+      e("div", { className: "asset-controls" }, e("div", { className: "asset-search-group" }, e("label", { className: "asset-search" }, e("span", { "aria-hidden": "true" }, "⌕"), e("input", { type: "search", "data-action": "search-assets", "aria-label": "첨부 파일 목록 검색", placeholder: "현재 불러온 파일에서 검색", "aria-describedby": "asset-query-scope", value: query, onChange: (event: React.ChangeEvent<HTMLInputElement>) => callbacks.onAssetQueryChange(event.currentTarget.value) })), e("small", { id: "asset-query-scope" }, "검색은 현재 불러온 목록에 적용됩니다.")), e("div", { className: "asset-filters", role: "group", "aria-label": "파일 형식 필터" }, filterOptions.map(([label, id]) => e("button", { key: id, type: "button", "data-action": `filter-assets-${id}`, className: filter === id ? "active" : "", "aria-pressed": filter === id, onClick: () => callbacks.onAssetMediaFilterChange(id) }, label)))),
       e(
         "div",
         { className: "assets-layout" },
@@ -651,12 +834,13 @@ function DesktopAttachments({
           snapshot.state === "Failed" ? e("div", { className: "asset-empty", role: "alert" }, e("strong", null, "첨부 파일을 불러오지 못했습니다"), e("button", { type: "button", "data-action": "retry-assets", onClick: callbacks.onAssetRetry }, "다시 시도")) : null,
           snapshot.state === "Empty" ? e("div", { className: "asset-empty" }, e("strong", null, query ? "일치하는 파일이 없습니다" : snapshot.scope === "Workspace" ? "보관함에 파일이 없습니다" : "이 문서에 연결된 파일이 없습니다")) : null,
           snapshot.state === "Ready" && filtered.length === 0 ? e("div", { className: "asset-empty" }, e("strong", null, "일치하는 파일이 없습니다")) : null,
+          snapshot.scope === "Workspace" && snapshot.page?.nextCursor ? e("div", { className: "asset-page-more" }, e("small", null, "전체 결과 중 일부를 표시합니다."), e("button", { type: "button", "data-action": "load-more-assets", disabled: snapshot.state === "Loading", onClick: callbacks.onAssetLoadMore }, "파일 더 불러오기")) : null,
         ),
         e(
           "aside",
           { className: "asset-inspector", "aria-label": "파일 세부 정보" },
           selected
-            ? e(React.Fragment, null, e("div", { className: `asset-preview capability-${snapshot.detail?.previewCapability ?? "loading"}` }, e("span", null, selectedPresentation?.previewLabel ?? selectedPresentation?.mediaTypeLabel)), e("h2", null, selected.fileName), e("p", null, selected.label), detailRow("형식", selectedPresentation?.mediaTypeLabel ?? "파일"), detailRow("크기", selectedPresentation?.sizeLabel ?? "0 B"), detailRow("버전", snapshot.detail ? `${snapshot.detail.version}` : "불러오는 중"), detailRow("미리보기", selectedPresentation?.previewLabel ?? "미리보기 확인 필요"), snapshot.detail ? e("button", { type: "button", "data-action": "open-asset-preview", disabled: snapshot.previewState === "Loading", onClick: callbacks.onAssetPreview }, snapshot.previewState === "Loading" ? "미리보기 로딩 중" : "미리보기 열기") : null, detailRow("추출 상태", selectedPresentation?.extractionLabel ?? "추출 상태 확인 필요"), detailRow("연결 문서", snapshot.detail ? `${snapshot.detail.referenceCount}개` : currentDocumentLabel), snapshot.detail ? linkedDocumentActions(snapshot.detail.linkedDocumentIds, callbacks.onOpenDocument, documentReferences) : null, detailRow("상태", selectedPresentation?.statusLabel ?? "상태 확인 필요"), snapshot.scope === "Workspace" && snapshot.documentId ? e("button", { type: "button", className: "asset-unlink-button", "data-action": "link-asset", disabled: snapshot.mutationState === "Linking" || snapshot.detail?.linkedDocumentIds.includes(snapshot.documentId), onClick: callbacks.onAssetLink }, snapshot.detail?.linkedDocumentIds.includes(snapshot.documentId) ? "이미 연결됨" : snapshot.mutationState === "Linking" ? "연결 중" : "이 문서에 연결") : null, snapshot.scope === "Document" ? e("button", { type: "button", className: "asset-unlink-button", "data-action": "unlink-asset", disabled: snapshot.mutationState === "Unlinking", onClick: callbacks.onAssetUnlink }, snapshot.mutationState === "Unlinking" ? "연결 해제 중" : "이 문서에서 연결 해제") : null)
+            ? e(React.Fragment, null, e("div", { className: `asset-preview capability-${snapshot.detail?.previewCapability ?? "loading"}` }, e("span", null, selectedPresentation?.previewLabel ?? selectedPresentation?.mediaTypeLabel)), e("h2", null, selected.fileName), e("p", null, selected.label), detailRow("형식", selectedPresentation?.mediaTypeLabel ?? "파일"), detailRow("크기", selectedPresentation?.sizeLabel ?? "0 B"), detailRow("버전", snapshot.detail ? `${snapshot.detail.version}` : "불러오는 중"), detailRow("미리보기", selectedPresentation?.previewLabel ?? "미리보기 확인 필요"), snapshot.detail ? e("button", { type: "button", "data-action": "open-asset-preview", disabled: snapshot.previewState === "Loading", onClick: callbacks.onAssetPreview }, snapshot.previewState === "Loading" ? "미리보기 로딩 중" : "미리보기 열기") : null, detailRow("추출 상태", selectedPresentation?.extractionLabel ?? "추출 상태 확인 필요"), detailRow("연결 문서", snapshot.detail ? `${snapshot.detail.referenceCount}개` : currentDocumentLabel), snapshot.detail ? linkedDocumentActions(snapshot.detail.linkedDocumentIds, callbacks.onOpenDocument, linkedDocumentReferences) : null, detailRow("상태", selectedPresentation?.statusLabel ?? "상태 확인 필요"), snapshot.scope === "Workspace" && snapshot.documentId ? e("button", { type: "button", className: "asset-unlink-button", "data-action": "link-asset", disabled: snapshot.mutationState === "Linking" || snapshot.detail?.linkedDocumentIds.includes(snapshot.documentId), onClick: callbacks.onAssetLink }, snapshot.detail?.linkedDocumentIds.includes(snapshot.documentId) ? "이미 연결됨" : snapshot.mutationState === "Linking" ? "연결 중" : "이 문서에 연결") : null, snapshot.scope === "Document" ? e("button", { type: "button", className: "asset-unlink-button", "data-action": "unlink-asset", disabled: snapshot.mutationState === "Unlinking", onClick: callbacks.onAssetUnlink }, snapshot.mutationState === "Unlinking" ? "연결 해제 중" : "이 문서에서 연결 해제") : null)
             : e(React.Fragment, null, e("div", { className: "asset-preview empty" }, "파일"), e("h2", null, "파일을 선택하세요"), e("p", null, "선택한 파일의 메타데이터를 표시합니다."), detailRow("연결 문서", currentDocumentLabel), detailRow("상태", "선택되지 않음")),
         ),
       ),
@@ -697,7 +881,8 @@ function linkedDocumentActions(
           type: "button",
           "data-action": "open-linked-document",
           "data-linked-document-id": document.identity,
-          onClick: () => onOpenDocument(document.identity),
+          disabled: document.state !== "resolved",
+          onClick: document.state === "resolved" ? () => onOpenDocument(document.identity) : undefined,
         },
         document.label,
       )),
@@ -723,17 +908,13 @@ function surfaceShell(
     routeActions: { Home: callbacks.onHome, Search: callbacks.onSearch, Document: callbacks.onDocument, Graph: callbacks.onGraph, Canvas: callbacks.onCanvas, Assets: callbacks.onAssets, Backup: callbacks.onBackup },
     rootClassName: `exploration-shell ${active}-shell`,
     rootAttributes: { "data-exploration-surface": active, "data-exploration-state": state, "data-exploration-generation": String(generation) },
+    onSearchOpen: callbacks.onSearchOpen,
     onSearch: callbacks.onSearch,
     onCreateDocument: callbacks.onCreateDocument,
-    documentShortcuts: model.recentDocuments.slice(0, 5).map((document) => ({ label: document.title, actionId: "open-sidebar-document", onOpen: () => callbacks.onOpenDocument(document.documentId) })),
+    documentShortcuts: callbacks.documentShortcuts,
     savedStatus: "로컬 작업 공간",
     content,
   });
-}
-
-function graphPosition(index: number, count: number): { readonly x: number; readonly y: number } {
-  const angle = ((Math.PI * 2) / Math.max(count, 1)) * index - Math.PI / 2;
-  return { x: 500 + Math.cos(angle) * 310, y: 310 + Math.sin(angle) * 210 };
 }
 
 function detailRow(label: string, value: string): React.ReactElement {

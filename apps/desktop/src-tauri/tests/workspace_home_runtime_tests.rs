@@ -2,16 +2,27 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cabinet_adapters::durable_asset_metadata_catalog::DurableAssetMetadataCatalog;
+use cabinet_adapters::durable_canvas_repository::DurableCanvasRepository;
+use cabinet_adapters::local_create_document_revision_runtime::LocalCreateDocumentRevisionRuntime;
 use cabinet_adapters::local_workspace_home_projection::LocalWorkspaceHomeProjectionStore;
 use cabinet_desktop_shell::{
     DesktopLocalCommandPayloadDto, DesktopLocalCommandRequestDto, DesktopWorkspaceHomeRuntime,
 };
-use cabinet_domain::document::{DocumentId, DocumentPath, DocumentTitle};
+use cabinet_domain::asset::{
+    AssetCatalogRecord, AssetExtractionStatus, AssetFileName, AssetId, AssetMediaType,
+    AssetMetadata, AssetPreviewCapability,
+};
+use cabinet_domain::canvas::{Canvas, CanvasId, CanvasLifecycleState};
+use cabinet_domain::document::{DocumentBodyPolicy, DocumentId, DocumentPath, DocumentTitle};
 use cabinet_domain::workspace::WorkspaceId;
+use cabinet_ports::asset_metadata_catalog::AssetMetadataCatalog;
+use cabinet_ports::canvas_repository::{CanvasRecord, CanvasRepository};
 use cabinet_ports::workspace_home::{
     WorkspaceHomeBackupStatus, WorkspaceHomeDocumentProjection, WorkspaceHomeHealthStatus,
     WorkspaceHomeProjection,
 };
+use cabinet_usecases::create_document_revision::CreateDocumentRevisionInput;
 
 #[test]
 fn durable_workspace_home_runtime_returns_camel_case_ready_data() {
@@ -61,6 +72,84 @@ fn durable_workspace_home_runtime_returns_healthy_empty_for_missing_snapshot() {
     assert!(data.recent_documents.is_empty());
     assert_eq!(data.backup_status, "NeverCreated");
     assert_eq!(data.health_status, "Healthy");
+}
+
+#[test]
+fn durable_workspace_home_runtime_counts_actual_current_stores_and_excludes_archived_canvas() {
+    let temp = TempRoot::new("actual-summary");
+    let workspace = WorkspaceId::new("workspace-1").expect("workspace");
+    let other_workspace = WorkspaceId::new("workspace-2").expect("other workspace");
+    LocalCreateDocumentRevisionRuntime::new(
+        temp.path.clone(),
+        DocumentBodyPolicy::new(1024).expect("body policy"),
+    )
+    .execute(CreateDocumentRevisionInput::new(
+        "operation-1",
+        workspace.as_str(),
+        "doc-1",
+        "# Source",
+        "local-user",
+        "Create document",
+    ))
+    .expect("create document");
+
+    let mut assets = DurableAssetMetadataCatalog::new(temp.path.clone());
+    assets.put(&workspace, asset_record('a')).expect("asset a");
+    assets.put(&workspace, asset_record('b')).expect("asset b");
+    assets
+        .put(&other_workspace, asset_record('c'))
+        .expect("other asset");
+
+    let mut canvases = DurableCanvasRepository::new(temp.path.clone());
+    canvases
+        .create_canvas(
+            &workspace,
+            canvas_record("active", CanvasLifecycleState::Saved),
+        )
+        .expect("active canvas");
+    canvases
+        .create_canvas(
+            &workspace,
+            canvas_record("archived", CanvasLifecycleState::Archived),
+        )
+        .expect("archived canvas");
+    canvases
+        .create_canvas(
+            &other_workspace,
+            canvas_record("other", CanvasLifecycleState::Saved),
+        )
+        .expect("other canvas");
+
+    let data = DesktopWorkspaceHomeRuntime::new(temp.path.clone())
+        .execute(home_request(10))
+        .data
+        .expect("home data");
+    assert_eq!(data.document_count, 1);
+    assert_eq!(data.asset_count, 2);
+    assert_eq!(data.canvas_count, 1);
+
+    for workspace_entry in
+        fs::read_dir(temp.path.join("assets/metadata")).expect("asset workspaces")
+    {
+        for asset_entry in
+            fs::read_dir(workspace_entry.expect("workspace entry").path()).expect("asset files")
+        {
+            fs::write(
+                asset_entry.expect("asset entry").path(),
+                "schema\t999\nprivate-path",
+            )
+            .expect("corrupt asset catalog");
+        }
+    }
+
+    let degraded = DesktopWorkspaceHomeRuntime::new(temp.path.clone()).execute(home_request(10));
+    assert!(degraded.ok);
+    let degraded = degraded.data.expect("degraded home data");
+    assert_eq!(degraded.state, "Degraded");
+    assert_eq!(degraded.document_count, 1);
+    assert_eq!(degraded.asset_count, 0);
+    assert_eq!(degraded.canvas_count, 1);
+    assert_eq!(degraded.summary_unavailable, vec!["Assets"]);
 }
 
 #[test]
@@ -122,6 +211,35 @@ fn document(id: &str, title: &str, path: &str) -> WorkspaceHomeDocumentProjectio
         DocumentTitle::new(title).expect("title"),
         DocumentPath::new(path).expect("path"),
     )
+}
+
+fn asset_record(fill: char) -> AssetCatalogRecord {
+    AssetCatalogRecord::new(
+        AssetMetadata::new(
+            AssetId::from_sha256_hex(&fill.to_string().repeat(64)).expect("asset id"),
+            AssetFileName::new(&format!("{fill}.pdf")).expect("filename"),
+            AssetMediaType::new("application/pdf").expect("media type"),
+            10,
+        )
+        .expect("metadata"),
+        1,
+        AssetPreviewCapability::Pdf,
+        AssetExtractionStatus::NotRequested,
+    )
+    .expect("record")
+}
+
+fn canvas_record(id: &str, state: CanvasLifecycleState) -> CanvasRecord {
+    CanvasRecord::new(
+        Canvas::new(
+            CanvasId::new(id).expect("canvas id"),
+            Vec::new(),
+            Vec::new(),
+            state,
+        )
+        .expect("canvas"),
+    )
+    .expect("canvas record")
 }
 
 struct TempRoot {

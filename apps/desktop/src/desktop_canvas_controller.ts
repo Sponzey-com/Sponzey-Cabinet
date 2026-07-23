@@ -80,6 +80,7 @@ export function requestDesktopCanvasLoad(
     state: "Loading",
     canvasId: normalized,
     generation: snapshot.generation + 1,
+    canvas: snapshot.canvasId === normalized ? snapshot.canvas : undefined,
     selectedNodeIds: snapshot.canvasId === normalized ? snapshot.selectedNodeIds : Object.freeze([]),
     selectedEdgeId: snapshot.canvasId === normalized ? snapshot.selectedEdgeId : undefined,
     drag: undefined,

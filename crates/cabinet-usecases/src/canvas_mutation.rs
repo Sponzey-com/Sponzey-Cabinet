@@ -135,6 +135,28 @@ pub struct UpdateCanvasNodeGeometryInput {
     width: u32,
     height: u32,
 }
+
+pub const MAX_CANVAS_TEXT_CARD_CHARS: usize = 20_000;
+
+#[derive(Debug, Clone)]
+pub struct UpdateCanvasTextCardInput {
+    w: String,
+    c: String,
+    r: u64,
+    n: String,
+    text: String,
+}
+impl UpdateCanvasTextCardInput {
+    pub fn new(w: &str, c: &str, r: u64, n: &str, text: &str) -> Self {
+        Self {
+            w: w.into(),
+            c: c.into(),
+            r,
+            n: n.into(),
+            text: text.into(),
+        }
+    }
+}
 impl UpdateCanvasNodeGeometryInput {
     #[allow(clippy::too_many_arguments)]
     pub fn new(w: &str, c: &str, r: u64, n: &str, x: i32, y: i32, width: u32, height: u32) -> Self {
@@ -258,6 +280,11 @@ pub enum CanvasMutationProductEvent {
         edge_count: usize,
     },
     GeometryUpdated {
+        canvas_id: String,
+        revision: u64,
+        changed_node_count: usize,
+    },
+    TextCardUpdated {
         canvas_id: String,
         revision: u64,
         changed_node_count: usize,
@@ -574,6 +601,79 @@ impl UpdateCanvasNodeGeometryUsecase {
     }
 }
 
+pub struct UpdateCanvasTextCardUsecase;
+impl UpdateCanvasTextCardUsecase {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub fn execute<R: CanvasRepository, L: CanvasMutationProductLogger>(
+        &self,
+        input: UpdateCanvasTextCardInput,
+        repository: &mut R,
+        logger: &mut L,
+    ) -> Result<CanvasMutationOutput, CanvasMutationError> {
+        if input
+            .text
+            .chars()
+            .take(MAX_CANVAS_TEXT_CARD_CHARS + 1)
+            .count()
+            > MAX_CANVAS_TEXT_CARD_CHARS
+        {
+            return Err(CanvasMutationError::InvalidInput);
+        }
+        let text =
+            CanvasTextCard::new(&input.text).map_err(|_| CanvasMutationError::InvalidInput)?;
+        let (workspace, id, expected, current) = load(&input.w, &input.c, input.r, repository)?;
+        ensure_mutable(&current)?;
+        let target_id =
+            CanvasNodeId::new(&input.n).map_err(|_| CanvasMutationError::InvalidInput)?;
+        let mut found = false;
+        let mut target_mismatch = false;
+        let nodes = current
+            .canvas()
+            .nodes()
+            .iter()
+            .map(|node| {
+                if node.id() != &target_id {
+                    return node.clone();
+                }
+                found = true;
+                if !matches!(node.target(), CanvasNodeTarget::TextCard(_)) {
+                    target_mismatch = true;
+                    return node.clone();
+                }
+                CanvasNode::with_geometry(
+                    node.id().clone(),
+                    CanvasNodeTarget::TextCard(text.clone()),
+                    node.geometry(),
+                )
+                .expect("existing geometry and validated text")
+            })
+            .collect();
+        if !found {
+            return Err(CanvasMutationError::NodeNotFound);
+        }
+        if target_mismatch {
+            return Err(CanvasMutationError::NodeTargetMismatch);
+        }
+        let canvas = Canvas::new(
+            id.clone(),
+            nodes,
+            current.canvas().edges().to_vec(),
+            CanvasLifecycleState::Updated,
+        )
+        .map_err(map_canvas)?;
+        let next = save(workspace, expected, current, canvas, repository)?;
+        logger.write_product(CanvasMutationProductEvent::TextCardUpdated {
+            canvas_id: id.as_str().into(),
+            revision: next.revision().value(),
+            changed_node_count: 1,
+        });
+        Ok(CanvasMutationOutput { record: next })
+    }
+}
+
 pub struct UpdateCanvasViewportUsecase;
 impl UpdateCanvasViewportUsecase {
     pub const fn new() -> Self {
@@ -706,6 +806,7 @@ pub enum CanvasMutationError {
     InvalidInput,
     NotFound,
     NodeNotFound,
+    NodeTargetMismatch,
     EdgeNotFound,
     DocumentTargetNotFound,
     AssetTargetNotFound,
@@ -724,6 +825,7 @@ impl CanvasMutationError {
             Self::InvalidInput => "CANVAS_INVALID_INPUT",
             Self::NotFound => "CANVAS_NOT_FOUND",
             Self::NodeNotFound => "CANVAS_NODE_NOT_FOUND",
+            Self::NodeTargetMismatch => "CANVAS_NODE_TARGET_MISMATCH",
             Self::EdgeNotFound => "CANVAS_EDGE_NOT_FOUND",
             Self::DocumentTargetNotFound => "CANVAS_DOCUMENT_TARGET_NOT_FOUND",
             Self::AssetTargetNotFound => "CANVAS_ASSET_TARGET_NOT_FOUND",

@@ -3,9 +3,13 @@ use cabinet_adapters::durable_local_link_index::DurableLocalLinkIndex;
 use cabinet_adapters::durable_local_search_index::DurableLocalSearchIndex;
 use cabinet_adapters::durable_projection_work_repository::DurableProjectionWorkRepository;
 use cabinet_desktop_shell::{
-    DesktopDocumentAuthoringRequestDto, DesktopDocumentAuthoringRuntime, DesktopProjectionRuntime,
+    DesktopDocumentAuthoringRequestDto, DesktopDocumentAuthoringRuntime,
+    DesktopGlobalKnowledgeGraphRequestDto, DesktopGlobalKnowledgeGraphRuntime,
+    DesktopKnowledgeGraphRuntime, DesktopLocalCommandPayloadDto, DesktopLocalCommandRequestDto,
+    DesktopProjectionRuntime,
 };
 use cabinet_domain::document::{DocumentBodyPolicy, DocumentId};
+use cabinet_domain::graph::GraphEdgeKind;
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::graph_projection::GraphProjectionStore;
 use cabinet_ports::link_index::LinkIndex;
@@ -114,6 +118,175 @@ fn projection_runtime_materializes_search_links_and_graph_across_restart() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn saved_standard_markdown_link_projects_to_safe_local_and_global_graph_views() {
+    let temp = Temp::new("external-link-e2e");
+    let authoring = DesktopDocumentAuthoringRuntime::new(temp.path.clone(), 4096).unwrap();
+    assert!(
+        authoring
+            .execute(create(
+                "source",
+                "source.md",
+                "# Source\n[Private](https://user:secret@example.com/docs?q=private)",
+                "sv1",
+            ))
+            .ok
+    );
+    drop(authoring);
+
+    let projection = DesktopProjectionRuntime::new(temp.path.clone(), 4096, 20, 3).unwrap();
+    let projected = projection.run_once();
+    assert!(projected.ok);
+    assert_eq!(projected.ready_count, 3);
+    drop(projection);
+
+    let workspace = WorkspaceId::new("workspace-1").unwrap();
+    let source = DocumentId::new("source").unwrap();
+    let graph = DurableLocalGraphProjectionStore::new(temp.path.clone())
+        .get_projection(&workspace, &source)
+        .unwrap()
+        .expect("graph projection");
+    assert_eq!(
+        graph
+            .graph()
+            .edges()
+            .iter()
+            .filter(|edge| edge.kind() == GraphEdgeKind::ExternalReference)
+            .count(),
+        1
+    );
+
+    let local = DesktopKnowledgeGraphRuntime::new(temp.path.clone()).execute(
+        DesktopLocalCommandRequestDto {
+            command_name: "get_graph_projection".into(),
+            payload: DesktopLocalCommandPayloadDto::GraphProjection {
+                workspace_id: "workspace-1".into(),
+                document_id: "source".into(),
+                depth: 1,
+                direction: "outgoing".into(),
+                include_unresolved: true,
+                include_assets: true,
+                node_limit: 10,
+                edge_limit: 10,
+            },
+        },
+    );
+    assert!(local.ok, "local={local:?}");
+    let local_external = local
+        .data
+        .unwrap()
+        .nodes
+        .into_iter()
+        .find(|node| node.kind == "external_link")
+        .expect("local external node");
+    assert_eq!(local_external.label, "example.com");
+    assert!(!local_external.can_navigate);
+
+    let global = DesktopGlobalKnowledgeGraphRuntime::new(temp.path.clone()).execute(
+        DesktopGlobalKnowledgeGraphRequestDto {
+            workspace_id: "workspace-1".into(),
+            cursor: None,
+            include_unresolved: true,
+            include_assets: true,
+            projection_limit: 10,
+            node_limit: 10,
+            edge_limit: 10,
+        },
+    );
+    assert!(global.ok, "global={global:?}");
+    let global_external = global
+        .data
+        .unwrap()
+        .nodes
+        .into_iter()
+        .find(|node| node.kind == "external_link")
+        .expect("global external node");
+    assert_eq!(global_external.label, "example.com");
+    assert!(!global_external.can_navigate);
+}
+
+#[test]
+fn saved_relative_markdown_links_resolve_from_source_path_across_restart() {
+    let temp = Temp::new("relative-link-e2e");
+    let authoring = DesktopDocumentAuthoringRuntime::new(temp.path.clone(), 4096).unwrap();
+    assert!(
+        authoring
+            .execute(create(
+                "target",
+                "area/shared/note.md",
+                "# Shared Note\nbody",
+                "tv1",
+            ))
+            .ok
+    );
+    assert!(
+        authoring
+            .execute(create(
+                "source",
+                "area/current/source.md",
+                "# Source\n[Shared](../shared/note.md#details) [Missing](missing.md)",
+                "sv1",
+            ))
+            .ok
+    );
+    drop(authoring);
+
+    let projection = DesktopProjectionRuntime::new(temp.path.clone(), 4096, 20, 3).unwrap();
+    let projected = projection.run_once();
+    assert!(projected.ok);
+    assert_eq!(projected.ready_count, 6);
+    drop(projection);
+
+    let workspace = WorkspaceId::new("workspace-1").unwrap();
+    let source = DocumentId::new("source").unwrap();
+    let graph = DurableLocalGraphProjectionStore::new(temp.path.clone())
+        .get_projection(&workspace, &source)
+        .unwrap()
+        .expect("graph projection");
+    assert_eq!(graph.graph().edges().len(), 2);
+    assert!(
+        graph
+            .graph()
+            .nodes()
+            .iter()
+            .any(|node| node.id() == "target")
+    );
+    assert!(graph.graph().nodes().iter().any(|node| {
+        node.kind() == cabinet_domain::graph::GraphNodeKind::UnresolvedLink
+            && node.id() != "missing.md"
+    }));
+
+    let links = DurableLocalLinkIndex::new(temp.path.clone())
+        .get_document_links(&workspace, &source)
+        .unwrap()
+        .expect("link projection");
+    assert_eq!(links.backlinks().len(), 1);
+    assert_eq!(links.backlinks()[0].target_document_id().as_str(), "target");
+    assert_eq!(links.unresolved_links().len(), 1);
+
+    let local = DesktopKnowledgeGraphRuntime::new(temp.path.clone()).execute(
+        DesktopLocalCommandRequestDto {
+            command_name: "get_graph_projection".into(),
+            payload: DesktopLocalCommandPayloadDto::GraphProjection {
+                workspace_id: "workspace-1".into(),
+                document_id: "source".into(),
+                depth: 1,
+                direction: "outgoing".into(),
+                include_unresolved: true,
+                include_assets: false,
+                node_limit: 10,
+                edge_limit: 10,
+            },
+        },
+    );
+    assert!(local.ok, "local={local:?}");
+    let data = local.data.unwrap();
+    assert!(data.nodes.iter().any(|node| node.label == "Shared Note"));
+    assert!(data.nodes.iter().any(|node| {
+        node.kind == "unresolved_link" && node.label == "missing" && !node.can_navigate
+    }));
 }
 
 #[test]

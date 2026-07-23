@@ -50,6 +50,70 @@ fn catalog_returns_unresolved_ambiguous_and_isolates_workspaces() {
 }
 
 #[test]
+fn catalog_resolves_relative_paths_from_source_and_rejects_workspace_escape() {
+    let t = Temp::new("relative");
+    let workspace = WorkspaceId::new("w").unwrap();
+    let mut catalog = DurableDocumentLinkCatalog::new(t.path.clone());
+    catalog
+        .upsert(
+            &workspace,
+            record("source", "Source", "area/current/source.md"),
+        )
+        .unwrap();
+    catalog
+        .upsert(
+            &workspace,
+            record("sibling", "Sibling", "area/current/sibling.md"),
+        )
+        .unwrap();
+    catalog
+        .upsert(
+            &workspace,
+            record("shared", "Shared", "area/shared/note.md"),
+        )
+        .unwrap();
+    catalog
+        .upsert(
+            &workspace,
+            record("duplicate", "Duplicate", "other/sibling.md"),
+        )
+        .unwrap();
+
+    for (target, expected) in [
+        ("sibling.md", "sibling"),
+        ("../shared/note.md#details", "shared"),
+    ] {
+        match catalog
+            .resolve_relative(&workspace, &DocumentId::new("source").unwrap(), target)
+            .unwrap()
+        {
+            LinkTargetResolution::Resolved(value) => {
+                assert_eq!(value.document_id().as_str(), expected)
+            }
+            _ => panic!("expected resolved relative target"),
+        }
+    }
+    assert!(matches!(
+        catalog
+            .resolve_relative(
+                &workspace,
+                &DocumentId::new("source").unwrap(),
+                "missing.md",
+            )
+            .unwrap(),
+        LinkTargetResolution::Unresolved(_)
+    ));
+    assert_eq!(
+        catalog.resolve_relative(
+            &workspace,
+            &DocumentId::new("source").unwrap(),
+            "../../../outside.md",
+        ),
+        Err(LinkTargetResolverError::InvalidTarget)
+    );
+}
+
+#[test]
 fn catalog_remove_is_idempotent_isolated_and_durable_across_restart() {
     let t = Temp::new("remove");
     let workspace = WorkspaceId::new("w").unwrap();

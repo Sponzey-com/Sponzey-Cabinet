@@ -76,6 +76,19 @@ test("Tauri discovery transport fails safely for throw, malformed response, and 
   }
 });
 
+test("Tauri discovery transport rejects graph nodes without safe display fields", async () => {
+  const transport = createTauriDiscoveryTransport(async () => ({
+    ...graphResponse(),
+    data: { ...graphResponse().data, nodes: [{ id: "private-id", kind: "document" }] },
+  }));
+
+  assert.deepEqual(await transport(graphEnvelope()), {
+    ok: false,
+    errorCode: "COMMAND_BRIDGE_FAILED",
+    retryable: false,
+  });
+});
+
 test("Tauri discovery transport maps document asset metadata query and validates response", async () => {
   const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
   const transport = createTauriDiscoveryTransport(async (command, args) => {
@@ -103,6 +116,33 @@ test("Tauri discovery transport maps document asset metadata query and validates
   }]);
 });
 
+test("Tauri discovery transport maps full-text document search to the native search runtime", async () => {
+  const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+  const transport = createTauriDiscoveryTransport(async (command, args) => {
+    calls.push({ command, args });
+    return {
+      ok: true,
+      data: {
+        queryName: "search-documents",
+        workspaceId: "workspace-1",
+        text: "본문 키워드",
+        results: [{ workspaceId: "workspace-1", documentId: "doc-1", title: "문서", path: "notes/doc.md", snippet: "본문 키워드", score: 1 }],
+      },
+    };
+  });
+
+  const response = await transport({
+    commandName: "search_documents",
+    payload: { queryName: "search-documents", workspaceId: "workspace-1", text: "본문 키워드", limit: 50 },
+  });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(calls, [{
+    command: "search_desktop_documents",
+    args: { request: { workspace_id: "workspace-1", text: "본문 키워드", limit: 50 } },
+  }]);
+});
+
 function graphEnvelope() {
   return {
     commandName: "get_graph_projection" as const,
@@ -126,7 +166,7 @@ function graphResponse() {
     data: {
       centerDocumentId: "doc-1",
       status: "clean",
-      nodes: [{ id: "doc-1", kind: "document" }],
+      nodes: [{ id: "doc-1", kind: "document", label: "문서 1", breadcrumbLabel: "설계", availability: "available", canNavigate: true }],
       edges: [],
       stats: { candidateCount: 1, filteredCount: 0 },
       freshnessRevision: "version-2",

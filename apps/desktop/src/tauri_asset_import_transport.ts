@@ -1,5 +1,8 @@
 import type { TauriInvoke } from "./tauri_home_transport.ts";
 
+const importStates = ["selected", "validating", "staging", "hashing", "publishing_object", "persisting_metadata", "preparing_revision", "linking", "associating", "projecting", "verifying", "completed", "validation_failed", "staging_failed", "object_publish_failed", "metadata_persist_failed", "link_failed", "cancelling", "cancelled", "conflict", "recovery_required", "cleanup_required", "failed"] as const;
+export type DesktopAssetImportState = typeof importStates[number];
+
 export interface DesktopAssetImportDescriptor {
   readonly handle: string;
   readonly fileName: string;
@@ -37,14 +40,17 @@ export interface DesktopAssetImportRequest {
 export interface DesktopAssetImportResult {
   readonly operationId: string;
   readonly assetId?: string;
-  readonly state: "selected" | "completed";
+  readonly state: DesktopAssetImportState;
+  readonly errorCode?: string;
+  readonly retryable: boolean;
+  readonly repairRequired: boolean;
 }
 export interface DesktopAssetImportStatusRequest {
   readonly workspaceId: string;
   readonly operationId: string;
 }
 export interface DesktopAssetImportStatus extends DesktopAssetImportResult {
-  readonly state: "selected" | "validating" | "staging" | "hashing" | "publishing_object" | "persisting_metadata" | "linking" | "completed" | "validation_failed" | "staging_failed" | "object_publish_failed" | "metadata_persist_failed" | "link_failed" | "cancelling" | "cancelled" | "cleanup_required";
+  readonly state: DesktopAssetImportState;
 }
 
 export interface DesktopAssetDetailRequest {
@@ -87,6 +93,12 @@ export interface DesktopAssetDetail {
   readonly extractionStatus: "not_requested" | "pending" | "ready" | "unsupported" | "failed";
   readonly referenceCount: number;
   readonly linkedDocumentIds: readonly string[];
+  readonly linkedDocuments: readonly DesktopAssetLinkedDocument[];
+}
+export interface DesktopAssetLinkedDocument {
+  readonly documentId: string;
+  readonly title?: string;
+  readonly state: "available" | "missing";
 }
 export interface DesktopAssetPreview {
   readonly assetId: string;
@@ -143,23 +155,30 @@ export function createTauriAssetImportTransport(invoke: TauriInvoke): DesktopAss
           operationId: response.operationId,
           ...(response.assetId ? { assetId: response.assetId } : {}),
           state: response.state,
+          ...(response.errorCode ? { errorCode: response.errorCode } : {}),
+          retryable: response.retryable === true,
+          repairRequired: response.repairRequired === true,
         });
       }
       throw responseError(response);
     },
     async getImportStatus(request) {
       const response = await safeInvoke(invoke, "get_desktop_asset_import_status", { request });
-      if (isImportStatusSuccess(response)) return Object.freeze({ operationId: response.operationId, state: response.state });
+      if (isImportStatusSuccess(response)) return freezeImportStatus(response);
       throw responseError(response);
     },
     async cancelImport(request) {
       const response = await safeInvoke(invoke, "cancel_desktop_asset_import", { request });
-      if (isImportStatusSuccess(response)) return Object.freeze({ operationId: response.operationId, state: response.state });
+      if (isImportStatusSuccess(response)) return freezeImportStatus(response);
       throw responseError(response);
     },
     async getDetail(request) {
       const response = await safeInvoke(invoke, "get_desktop_asset_detail", { request });
-      if (isDetailSuccess(response)) return Object.freeze({ ...response.data, linkedDocumentIds: Object.freeze([...response.data.linkedDocumentIds]) });
+      if (isDetailSuccess(response)) return Object.freeze({
+        ...response.data,
+        linkedDocumentIds: Object.freeze([...response.data.linkedDocumentIds]),
+        linkedDocuments: Object.freeze(response.data.linkedDocuments.map((document) => Object.freeze({ ...document }))),
+      });
       throw responseError(response);
     },
     async getPreview(request) {
@@ -244,23 +263,63 @@ function isImportSuccess(value: unknown): value is {
   readonly ok: true;
   readonly operationId: string;
   readonly assetId?: string;
-  readonly state: "selected" | "completed";
+  readonly state: DesktopAssetImportState;
+  readonly errorCode?: string;
+  readonly retryable?: boolean;
+  readonly repairRequired?: boolean;
 } {
   return isRecord(value) && value.ok === true
     && typeof value.operationId === "string" && value.operationId.length > 0
     && (value.assetId === undefined || (typeof value.assetId === "string" && /^[a-f0-9]{64}$/.test(value.assetId)))
-    && (value.state === "selected" || value.state === "completed")
+    && importStates.includes(value.state as DesktopAssetImportState)
+    && (value.errorCode === undefined || typeof value.errorCode === "string")
+    && (value.retryable === undefined || typeof value.retryable === "boolean")
+    && (value.repairRequired === undefined || typeof value.repairRequired === "boolean")
+    && (value.state !== "recovery_required" || value.repairRequired === true)
     && !("path" in value) && !("bytes" in value);
 }
 
-const importStates = ["selected", "validating", "staging", "hashing", "publishing_object", "persisting_metadata", "linking", "completed", "validation_failed", "staging_failed", "object_publish_failed", "metadata_persist_failed", "link_failed", "cancelling", "cancelled", "cleanup_required"] as const;
-function isImportStatusSuccess(value: unknown): value is { readonly ok: true; readonly operationId: string; readonly state: DesktopAssetImportStatus["state"] } {
+function isImportStatusSuccess(value: unknown): value is {
+  readonly ok: true;
+  readonly operationId: string;
+  readonly assetId?: string;
+  readonly state: DesktopAssetImportStatus["state"];
+  readonly errorCode?: string;
+  readonly retryable?: boolean;
+  readonly repairRequired?: boolean;
+} {
   return isRecord(value) && value.ok === true && typeof value.operationId === "string"
-    && importStates.includes(value.state as DesktopAssetImportStatus["state"]);
+    && importStates.includes(value.state as DesktopAssetImportStatus["state"])
+    && (value.assetId === undefined || (typeof value.assetId === "string" && /^[a-f0-9]{64}$/.test(value.assetId)))
+    && (value.errorCode === undefined || typeof value.errorCode === "string")
+    && (value.retryable === undefined || typeof value.retryable === "boolean")
+    && (value.repairRequired === undefined || typeof value.repairRequired === "boolean")
+    && (value.state !== "recovery_required" || value.repairRequired !== false)
+    && !("path" in value) && !("bytes" in value);
+}
+
+function freezeImportStatus(value: {
+  readonly operationId: string;
+  readonly assetId?: string;
+  readonly state: DesktopAssetImportState;
+  readonly errorCode?: string;
+  readonly retryable?: boolean;
+  readonly repairRequired?: boolean;
+}): DesktopAssetImportStatus {
+  return Object.freeze({
+    operationId: value.operationId,
+    ...(value.assetId ? { assetId: value.assetId } : {}),
+    state: value.state,
+    ...(value.errorCode ? { errorCode: value.errorCode } : {}),
+    retryable: value.retryable === true,
+    repairRequired: value.repairRequired === true,
+  });
 }
 
 function isDetailSuccess(value: unknown): value is { readonly ok: true; readonly data: DesktopAssetDetail } {
-  if (!isRecord(value) || value.ok !== true || !isRecord(value.data)) return false;
+  if (!isRecord(value) || value.ok !== true || !isRecord(value.data)
+    || "path" in value.data || "bytes" in value.data || "body" in value.data
+    || "versionToken" in value.data || "snapshotRef" in value.data) return false;
   const data = value.data;
   return typeof data.assetId === "string" && /^[a-f0-9]{64}$/.test(data.assetId)
     && typeof data.fileName === "string" && typeof data.mediaType === "string"
@@ -268,7 +327,28 @@ function isDetailSuccess(value: unknown): value is { readonly ok: true; readonly
     && ["image", "pdf", "text", "unsupported"].includes(String(data.previewCapability))
     && ["not_requested", "pending", "ready", "unsupported", "failed"].includes(String(data.extractionStatus))
     && isNonNegativeInteger(data.referenceCount)
-    && Array.isArray(data.linkedDocumentIds) && data.linkedDocumentIds.every((id) => typeof id === "string");
+    && Array.isArray(data.linkedDocumentIds) && data.linkedDocumentIds.length <= 200
+    && data.linkedDocumentIds.every(isSafeDocumentIdentity)
+    && Array.isArray(data.linkedDocuments)
+    && data.linkedDocuments.length === data.linkedDocumentIds.length
+    && data.linkedDocuments.every((document, index) => isLinkedDocument(document)
+      && document.documentId === data.linkedDocumentIds[index]);
+}
+
+function isLinkedDocument(value: unknown): value is DesktopAssetLinkedDocument {
+  if (!isRecord(value) || !isSafeDocumentIdentity(value.documentId)
+    || !["available", "missing"].includes(String(value.state))
+    || "path" in value || "body" in value || "versionToken" in value || "snapshotRef" in value) return false;
+  if (value.state === "missing") return value.title === undefined;
+  return typeof value.title === "string"
+    && value.title.trim() === value.title
+    && value.title.length > 0
+    && Array.from(value.title).length <= 120
+    && !Array.from(value.title).some((character) => /[\u0000-\u001f\u007f]/.test(character));
+}
+
+function isSafeDocumentIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 function isPreviewSuccess(value: unknown): value is { readonly ok: true; readonly data: DesktopAssetPreview } {

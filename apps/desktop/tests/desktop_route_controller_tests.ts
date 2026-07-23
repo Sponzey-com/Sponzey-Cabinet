@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createDesktopGraphScopeIntent,
   createDesktopRouteControllerState,
   graphQueryScopeForRoute,
   transitionDesktopRoute,
@@ -15,6 +16,23 @@ const graphRoute = { kind: "Graph", centerDocumentId: "doc-1", scope: "Local" } 
 test("Graph route scope maps explicitly to the graph query boundary", () => {
   assert.equal(graphQueryScopeForRoute({ kind: "Graph", scope: "Global" }), "global");
   assert.equal(graphQueryScopeForRoute(graphRoute), "local");
+});
+
+test("Graph scope intent preserves a local center and removes it from global route", () => {
+  assert.deepEqual(
+    createDesktopGraphScopeIntent("local", "workspace-1", "doc-current"),
+    {
+      route: { kind: "Graph", scope: "Local", centerDocumentId: "doc-current" },
+      selection: { workspaceId: "workspace-1", documentId: "doc-current", originRoute: "Graph" },
+    },
+  );
+  assert.deepEqual(
+    createDesktopGraphScopeIntent("global", "workspace-1", "doc-current"),
+    {
+      route: { kind: "Graph", scope: "Global" },
+      selection: { workspaceId: "workspace-1", documentId: "doc-current", originRoute: "Graph" },
+    },
+  );
 });
 
 test("moves immediately when no operation blocks navigation", () => {

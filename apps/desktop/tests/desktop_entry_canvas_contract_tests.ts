@@ -23,6 +23,8 @@ test("desktop entry routes Canvas interactions through controller and typed dura
   assert.match(source, /kind: "add_asset_node"/);
   assert.match(source, /canvasRenameDraft/);
   assert.match(source, /onCanvasRenameRequest/);
+  assert.match(source, /kind:\s*"update_text_card"/);
+  assert.match(source, /onCanvasTextEditRequest/);
   assert.match(source, /kind: "rename", title/);
   assert.doesNotMatch(source, /kind: "rename", title: "Knowledge Canvas"/);
   assert.match(source, /kind: "Assets", assetId/);

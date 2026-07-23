@@ -6,14 +6,22 @@ import {
 import {
   DesktopAssetImportTransportError,
   type DesktopAssetImportPickerClient,
+  type DesktopAssetImportSelection,
   type DesktopAssetDetail,
   type DesktopAssetPreview,
   type DesktopAssetImportStatus,
   type DesktopWorkspaceAssetsPage,
 } from "./tauri_asset_import_transport.ts";
+import {
+  applyAttachmentFileStatus,
+  createAttachmentFileSnapshot,
+  type AttachmentFileSnapshot,
+} from "./attachment_operation_presenter.ts";
+import type { DesktopProjectionTransport } from "./tauri_projection_transport.ts";
 
 export type DesktopAssetSurfaceState = "Idle" | "Loading" | "Ready" | "Empty" | "Failed";
 export type DesktopAssetImportState = "Idle" | "Selecting" | "Importing" | "Completed" | "Cancelled" | "Failed";
+export type DesktopAssetMediaFilter = "all" | "image" | "pdf" | "document" | "other";
 
 export interface DesktopAssetSurfaceSnapshot {
   readonly state: DesktopAssetSurfaceState;
@@ -23,12 +31,15 @@ export interface DesktopAssetSurfaceSnapshot {
   readonly generation: number;
   readonly importState: DesktopAssetImportState;
   readonly importGeneration: number;
+  readonly query: string;
+  readonly mediaFilter: DesktopAssetMediaFilter;
   readonly page?: DesktopAssetPage;
   readonly selectedAssetId?: string;
   readonly errorCode?: string;
   readonly retryable?: boolean;
   readonly importErrorCode?: string;
   readonly importOperationId?: string;
+  readonly importOperations?: readonly AttachmentFileSnapshot[];
   readonly detailState?: "Idle" | "Loading" | "Ready" | "Failed";
   readonly detail?: DesktopAssetDetail;
   readonly mutationState?: "Idle" | "Linking" | "Unlinking" | "Failed";
@@ -38,6 +49,9 @@ export interface DesktopAssetSurfaceSnapshot {
   readonly openState?: "Idle" | "Opening" | "Opened" | "OpenFailed";
   readonly openGeneration?: number;
   readonly openErrorCode?: string;
+  readonly dropState?: "Idle" | "Entered";
+  readonly dropFileCount?: number;
+  readonly requestedCursor?: string;
 }
 
 export interface DesktopAssetPage {
@@ -53,6 +67,18 @@ export interface DesktopAssetPlacementOption {
   readonly label: string;
 }
 
+export interface DesktopAssetImportReadbackPolicy {
+  readonly attempts: number;
+  readonly intervalMs: number;
+  readonly delay: (milliseconds: number) => Promise<void>;
+}
+
+const defaultAssetImportReadbackPolicy: DesktopAssetImportReadbackPolicy = Object.freeze({
+  attempts: 100,
+  intervalMs: 25,
+  delay: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+});
+
 export function createDesktopAssetPlacementOptions(
   snapshot: DesktopAssetSurfaceSnapshot,
 ): readonly DesktopAssetPlacementOption[] {
@@ -63,7 +89,59 @@ export function createDesktopAssetPlacementOptions(
 }
 
 export function createDesktopAssetSnapshot(workspaceId: string): DesktopAssetSurfaceSnapshot {
-  return Object.freeze({ state: "Idle", scope: "Workspace", workspaceId, generation: 0, importState: "Idle", importGeneration: 0 });
+  return Object.freeze({ state: "Idle", scope: "Workspace", workspaceId, generation: 0, importState: "Idle", importGeneration: 0, query: "", mediaFilter: "all", importOperations: Object.freeze([]), dropState: "Idle", dropFileCount: 0 });
+}
+
+export function setDesktopAssetQuery(
+  snapshot: DesktopAssetSurfaceSnapshot,
+  query: string,
+): DesktopAssetSurfaceSnapshot {
+  return reconcileDesktopAssetFilterSelection(Object.freeze({ ...snapshot, query }));
+}
+
+export function setDesktopAssetMediaFilter(
+  snapshot: DesktopAssetSurfaceSnapshot,
+  mediaFilter: DesktopAssetMediaFilter,
+): DesktopAssetSurfaceSnapshot {
+  return reconcileDesktopAssetFilterSelection(Object.freeze({ ...snapshot, mediaFilter }));
+}
+
+export function visibleDesktopAssets(
+  snapshot: DesktopAssetSurfaceSnapshot,
+): DocumentAssetsPage["assets"] {
+  const query = (snapshot.query ?? "").trim().toLocaleLowerCase();
+  const mediaFilter = snapshot.mediaFilter ?? "all";
+  return Object.freeze((snapshot.page?.assets ?? []).filter((asset) => {
+    if (query && !`${asset.fileName}\n${asset.label}`.toLocaleLowerCase().includes(query)) return false;
+    if (mediaFilter === "image") return asset.mediaType.startsWith("image/");
+    if (mediaFilter === "pdf") return asset.mediaType === "application/pdf";
+    if (mediaFilter === "document") return /text|word|document/.test(asset.mediaType);
+    if (mediaFilter === "other") return !/image|pdf|text|word|document/.test(asset.mediaType);
+    return true;
+  }));
+}
+
+function reconcileDesktopAssetFilterSelection(
+  snapshot: DesktopAssetSurfaceSnapshot,
+): DesktopAssetSurfaceSnapshot {
+  const visible = visibleDesktopAssets(snapshot);
+  if (visible.some((asset) => asset.assetId === snapshot.selectedAssetId)) return snapshot;
+  return clearDesktopAssetSelection(snapshot, visible[0]?.assetId);
+}
+
+export function applyDesktopAssetDragState(
+  snapshot: DesktopAssetSurfaceSnapshot,
+  event: { readonly state: "entered" | "left" | "dropped"; readonly fileCount: number },
+): DesktopAssetSurfaceSnapshot {
+  if (snapshot.scope !== "Document" || snapshot.importState === "Selecting" || snapshot.importState === "Importing") {
+    return snapshot;
+  }
+  const result = Object.freeze({
+    ...snapshot,
+    dropState: event.state === "entered" ? "Entered" : "Idle",
+    dropFileCount: event.state === "entered" ? event.fileCount : 0,
+  });
+  return result;
 }
 
 export function requestDesktopAssetLoad(
@@ -81,6 +159,8 @@ export function requestDesktopAssetLoad(
       generation: snapshot.generation + 1,
       importState: "Idle",
       importErrorCode: undefined,
+      dropState: "Idle",
+      dropFileCount: 0,
     });
   }
   const documentChanged = snapshot.documentId !== normalizedDocumentId;
@@ -93,6 +173,9 @@ export function requestDesktopAssetLoad(
     generation: snapshot.generation + 1,
     importState: documentChanged ? "Idle" : snapshot.importState,
     importErrorCode: documentChanged ? undefined : snapshot.importErrorCode,
+    importOperations: documentChanged ? Object.freeze([]) : snapshot.importOperations ?? Object.freeze([]),
+    dropState: "Idle",
+    dropFileCount: 0,
   });
 }
 
@@ -108,6 +191,39 @@ export function requestDesktopWorkspaceAssetLoad(
     generation: snapshot.generation + 1,
     errorCode: undefined,
     retryable: undefined,
+    requestedCursor: undefined,
+  });
+}
+
+function clearDesktopAssetSelection(
+  snapshot: DesktopAssetSurfaceSnapshot,
+  selectedAssetId: string | undefined,
+): DesktopAssetSurfaceSnapshot {
+  return Object.freeze({
+    ...snapshot,
+    selectedAssetId,
+    detailState: "Idle",
+    detail: undefined,
+    mutationState: "Idle",
+    previewState: "Idle",
+    preview: undefined,
+    openState: "Idle",
+    openErrorCode: undefined,
+  });
+}
+
+export function requestDesktopWorkspaceAssetNextPage(
+  snapshot: DesktopAssetSurfaceSnapshot,
+): DesktopAssetSurfaceSnapshot {
+  const cursor = snapshot.page?.nextCursor;
+  if (snapshot.scope !== "Workspace" || snapshot.state === "Loading" || !cursor) return snapshot;
+  return Object.freeze({
+    ...snapshot,
+    state: "Loading",
+    generation: snapshot.generation + 1,
+    requestedCursor: cursor,
+    errorCode: undefined,
+    retryable: undefined,
   });
 }
 
@@ -118,6 +234,9 @@ export function beginDesktopAssetImport(snapshot: DesktopAssetSurfaceSnapshot): 
     importState: "Selecting",
     importGeneration: snapshot.importGeneration + 1,
     importErrorCode: undefined,
+    importOperations: Object.freeze([]),
+    dropState: "Idle",
+    dropFileCount: 0,
   });
 }
 
@@ -127,67 +246,163 @@ export async function importDesktopDocumentAssets(
   selecting: DesktopAssetSurfaceSnapshot,
   operationIdSource: () => string,
   onProgress: (snapshot: DesktopAssetSurfaceSnapshot) => void,
+  preparedSelection?: DesktopAssetImportSelection,
+  readbackPolicy: DesktopAssetImportReadbackPolicy = defaultAssetImportReadbackPolicy,
 ): Promise<DesktopAssetSurfaceSnapshot> {
   if (selecting.importState !== "Selecting" || !selecting.documentId) return selecting;
   try {
-    const selection = await importClient.selectFiles();
+    const selection = preparedSelection ?? await importClient.selectFiles();
     if (selection.cancelled || selection.files.length === 0) {
       return Object.freeze({ ...selecting, importState: "Idle", importErrorCode: undefined });
     }
-    const importing = Object.freeze({ ...selecting, importState: "Importing" as const });
+    let operations = Object.freeze(selection.files.map((file, index) => createAttachmentFileSnapshot({
+      generation: selecting.importGeneration,
+      operationId: `pending-${index + 1}`,
+      fileName: file.fileName,
+      byteSize: file.byteSize,
+      state: "selected",
+    })));
+    let importing = Object.freeze({ ...selecting, importState: "Importing" as const, importOperations: operations });
     onProgress(importing);
     const importedAssetIds: string[] = [];
     const importedFileNames: string[] = [];
-    for (const file of selection.files) {
+    const importedIndexes: number[] = [];
+    for (const [index, file] of selection.files.entries()) {
       const attachmentOperationId = operationIdSource().trim();
       if (!attachmentOperationId) {
-        throw new DesktopAssetImportTransportError("asset_import.invalid_operation_id", false);
+        operations = replaceOperation(operations, index, Object.freeze({
+          ...operations[index]!,
+          ...applyAttachmentFileStatus(
+            Object.freeze({ ...operations[index]!, operationId: "" }),
+            { generation: selecting.importGeneration, operationId: "", state: "failed", errorCode: "asset_import.invalid_operation_id" },
+          ),
+        }));
+        importing = Object.freeze({ ...importing, importOperations: operations, importErrorCode: "asset_import.invalid_operation_id" });
+        onProgress(importing);
+        continue;
       }
-      const current = await queryClient.getCurrentDocument({
-        queryName: "get-current-document",
-        workspaceId: selecting.workspaceId,
-        documentId: selecting.documentId,
-      });
-      const expectedCurrentVersionToken = current.versionId.trim();
-      if (!expectedCurrentVersionToken) {
-        throw new DesktopAssetImportTransportError("asset_import.invalid_current_version", false);
-      }
-      let result: DesktopAssetImportStatus = await importClient.importFile({
-        workspaceId: selecting.workspaceId,
-        documentId: selecting.documentId,
-        handle: file.handle,
-        label: file.fileName,
-        attachmentOperationId,
-        expectedCurrentVersionToken,
-      });
-      onProgress(Object.freeze({ ...importing, importOperationId: result.operationId }));
-      for (let poll = 0; result.state !== "completed" && poll < 200; poll += 1) {
-        result = await importClient.getImportStatus({
+      try {
+        const current = await queryClient.getCurrentDocument({
+          queryName: "get-current-document",
           workspaceId: selecting.workspaceId,
-          operationId: result.operationId,
+          documentId: selecting.documentId,
         });
-        if (!["selected", "validating", "staging", "hashing", "publishing_object", "persisting_metadata", "linking", "completed"].includes(result.state)) {
-          throw new DesktopAssetImportTransportError(`asset_import.${result.state}`, false);
+        const expectedCurrentVersionToken = current.versionId.trim();
+        if (!expectedCurrentVersionToken) {
+          throw new DesktopAssetImportTransportError("asset_import.invalid_current_version", false);
         }
-        if (result.state !== "completed") await new Promise((resolve) => setTimeout(resolve, 25));
+        let result: DesktopAssetImportStatus = await importClient.importFile({
+          workspaceId: selecting.workspaceId,
+          documentId: selecting.documentId,
+          handle: file.handle,
+          label: file.fileName,
+          attachmentOperationId,
+          expectedCurrentVersionToken,
+        });
+        let operationSnapshot = createAttachmentFileSnapshot({
+          generation: selecting.importGeneration,
+          operationId: result.operationId,
+          fileName: file.fileName,
+          byteSize: file.byteSize,
+          state: result.state === "completed" ? "verifying" : result.state,
+        });
+        if (result.errorCode) {
+          operationSnapshot = applyAttachmentFileStatus(operationSnapshot, {
+            generation: selecting.importGeneration,
+            operationId: result.operationId,
+            state: result.state,
+            errorCode: result.errorCode,
+            assetId: result.assetId,
+          });
+        }
+        operations = replaceOperation(operations, index, operationSnapshot);
+        importing = Object.freeze({
+          ...importing,
+          importOperationId: result.operationId,
+          importOperations: operations,
+          importErrorCode: result.errorCode,
+        });
+        onProgress(importing);
+        for (let poll = 0; result.state !== "completed" && poll < 200; poll += 1) {
+          const currentOperation = operations[index]!;
+          if (currentOperation.terminal || currentOperation.canRepair || currentOperation.canRetry) break;
+          result = await importClient.getImportStatus({ workspaceId: selecting.workspaceId, operationId: result.operationId });
+          const visibleState = result.state === "completed" ? "verifying" : result.state;
+          operations = replaceOperation(operations, index, applyAttachmentFileStatus(
+            currentOperation,
+            {
+              generation: selecting.importGeneration,
+              operationId: result.operationId,
+              state: visibleState,
+              errorCode: result.errorCode,
+              assetId: result.assetId,
+            },
+          ));
+          importing = Object.freeze({ ...importing, importOperationId: result.operationId, importOperations: operations });
+          onProgress(importing);
+          if (result.state !== "completed" && !operations[index]!.terminal && !operations[index]!.canRepair && !operations[index]!.canRetry) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+        }
+        if (result.state !== "completed") {
+          if (!operations[index]!.terminal && !operations[index]!.canRepair && !operations[index]!.canRetry) {
+            throw new DesktopAssetImportTransportError("asset_import.status_timeout", true);
+          }
+          continue;
+        }
+        if (result.assetId) importedAssetIds.push(result.assetId);
+        importedFileNames.push(file.fileName);
+        importedIndexes.push(index);
+      } catch (error) {
+        const mapped = error instanceof DesktopAssetImportTransportError ? error.code : "COMMAND_BRIDGE_FAILED";
+        const currentOperation = Object.freeze({ ...operations[index]!, operationId: operations[index]!.operationId.startsWith("pending-") ? attachmentOperationId : operations[index]!.operationId });
+        operations = replaceOperation(operations, index, applyAttachmentFileStatus(currentOperation, {
+          generation: selecting.importGeneration,
+          operationId: currentOperation.operationId,
+          state: "failed",
+          errorCode: mapped,
+        }));
+        importing = Object.freeze({ ...importing, importOperations: operations, importErrorCode: mapped });
+        onProgress(importing);
       }
-      if (result.state !== "completed") throw new DesktopAssetImportTransportError("asset_import.status_timeout", true);
-      if (result.assetId) importedAssetIds.push(result.assetId);
-      importedFileNames.push(file.fileName);
     }
-    const loading = requestDesktopAssetLoad(importing, selecting.documentId);
-    const readback = await loadDesktopDocumentAssets(queryClient, loading);
-    if (readback.state === "Failed"
-      || importedAssetIds.some((id) => !readback.page?.assets.some((asset) => asset.assetId === id))
-      || importedFileNames.some((name) => !readback.page?.assets.some((asset) => asset.fileName === name))) {
+    const attempts = Math.max(1, Math.trunc(readbackPolicy.attempts));
+    let readback = await loadDesktopDocumentAssets(
+      queryClient,
+      requestDesktopAssetLoad(importing, selecting.documentId),
+    );
+    let readbackMatched = assetImportReadbackMatches(readback, importedAssetIds, importedFileNames);
+    for (let attempt = 1; !readbackMatched && importedIndexes.length > 0 && attempt < attempts; attempt += 1) {
+      await readbackPolicy.delay(Math.max(0, readbackPolicy.intervalMs));
+      readback = await loadDesktopDocumentAssets(
+        queryClient,
+        requestDesktopAssetLoad(importing, selecting.documentId),
+      );
+      readbackMatched = assetImportReadbackMatches(readback, importedAssetIds, importedFileNames);
+    }
+    for (const index of importedIndexes) {
+      const currentOperation = operations[index]!;
+      operations = replaceOperation(operations, index, applyAttachmentFileStatus(currentOperation, {
+        generation: selecting.importGeneration,
+        operationId: currentOperation.operationId,
+        state: readbackMatched ? "completed" : "recovery_required",
+        errorCode: readbackMatched ? undefined : "ASSET_IMPORT_READBACK_MISMATCH",
+      }));
+    }
+    const hasFailure = operations.some((operation) => operation.stage !== "Completed");
+    const operationErrorCode = operations.find((operation) => operation.stage !== "Completed")?.errorCode;
+    if (!readbackMatched || hasFailure) {
       return Object.freeze({
         ...readback,
+        importOperations: operations,
         importState: "Failed",
-        importErrorCode: readback.errorCode ?? "ASSET_IMPORT_READBACK_MISMATCH",
+        importErrorCode: readback.errorCode
+          ?? (!readbackMatched ? "ASSET_IMPORT_READBACK_MISMATCH" : operationErrorCode ?? importing.importErrorCode ?? "ASSET_IMPORT_PARTIAL_FAILURE"),
       });
     }
     return Object.freeze({
       ...readback,
+      importOperations: operations,
       importState: "Completed",
       selectedAssetId: importedAssetIds.at(-1) ?? readback.page?.assets.find((asset) => asset.fileName === importedFileNames.at(-1))?.assetId,
       importErrorCode: undefined,
@@ -204,6 +419,24 @@ export async function importDesktopDocumentAssets(
   }
 }
 
+function assetImportReadbackMatches(
+  readback: DesktopAssetSurfaceSnapshot,
+  importedAssetIds: readonly string[],
+  importedFileNames: readonly string[],
+): boolean {
+  return readback.state !== "Failed"
+    && importedAssetIds.every((id) => readback.page?.assets.some((asset) => asset.assetId === id))
+    && importedFileNames.every((name) => readback.page?.assets.some((asset) => asset.fileName === name));
+}
+
+function replaceOperation(
+  operations: readonly AttachmentFileSnapshot[],
+  index: number,
+  operation: AttachmentFileSnapshot,
+): readonly AttachmentFileSnapshot[] {
+  return Object.freeze(operations.map((current, currentIndex) => currentIndex === index ? operation : current));
+}
+
 export async function cancelDesktopAssetImport(
   client: DesktopAssetImportPickerClient,
   snapshot: DesktopAssetSurfaceSnapshot,
@@ -211,8 +444,17 @@ export async function cancelDesktopAssetImport(
   if (snapshot.importState !== "Importing" || !snapshot.importOperationId) return snapshot;
   try {
     const status = await client.cancelImport({ workspaceId: snapshot.workspaceId, operationId: snapshot.importOperationId });
+    const importOperations = Object.freeze((snapshot.importOperations ?? []).map((operation) =>
+      operation.operationId === status.operationId
+        ? applyAttachmentFileStatus(operation, {
+            generation: operation.generation,
+            operationId: operation.operationId,
+            state: status.state,
+          })
+        : operation));
     return Object.freeze({
       ...snapshot,
+      importOperations,
       importState: status.state === "cancelled" ? "Cancelled" : status.state === "cleanup_required" ? "Failed" : snapshot.importState,
       importErrorCode: status.state === "cleanup_required" ? "asset_import.cleanup_required" : undefined,
     });
@@ -223,6 +465,100 @@ export async function cancelDesktopAssetImport(
       importErrorCode: error instanceof DesktopAssetImportTransportError ? error.code : "COMMAND_BRIDGE_FAILED",
     });
   }
+}
+
+export async function repairDesktopAttachmentProjection(
+  projection: Pick<DesktopProjectionTransport, "startRepair" | "runRepair">,
+  query: Pick<LocalDesktopCommandClient, "getAssetMetadata">,
+  snapshot: DesktopAssetSurfaceSnapshot,
+  attachmentOperationId: string,
+  onProgress: (snapshot: DesktopAssetSurfaceSnapshot) => void = () => {},
+): Promise<DesktopAssetSurfaceSnapshot> {
+  if (snapshot.scope !== "Document" || !snapshot.documentId) return snapshot;
+  const operationIndex = (snapshot.importOperations ?? []).findIndex((item) =>
+    item.operationId === attachmentOperationId && item.canRepair);
+  if (operationIndex < 0) return snapshot;
+  const original = snapshot.importOperations![operationIndex]!;
+  let operations = replaceOperation(snapshot.importOperations!, operationIndex, applyAttachmentFileStatus(original, {
+    generation: original.generation,
+    operationId: original.operationId,
+    state: "projecting",
+  }));
+  let working = Object.freeze({
+    ...snapshot,
+    importState: "Importing" as const,
+    importOperationId: attachmentOperationId,
+    importOperations: operations,
+    importErrorCode: undefined,
+  });
+  onProgress(working);
+
+  try {
+    const started = await projection.startRepair(snapshot.workspaceId, snapshot.documentId);
+    const repaired = await projection.runRepair(snapshot.workspaceId, started.operationId);
+    if (repaired.state !== "succeeded") {
+      return attachmentRepairFailure(working, operationIndex, "ATTACHMENT_PROJECTION_RECOVERY_REQUIRED");
+    }
+    const projecting = operations[operationIndex]!;
+    operations = replaceOperation(operations, operationIndex, applyAttachmentFileStatus(projecting, {
+      generation: projecting.generation,
+      operationId: projecting.operationId,
+      state: "verifying",
+    }));
+    working = Object.freeze({ ...working, importOperations: operations });
+    onProgress(working);
+    const loading = requestDesktopAssetLoad(working, snapshot.documentId);
+    const readback = await loadDesktopDocumentAssets(query, loading);
+    const assets = readback.page?.assets ?? [];
+    const matched = readback.state !== "Failed" && assets.some((asset) =>
+      original.assetId ? asset.assetId === original.assetId : asset.fileName === original.displayName);
+    if (!matched) {
+      return attachmentRepairFailure(
+        { ...readback, importOperations: operations },
+        operationIndex,
+        "ASSET_IMPORT_READBACK_MISMATCH",
+      );
+    }
+    const verifying = operations[operationIndex]!;
+    operations = replaceOperation(operations, operationIndex, applyAttachmentFileStatus(verifying, {
+      generation: verifying.generation,
+      operationId: verifying.operationId,
+      state: "completed",
+      assetId: original.assetId,
+    }));
+    const allCompleted = operations.every((item) => item.stage === "Completed");
+    return Object.freeze({
+      ...readback,
+      importOperations: operations,
+      importState: allCompleted ? "Completed" : "Failed",
+      importErrorCode: allCompleted ? undefined : "ASSET_IMPORT_PARTIAL_FAILURE",
+    });
+  } catch {
+    return attachmentRepairFailure(working, operationIndex, "ATTACHMENT_PROJECTION_RECOVERY_REQUIRED");
+  }
+}
+
+function attachmentRepairFailure(
+  snapshot: DesktopAssetSurfaceSnapshot,
+  operationIndex: number,
+  errorCode: string,
+): DesktopAssetSurfaceSnapshot {
+  const operations = snapshot.importOperations ?? [];
+  const operation = operations[operationIndex];
+  if (!operation) return Object.freeze({ ...snapshot, importState: "Failed", importErrorCode: errorCode });
+  const failed = applyAttachmentFileStatus(operation, {
+    generation: operation.generation,
+    operationId: operation.operationId,
+    state: "recovery_required",
+    errorCode,
+    assetId: operation.assetId,
+  });
+  return Object.freeze({
+    ...snapshot,
+    importOperations: replaceOperation(operations, operationIndex, failed),
+    importState: "Failed",
+    importErrorCode: errorCode,
+  });
 }
 
 export async function loadDesktopDocumentAssets(
@@ -253,19 +589,25 @@ export async function loadDesktopWorkspaceAssets(
   try {
     const result: DesktopWorkspaceAssetsPage = await client.listWorkspaceAssets({
       workspaceId: loading.workspaceId,
+      ...(loading.requestedCursor ? { cursor: loading.requestedCursor } : {}),
       limit: 200,
     });
+    const assets = loading.requestedCursor
+      ? mergeWorkspaceAssets(loading.page?.assets ?? [], result.assets)
+      : result.assets;
     return applyDesktopAssetResult(loading, loading.generation, {
       queryName: "list-workspace-assets",
       workspaceId: result.workspaceId,
-      assets: result.assets,
+      assets,
       ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
     });
   } catch (error) {
     const mapped = error instanceof DesktopAssetImportTransportError
       ? { code: error.code, retryable: error.retryable }
       : { code: "COMMAND_BRIDGE_FAILED", retryable: false };
-    return applyDesktopAssetFailure(loading, loading.generation, mapped.code, mapped.retryable);
+    return loading.requestedCursor
+      ? Object.freeze({ ...loading, state: "Failed", errorCode: mapped.code, retryable: mapped.retryable })
+      : applyDesktopAssetFailure(loading, loading.generation, mapped.code, mapped.retryable);
   }
 }
 
@@ -278,14 +620,33 @@ export function applyDesktopAssetResult(
   const selectedAssetId = page.assets.some((asset) => asset.assetId === snapshot.selectedAssetId)
     ? snapshot.selectedAssetId
     : page.assets[0]?.assetId;
-  return Object.freeze({
+  const result = Object.freeze({
     ...snapshot,
     state: page.assets.length === 0 ? "Empty" : "Ready",
     page,
     selectedAssetId,
     errorCode: undefined,
     retryable: undefined,
+    requestedCursor: undefined,
   });
+  return selectedAssetId === snapshot.selectedAssetId
+    ? result
+    : clearDesktopAssetSelection(result, selectedAssetId);
+}
+
+function mergeWorkspaceAssets(
+  current: DocumentAssetsPage["assets"],
+  incoming: DocumentAssetsPage["assets"],
+): DocumentAssetsPage["assets"] {
+  const identities = new Set(current.map((asset) => asset.assetId));
+  return Object.freeze([
+    ...current,
+    ...incoming.filter((asset) => {
+      if (identities.has(asset.assetId)) return false;
+      identities.add(asset.assetId);
+      return true;
+    }),
+  ]);
 }
 
 export async function linkDesktopSelectedAsset(

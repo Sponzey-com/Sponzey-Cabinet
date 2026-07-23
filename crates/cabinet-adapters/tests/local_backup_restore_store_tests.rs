@@ -231,6 +231,154 @@ fn startup_recovery_rolls_back_interrupted_reopen_cleans_temps_and_is_idempotent
 }
 
 #[test]
+fn startup_recovery_retries_durable_recovery_required_operation() {
+    let fixture = Fixture::new("recovery-required-restart");
+    fixture.seed_snapshot("backup");
+    let manifest = fixture.build_package();
+    fixture.seed_snapshot("live-newer");
+    let live_before = fixture.live_values();
+    let mut store = fixture.restore_store();
+    store
+        .prepare_restore(&workspace(), &package(), &operation(), &manifest)
+        .expect("prepare");
+    store
+        .apply_restore(&workspace(), &operation())
+        .expect("apply");
+    store
+        .mark_recovery_required(&workspace(), &operation())
+        .expect("persist recovery required");
+
+    let report = fixture
+        .restore_store()
+        .recover_startup(&workspace())
+        .expect("restart recovery");
+
+    assert_eq!(report.rolled_back_operation_ids(), &["operation-1"]);
+    assert_eq!(fixture.live_values(), live_before);
+    assert_eq!(
+        fixture
+            .restore_store()
+            .get_restore_status(&workspace(), &operation())
+            .expect("status")
+            .expect("operation")
+            .state(),
+        RestoreState::RolledBack
+    );
+}
+
+#[test]
+fn startup_recovery_fails_closed_before_mutation_when_expected_rollback_slot_is_missing() {
+    let fixture = Fixture::new("missing-rollback-slot");
+    fixture.seed_snapshot("backup");
+    let manifest = fixture.build_package();
+    fixture.seed_snapshot("live-newer");
+    let mut store = fixture.restore_store();
+    store
+        .prepare_restore(&workspace(), &package(), &operation(), &manifest)
+        .expect("prepare");
+    store
+        .apply_restore(&workspace(), &operation())
+        .expect("apply");
+    store
+        .mark_recovery_required(&workspace(), &operation())
+        .expect("recovery required");
+    let applied_values = fixture.authoritative_values();
+    fs::remove_dir_all(fixture.operation_root().join("rollback/current_documents"))
+        .expect("remove expected rollback slot");
+
+    let report = fixture
+        .restore_store()
+        .recover_startup(&workspace())
+        .expect("isolate corrupt rollback");
+
+    assert!(report.rolled_back_operation_ids().is_empty());
+    assert_eq!(report.cleanup_required_operation_ids(), &["operation-1"]);
+    assert_eq!(fixture.authoritative_values(), applied_values);
+    assert_eq!(
+        fixture
+            .restore_store()
+            .get_restore_status(&workspace(), &operation())
+            .unwrap()
+            .unwrap()
+            .state(),
+        RestoreState::RecoveryRequired
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_recovery_rejects_rollback_symlink_without_touching_outside_or_live_data() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new("rollback-symlink");
+    fixture.seed_snapshot("backup");
+    let manifest = fixture.build_package();
+    fixture.seed_snapshot("live-newer");
+    let mut store = fixture.restore_store();
+    store
+        .prepare_restore(&workspace(), &package(), &operation(), &manifest)
+        .expect("prepare");
+    store
+        .apply_restore(&workspace(), &operation())
+        .expect("apply");
+    store
+        .mark_recovery_required(&workspace(), &operation())
+        .expect("recovery required");
+    let applied_values = fixture.authoritative_values();
+    let outside = fixture.root.join("outside-protected");
+    fs::create_dir_all(&outside).expect("outside");
+    fs::write(outside.join("sentinel"), b"outside-safe").expect("sentinel");
+    let rollback = fixture.operation_root().join("rollback/current_documents");
+    fs::remove_dir_all(&rollback).expect("remove rollback");
+    symlink(&outside, &rollback).expect("rollback symlink");
+
+    let report = fixture
+        .restore_store()
+        .recover_startup(&workspace())
+        .expect("isolate symlink");
+
+    assert!(report.rolled_back_operation_ids().is_empty());
+    assert_eq!(report.cleanup_required_operation_ids(), &["operation-1"]);
+    assert_eq!(fixture.authoritative_values(), applied_values);
+    assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside-safe");
+}
+
+#[test]
+fn startup_recovery_isolates_legacy_ambiguous_marker_without_mutation() {
+    let fixture = Fixture::new("legacy-rollback-marker");
+    fixture.seed_snapshot("backup");
+    let manifest = fixture.build_package();
+    fixture.seed_snapshot("live-newer");
+    let mut store = fixture.restore_store();
+    store
+        .prepare_restore(&workspace(), &package(), &operation(), &manifest)
+        .expect("prepare");
+    store
+        .apply_restore(&workspace(), &operation())
+        .expect("apply");
+    store
+        .mark_recovery_required(&workspace(), &operation())
+        .expect("recovery required");
+    let applied_values = fixture.authoritative_values();
+    fs::write(
+        fixture
+            .operation_root()
+            .join("journal/current_documents.applied"),
+        b"applied\n",
+    )
+    .expect("legacy marker");
+
+    let report = fixture
+        .restore_store()
+        .recover_startup(&workspace())
+        .expect("isolate legacy marker");
+
+    assert!(report.rolled_back_operation_ids().is_empty());
+    assert_eq!(report.cleanup_required_operation_ids(), &["operation-1"]);
+    assert_eq!(fixture.authoritative_values(), applied_values);
+}
+
+#[test]
 fn startup_recovery_preserves_prepared_operation_and_isolates_corrupt_status() {
     let fixture = Fixture::new("recovery-isolation");
     fixture.seed_snapshot("backup");
@@ -294,6 +442,13 @@ impl Fixture {
 
     fn restore_store(&self) -> LocalBackupRestoreStore {
         LocalBackupRestoreStore::new(self.root.clone(), self.policy())
+    }
+
+    fn operation_root(&self) -> PathBuf {
+        self.root
+            .join("restore-operations")
+            .join(hex("workspace-1"))
+            .join(hex("operation-1"))
     }
 
     fn build_package(&self) -> cabinet_domain::backup::BackupPackageManifest {

@@ -7,10 +7,11 @@ use cabinet_adapters::durable_asset_association_catalog::DurableAssetAssociation
 use cabinet_adapters::durable_asset_metadata_catalog::DurableAssetMetadataCatalog;
 use cabinet_adapters::durable_local_graph_projection::DurableLocalGraphProjectionStore;
 use cabinet_desktop_shell::{
-    DesktopAssetDetailRequestDto, DesktopAssetLinkRequestDto, DesktopAssetUnlinkRequestDto,
-    DesktopDocumentAssetsRuntime, DesktopDocumentAuthoringRequestDto,
-    DesktopDocumentAuthoringRuntime, DesktopLocalCommandPayloadDto, DesktopLocalCommandRequestDto,
-    DesktopProjectionRuntime, DesktopWorkspaceAssetsRequestDto,
+    DesktopAssetDetailRequestDto, DesktopAssetLinkRequestDto, DesktopAssetSearchRequestDto,
+    DesktopAssetSearchRuntime, DesktopAssetUnlinkRequestDto, DesktopDocumentAssetsRuntime,
+    DesktopDocumentAuthoringRequestDto, DesktopDocumentAuthoringRuntime,
+    DesktopLocalCommandPayloadDto, DesktopLocalCommandRequestDto, DesktopProjectionRuntime,
+    DesktopWorkspaceAssetsRequestDto,
 };
 use cabinet_domain::graph::GraphEdgeKind;
 use cabinet_ports::graph_projection::GraphProjectionStore;
@@ -83,6 +84,29 @@ fn native_document_assets_runtime_returns_durable_safe_metadata() {
     assert_eq!(data.assets[0].file_name, "spec.pdf");
     assert!(json.contains("\"queryName\":\"list-document-assets\""));
     assert!(!json.contains("raw body"));
+    assert!(!json.contains(&temp.path.display().to_string()));
+}
+
+#[test]
+fn native_asset_search_runtime_finds_metadata_without_exposing_root_path() {
+    let temp = TempRoot::new("asset-search");
+    seed_asset(&temp.path);
+    let runtime = DesktopAssetSearchRuntime::new(temp.path.clone());
+
+    let response = runtime.execute(DesktopAssetSearchRequestDto {
+        workspace_id: "workspace-1".into(),
+        text: "spec".into(),
+        limit: 10,
+    });
+    let json = serde_json::to_string(&response).expect("json");
+
+    assert!(response.ok, "response={response:?}");
+    let data = response.data.expect("data");
+    assert_eq!(data.query_name, "search-assets");
+    assert_eq!(data.workspace_id, "workspace-1");
+    assert_eq!(data.results.len(), 1);
+    assert_eq!(data.results[0].file_name, "spec.pdf");
+    assert_eq!(data.results[0].media_type, "application/pdf");
     assert!(!json.contains(&temp.path.display().to_string()));
 }
 

@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import type { CurrentDocumentView, DocumentHistoryPage } from "../../client-core/src/index.ts";
 import {
   DocumentEditorEvent,
   DocumentEditorState,
-  DocumentEditorViewModeEvent,
   createDocumentAuthoringWorkspaceModel,
   createMarkdownPreviewModel,
   transitionDocumentEditorState,
-  transitionDocumentEditorViewMode,
 } from "../src/index.ts";
 
 test("markdown preview renders heading anchor, callout, link resolution, and missing asset state", () => {
@@ -51,26 +50,26 @@ test("markdown preview renders heading anchor, callout, link resolution, and mis
   assert.equal(assetParagraph?.inlineActions[0]?.assetState, "missing");
 });
 
-test("document editor view mode transitions between source preview and split explicitly", () => {
-  const preview = transitionDocumentEditorViewMode("source", DocumentEditorViewModeEvent.ShowPreview);
-  const split = transitionDocumentEditorViewMode(preview.mode, DocumentEditorViewModeEvent.ShowSplit);
-  const source = transitionDocumentEditorViewMode(split.mode, DocumentEditorViewModeEvent.ShowSource);
-
-  assert.equal(preview.mode, "preview");
-  assert.equal(split.mode, "split");
-  assert.equal(source.mode, "source");
-});
-
-test("document authoring workspace keeps current history paths split and defaults to split mode", () => {
+test("document authoring workspace keeps current history paths split and defaults to WYSIWYG with plain text source entry", () => {
   const workspace = createDocumentAuthoringWorkspaceModel(currentDocument(), historyPage());
 
   assert.equal(workspace.mode, "document-authoring-workspace");
-  assert.equal(workspace.viewMode, "split");
+  assert.equal(workspace.editorSurface, "wysiwyg");
+  assert.equal(workspace.sourceEntry, "plain-text-modal");
+  assert.equal("viewMode" in workspace, false);
+  assert.equal("availableModes" in workspace, false);
   assert.equal(workspace.current.queryName, "get-current-document");
   assert.equal(workspace.history.queryName, "get-document-history");
   assert.equal(workspace.querySeparation.currentReadQueryName, "get-current-document");
   assert.equal(workspace.querySeparation.historyReadQueryName, "get-document-history");
   assert.equal(JSON.stringify(workspace.history).includes(currentDocument().body), false);
+});
+
+test("document authoring shared UI source no longer exports legacy source split preview mode transitions", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /DocumentEditorViewMode|DocumentEditorViewModeEvent|transitionDocumentEditorViewMode/);
+  assert.doesNotMatch(source, /availableModes:\s*\["source",\s*"preview",\s*"split"]/);
 });
 
 test("document editor state machine marks dirty content and save success explicitly", () => {

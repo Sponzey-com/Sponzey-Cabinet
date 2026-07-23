@@ -1,5 +1,6 @@
 import type {
   DesktopBackupClient,
+  DesktopBackupCatalogPage,
   DesktopBackupDataClass,
   DesktopBackupManifestSummary,
   DesktopBackupOperationStatus,
@@ -37,11 +38,25 @@ export function createTauriBackupRecoveryTransport(invoke: TauriInvoke): Desktop
     if (value.ok === false && isNonEmptyString(value.errorCode) && typeof value.retryable === "boolean") {
       throw new DesktopBackupTransportError(value.errorCode, value.retryable);
     }
-    if (value.ok !== true || value.retryable !== false || !isNonEmptyString(value.state)) throw bridgeFailure();
+    if (value.ok !== true || typeof value.retryable !== "boolean" || !isNonEmptyString(value.state)) throw bridgeFailure();
+    if (value.retryable === true && !["RecoveryRequired", "CleanupRequired"].includes(value.state)) throw bridgeFailure();
     return value;
   }
 
   return Object.freeze({
+    async listBackups(input): Promise<DesktopBackupCatalogPage> {
+      const response = await call("list_desktop_backup_catalog", { ...input });
+      if (!Array.isArray(response.records) || response.records.length > 50) throw bridgeFailure();
+      const records = response.records.map(parseManifest);
+      if (new Set(records.map((record) => record.packageId)).size !== records.length) throw bridgeFailure();
+      for (let index = 1; index < records.length; index += 1) {
+        const previous = records[index - 1]?.createdAtEpochMs;
+        const current = records[index]?.createdAtEpochMs;
+        if (previous === undefined ? current !== undefined : current !== undefined && previous < current) throw bridgeFailure();
+      }
+      const nextCursor = optionalString(response.nextCursor);
+      return Object.freeze({ records: Object.freeze(records), ...(nextCursor ? { nextCursor } : {}) });
+    },
     async createBackup(input): Promise<DesktopBackupManifestSummary> {
       const response = await call("create_desktop_backup_package", { ...input });
       if (response.state !== "Ready") throw bridgeFailure();
@@ -89,11 +104,12 @@ export function createTauriBackupRecoveryTransport(invoke: TauriInvoke): Desktop
     async confirmRestore(input) {
       if (input.confirmed !== true) throw bridgeFailure();
       const response = await call("confirm_desktop_backup_restore", { ...input });
-      if (!["Completed", "RolledBack", "CleanupRequired"].includes(String(response.state))) throw bridgeFailure();
+      if (!["Completed", "RolledBack", "CleanupRequired", "RecoveryRequired"].includes(String(response.state))) throw bridgeFailure();
       if (response.operationId !== input.operationId) throw bridgeFailure();
       return Object.freeze({
-        state: response.state as "Completed" | "RolledBack" | "CleanupRequired",
+        state: response.state as "Completed" | "RolledBack" | "CleanupRequired" | "RecoveryRequired",
         errorCode: optionalString(response.errorCode),
+        retryable: response.retryable === true,
       });
     },
 
@@ -142,7 +158,7 @@ function parseRestoreOperation(
   value: Record<string, unknown>,
   expectedOperationId: string,
 ): DesktopRestoreOperationStatus {
-  const states = ["Staging", "Applying", "Reopening", "RollbackRequired", "Completed", "RolledBack", "CleanupRequired", "Cancelled", "Failed"] as const;
+  const states = ["Staging", "Applying", "Reopening", "RollbackRequired", "RecoveryRequired", "Completed", "RolledBack", "CleanupRequired", "Cancelled", "Failed"] as const;
   if (value.operationId !== expectedOperationId
     || !states.includes(value.state as typeof states[number])) throw bridgeFailure();
   return Object.freeze({

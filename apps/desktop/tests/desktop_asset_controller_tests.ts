@@ -5,6 +5,7 @@ import type { DocumentAssetsPage, LocalDesktopCommandClient } from "@sponzey-cab
 import {
   applyDesktopAssetDetailResult,
   applyDesktopAssetResult,
+  applyDesktopAssetDragState,
   createDesktopAssetPlacementOptions,
   beginDesktopAssetImport,
   cancelDesktopAssetImport,
@@ -17,13 +18,19 @@ import {
   loadDesktopWorkspaceAssets,
   requestDesktopAssetLoad,
   requestDesktopWorkspaceAssetLoad,
+  requestDesktopWorkspaceAssetNextPage,
   selectDesktopAsset,
   requestDesktopAssetPreview,
   requestDesktopAssetOpen,
+  setDesktopAssetMediaFilter,
+  setDesktopAssetQuery,
+  visibleDesktopAssets,
+  repairDesktopAttachmentProjection,
   openDesktopSelectedAsset,
   closeDesktopAssetPreview,
   unlinkDesktopSelectedAsset,
 } from "../src/desktop_asset_controller.ts";
+import { applyAttachmentFileStatus, createAttachmentFileSnapshot } from "../src/attachment_operation_presenter.ts";
 
 test("Asset placement options are empty before load and use the durable page after load", () => {
   const idle = createDesktopAssetSnapshot("workspace-1");
@@ -85,6 +92,34 @@ test("Asset controller loads workspace scope, empty page, and safe failure", asy
   assert.equal(JSON.stringify(failed).includes("/Users/private"), false);
 });
 
+test("Asset controller appends a bounded workspace page by opaque cursor without duplicates", async () => {
+  const workspaceLoading = requestDesktopWorkspaceAssetLoad(
+    requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1"),
+  );
+  const first = applyDesktopAssetResult(workspaceLoading, workspaceLoading.generation, {
+    queryName: "list-workspace-assets",
+    workspaceId: "workspace-1",
+    assets: page().assets,
+    nextCursor: "opaque-next-page",
+  });
+  const nextLoading = requestDesktopWorkspaceAssetNextPage(first);
+  let request: unknown;
+  const appended = await loadDesktopWorkspaceAssets({
+    async listWorkspaceAssets(input) {
+      request = input;
+      return {
+        workspaceId: "workspace-1",
+        assets: [page().assets[0]!, { ...page().assets[0]!, assetId: "asset-2", fileName: "second.pdf" }],
+      };
+    },
+  }, nextLoading);
+
+  assert.deepEqual(request, { workspaceId: "workspace-1", cursor: "opaque-next-page", limit: 200 });
+  assert.deepEqual(appended.page?.assets.map((asset) => asset.assetId), ["asset-1", "asset-2"]);
+  assert.equal(appended.page?.nextCursor, undefined);
+  assert.strictEqual(requestDesktopWorkspaceAssetNextPage(nextLoading), nextLoading);
+});
+
 test("Asset controller links a workspace asset and completes through document readback", async () => {
   const workspaceLoading = requestDesktopWorkspaceAssetLoad(
     requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-2"),
@@ -125,6 +160,55 @@ test("Asset controller ignores stale completion and invalid selection", () => {
 
   assert.strictEqual(unchanged, second);
   assert.strictEqual(selectDesktopAsset(second, "unknown"), second);
+});
+
+test("Asset controller owns bounded-page query and media filter state without matching internal identity", () => {
+  const loading = requestDesktopWorkspaceAssetLoad(createDesktopAssetSnapshot("workspace-1"));
+  const ready = applyDesktopAssetResult(loading, loading.generation, {
+    queryName: "list-workspace-assets",
+    workspaceId: "workspace-1",
+    assets: [
+      { assetId: "private-query-token", label: "제품 설계", fileName: "cabinet.pdf", mediaType: "application/pdf", byteSize: 10, status: "available" },
+      { assetId: "asset-2", label: "회의 메모", fileName: "notes.txt", mediaType: "text/plain", byteSize: 20, status: "available" },
+      { assetId: "asset-3", label: "화면", fileName: "screen.png", mediaType: "image/png", byteSize: 30, status: "available" },
+    ],
+  });
+
+  const byLabel = setDesktopAssetQuery(ready, "회의");
+  assert.deepEqual(visibleDesktopAssets(byLabel).map((asset) => asset.fileName), ["notes.txt"]);
+  assert.equal(visibleDesktopAssets(setDesktopAssetQuery(ready, "private-query-token")).length, 0);
+  assert.deepEqual(
+    visibleDesktopAssets(setDesktopAssetMediaFilter(setDesktopAssetQuery(ready, ""), "pdf")).map((asset) => asset.fileName),
+    ["cabinet.pdf"],
+  );
+});
+
+test("Asset scope result preserves an available selection and clears stale detail when it disappears", () => {
+  const documentLoading = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
+  const documentReady = applyDesktopAssetResult(documentLoading, documentLoading.generation, page());
+  const selected = {
+    ...selectDesktopAsset(documentReady, "asset-1"),
+    detailState: "Ready" as const,
+    detail: { assetId: "asset-1", fileName: "architecture.pdf", mediaType: "application/pdf", byteSize: 2048, version: 1, previewCapability: "pdf" as const, extractionStatus: "not_requested" as const, referenceCount: 1, linkedDocumentIds: ["doc-1"], linkedDocuments: [{ documentId: "doc-1", title: "Cabinet 제품 지도", state: "available" as const }] },
+    previewState: "Ready" as const,
+    preview: { assetId: "asset-1", capability: "pdf" as const, mediaType: "application/pdf", presentation: "data_url" as const, content: "data:application/pdf;base64,AA==" },
+  };
+  const workspaceLoading = requestDesktopWorkspaceAssetLoad(selected);
+  const preserved = applyDesktopAssetResult(workspaceLoading, workspaceLoading.generation, {
+    queryName: "list-workspace-assets", workspaceId: "workspace-1", assets: page().assets,
+  });
+  assert.equal(preserved.selectedAssetId, "asset-1");
+
+  const nextLoading = requestDesktopAssetLoad(preserved, "doc-2");
+  const changed = applyDesktopAssetResult(nextLoading, nextLoading.generation, {
+    queryName: "list-document-assets", workspaceId: "workspace-1", documentId: "doc-2",
+    assets: [{ ...page().assets[0]!, assetId: "asset-2", fileName: "other.pdf" }],
+  });
+  assert.equal(changed.selectedAssetId, "asset-2");
+  assert.equal(changed.detail, undefined);
+  assert.equal(changed.detailState, "Idle");
+  assert.equal(changed.preview, undefined);
+  assert.equal(changed.previewState, "Idle");
 });
 
 test("Asset controller imports opaque selections and completes only after durable readback", async () => {
@@ -173,6 +257,88 @@ test("Asset controller imports opaque selections and completes only after durabl
   assert.deepEqual(calls, ["current", "import"]);
 });
 
+test("Asset controller bounds retries while the durable attachment projection becomes visible", async () => {
+  const selecting = beginDesktopAssetImport(
+    requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1"),
+  );
+  let readbackCalls = 0;
+  let delayCalls = 0;
+
+  const completed = await importDesktopDocumentAssets(
+    {
+      async selectFiles() {
+        return { cancelled: false, files: [{ handle: "picker:1", fileName: "architecture.pdf", mediaType: "application/pdf", byteSize: 2048 }] };
+      },
+      async importFile() {
+        return { operationId: "operation-eventual", state: "completed", retryable: false, repairRequired: false } as const;
+      },
+    },
+    {
+      async getCurrentDocument() { return { versionId: "version-current" }; },
+      async getAssetMetadata() {
+        readbackCalls += 1;
+        return readbackCalls === 1 ? { ...page(), assets: [] } : page();
+      },
+    } as Pick<LocalDesktopCommandClient, "getAssetMetadata" | "getCurrentDocument">,
+    selecting,
+    () => "attachment-import-eventual",
+    () => {},
+    undefined,
+    {
+      attempts: 2,
+      intervalMs: 0,
+      delay: async () => { delayCalls += 1; },
+    },
+  );
+
+  assert.equal(completed.importState, "Completed");
+  assert.equal(completed.selectedAssetId, "asset-1");
+  assert.equal(readbackCalls, 2);
+  assert.equal(delayCalls, 1);
+});
+
+test("Asset controller imports a prepared drop selection without reopening the picker", async () => {
+  const selecting = beginDesktopAssetImport(
+    requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1"),
+  );
+  let pickerCalls = 0;
+  let importCalls = 0;
+  const result = await importDesktopDocumentAssets(
+    {
+      async selectFiles() { pickerCalls += 1; return { cancelled: true, files: [] }; },
+      async importFile() {
+        importCalls += 1;
+        return { operationId: "drop-operation-1", assetId: "asset-1", state: "completed" } as const;
+      },
+    },
+    {
+      async getCurrentDocument() { return { versionId: "version-drop-current" }; },
+      async getAssetMetadata() { return page(); },
+    } as Pick<LocalDesktopCommandClient, "getAssetMetadata" | "getCurrentDocument">,
+    selecting,
+    () => "drop-attachment-operation-1",
+    () => {},
+    { cancelled: false, files: [{ handle: "drop:1", fileName: "architecture.pdf", mediaType: "application/pdf", byteSize: 2048 }] },
+  );
+
+  assert.equal(pickerCalls, 0);
+  assert.equal(importCalls, 1);
+  assert.equal(result.importState, "Completed");
+});
+
+test("Asset controller applies explicit bounded drag presentation state", () => {
+  const idle = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
+  const entered = applyDesktopAssetDragState(idle, { state: "entered", fileCount: 3 });
+  const left = applyDesktopAssetDragState(entered, { state: "left", fileCount: 0 });
+
+  assert.equal(entered.dropState, "Entered");
+  assert.equal(entered.dropFileCount, 3);
+  assert.equal(left.dropState, "Idle");
+  assert.equal(left.dropFileCount, 0);
+  const importing = Object.freeze({ ...idle, importState: "Importing" as const });
+  assert.strictEqual(applyDesktopAssetDragState(importing, { state: "entered", fileCount: 1 }), importing);
+});
+
 test("Asset controller blocks duplicate import and reports readback mismatch safely", async () => {
   const loading = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
   const selecting = beginDesktopAssetImport(loading);
@@ -194,6 +360,42 @@ test("Asset controller blocks duplicate import and reports readback mismatch saf
 
   assert.equal(failed.importState, "Failed");
   assert.equal(failed.importErrorCode, "ASSET_IMPORT_READBACK_MISMATCH");
+});
+
+test("Asset controller preserves immediate native recovery state and stable error", async () => {
+  const selecting = beginDesktopAssetImport(
+    requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1"),
+  );
+
+  const result = await importDesktopDocumentAssets(
+    {
+      async selectFiles() {
+        return { cancelled: false, files: [{ handle: "picker:1", fileName: "recover.pdf", mediaType: "application/pdf", byteSize: 2 }] };
+      },
+      async importFile() {
+        return {
+          operationId: "operation-recovery-1",
+          assetId: "asset-recovery-1",
+          state: "recovery_required",
+          errorCode: "asset_graph_reindex.repository_unavailable",
+          retryable: true,
+          repairRequired: true,
+        } as const;
+      },
+    },
+    {
+      async getCurrentDocument() { return { versionId: "version-current" }; },
+      async getAssetMetadata() { return { ...page(), assets: [] }; },
+    } as Pick<LocalDesktopCommandClient, "getAssetMetadata" | "getCurrentDocument">,
+    selecting,
+    () => "attachment-recovery-1",
+    () => {},
+  );
+
+  assert.equal(result.importState, "Failed");
+  assert.equal(result.importErrorCode, "asset_graph_reindex.repository_unavailable");
+  assert.equal(result.importOperations?.[0]?.stage, "RecoveryRequired");
+  assert.equal(result.importOperations?.[0]?.errorCode, "asset_graph_reindex.repository_unavailable");
 });
 
 test("Asset controller blocks import before current query when operation identity is empty", async () => {
@@ -268,6 +470,69 @@ test("Asset controller refreshes current guard for every selected file", async (
   assert.equal(currentIndex, 2);
 });
 
+test("Asset controller records deterministic partial success and continues after one file fails", async () => {
+  const selecting = beginDesktopAssetImport(
+    requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1"),
+  );
+  const operations = ["attachment-1", "attachment-2"];
+  const imported: string[] = [];
+  const progressQueues: string[][] = [];
+
+  const result = await importDesktopDocumentAssets(
+    {
+      async selectFiles() {
+        return { cancelled: false, files: [
+          { handle: "picker:1", fileName: "/private/one.pdf", mediaType: "application/pdf", byteSize: 1 },
+          { handle: "picker:2", fileName: "two.pdf", mediaType: "application/pdf", byteSize: 2 },
+        ] };
+      },
+      async importFile(request) {
+        imported.push(request.attachmentOperationId);
+        if (request.attachmentOperationId === "attachment-1") throw new Error("/private/source.bin");
+        return { operationId: request.attachmentOperationId, assetId: "asset-2", state: "completed" };
+      },
+    },
+    {
+      async getCurrentDocument() { return { versionId: `version-${imported.length + 1}` }; },
+      async getAssetMetadata() {
+        return { ...page(), assets: [{ ...page().assets[0]!, assetId: "asset-2", fileName: "two.pdf" }] };
+      },
+    } as Pick<LocalDesktopCommandClient, "getAssetMetadata" | "getCurrentDocument">,
+    selecting,
+    () => operations.shift() ?? "",
+    (snapshot) => progressQueues.push((snapshot.importOperations ?? []).map((item) => item.stage)),
+  );
+
+  assert.deepEqual(imported, ["attachment-1", "attachment-2"]);
+  assert.equal(result.importState, "Failed");
+  assert.deepEqual(result.importOperations?.map((item) => [item.displayName, item.stage]), [
+    ["one.pdf", "Failed"],
+    ["two.pdf", "Completed"],
+  ]);
+  assert.equal(JSON.stringify(result.importOperations).includes("/private"), false);
+  assert.ok(progressQueues.some((queue) => queue.includes("Failed")));
+});
+
+test("Asset controller preserves same-document queue and resets it when document changes", () => {
+  const loading = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
+  const withQueue = Object.freeze({
+    ...loading,
+    importState: "Completed" as const,
+    importOperations: Object.freeze([{ stage: "Completed" }]) as never,
+  });
+  const same = requestDesktopAssetLoad(withQueue, "doc-1");
+  const workspace = requestDesktopWorkspaceAssetLoad(withQueue, "doc-1");
+  const remounted = requestDesktopAssetLoad(workspace, "doc-1");
+  const changed = requestDesktopAssetLoad(withQueue, "doc-2");
+
+  assert.strictEqual(same.importOperations, withQueue.importOperations);
+  assert.equal(same.importState, "Completed");
+  assert.strictEqual(remounted.importOperations, withQueue.importOperations);
+  assert.equal(remounted.importState, "Completed");
+  assert.deepEqual(changed.importOperations, []);
+  assert.equal(changed.importState, "Idle");
+});
+
 test("Asset controller loads native detail and confirms unlink through list readback", async () => {
   const loading = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
   const ready = applyDesktopAssetResult(loading, loading.generation, page());
@@ -276,7 +541,7 @@ test("Asset controller loads native detail and confirms unlink through list read
     async selectFiles() { return { cancelled: true, files: [] }; },
     async importFile() { throw new Error("unused"); },
     async getDetail() {
-      return { assetId: "asset-1", fileName: "architecture.pdf", mediaType: "application/pdf", byteSize: 2048, version: 1, previewCapability: "pdf", extractionStatus: "not_requested", referenceCount: 1, linkedDocumentIds: ["doc-1"] } as const;
+      return { assetId: "asset-1", fileName: "architecture.pdf", mediaType: "application/pdf", byteSize: 2048, version: 1, previewCapability: "pdf", extractionStatus: "not_requested", referenceCount: 1, linkedDocumentIds: ["doc-1"], linkedDocuments: [{ documentId: "doc-1", title: "Cabinet 제품 지도", state: "available" }] } as const;
     },
     async unlink() { return { outcome: "fresh", delta: "unlinked", revisionNumber: 2 }; },
   };
@@ -300,10 +565,12 @@ test("Asset controller loads native detail and confirms unlink through list read
 });
 
 test("Asset controller maps durable cancel terminal state", async () => {
+  const operation = createAttachmentFileSnapshot({ generation: 1, operationId: "operation-1", fileName: "note.txt", byteSize: 1, state: "staging" });
   const snapshot = Object.freeze({
     ...requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1"),
     importState: "Importing" as const,
     importOperationId: "operation-1",
+    importOperations: Object.freeze([operation]),
   });
   const client = {
     async cancelImport() { return { operationId: "operation-1", state: "cancelled" } as const; },
@@ -312,6 +579,72 @@ test("Asset controller maps durable cancel terminal state", async () => {
   const cancelled = await cancelDesktopAssetImport(client, snapshot);
 
   assert.equal(cancelled.importState, "Cancelled");
+  assert.equal(cancelled.importOperations?.[0]?.stage, "Cancelled");
+});
+
+test("Asset controller repairs projection then verifies attachment readback", async () => {
+  const operationBase = createAttachmentFileSnapshot({ generation: 1, operationId: "attachment-op-1", fileName: "repair.pdf", byteSize: 2, state: "projecting" });
+  const operation = applyAttachmentFileStatus(operationBase, {
+    generation: 1,
+    operationId: "attachment-op-1",
+    state: "recovery_required",
+    errorCode: "asset_graph_reindex.repository_unavailable",
+    assetId: "asset-1",
+  });
+  const snapshot = Object.freeze({
+    ...requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1"),
+    importState: "Failed" as const,
+    importOperationId: "attachment-op-1",
+    importOperations: Object.freeze([operation]),
+  });
+  const calls: string[] = [];
+  const progressStages: string[] = [];
+
+  const repaired = await repairDesktopAttachmentProjection(
+    {
+      async startRepair() { calls.push("start"); return { operationId: "projection-repair-1", state: "queued", attempt: 0, completedUnits: 0, totalUnits: 2 }; },
+      async runRepair() { calls.push("run"); return { operationId: "projection-repair-1", state: "succeeded", attempt: 1, completedUnits: 2, totalUnits: 2 }; },
+    },
+    {
+      async getAssetMetadata() { calls.push("readback"); return page(); },
+    },
+    snapshot,
+    "attachment-op-1",
+    (progress) => progressStages.push(progress.importOperations?.[0]?.stage ?? "missing"),
+  );
+
+  assert.deepEqual(calls, ["start", "run", "readback"]);
+  assert.deepEqual(progressStages, ["Projecting", "Verifying"]);
+  assert.equal(repaired.importState, "Completed");
+  assert.equal(repaired.importOperations?.[0]?.stage, "Completed");
+  assert.equal(repaired.importOperations?.[0]?.errorCode, undefined);
+});
+
+test("Asset controller keeps recovery required when projection repair does not succeed", async () => {
+  const base = createAttachmentFileSnapshot({ generation: 2, operationId: "attachment-op-2", fileName: "repair.pdf", byteSize: 2, state: "projecting" });
+  const operation = applyAttachmentFileStatus(base, { generation: 2, operationId: "attachment-op-2", state: "recovery_required" });
+  const snapshot = Object.freeze({
+    ...requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1"),
+    importState: "Failed" as const,
+    importOperationId: "attachment-op-2",
+    importOperations: Object.freeze([operation]),
+  });
+  let readbackCalls = 0;
+
+  const failed = await repairDesktopAttachmentProjection(
+    {
+      async startRepair() { return { operationId: "projection-repair-2", state: "queued", attempt: 0, completedUnits: 0, totalUnits: 2 }; },
+      async runRepair() { return { operationId: "projection-repair-2", state: "failed_retryable", attempt: 1, completedUnits: 1, totalUnits: 2 }; },
+    },
+    { async getAssetMetadata() { readbackCalls += 1; return page(); } },
+    snapshot,
+    "attachment-op-2",
+  );
+
+  assert.equal(readbackCalls, 0);
+  assert.equal(failed.importState, "Failed");
+  assert.equal(failed.importOperations?.[0]?.stage, "RecoveryRequired");
+  assert.equal(failed.importOperations?.[0]?.errorCode, "ATTACHMENT_PROJECTION_RECOVERY_REQUIRED");
 });
 
 test("Asset preview controller loads matching identity and clears payload on close or selection", async () => {
@@ -379,6 +712,7 @@ test("Late asset detail readback preserves the latest external-open state", asyn
         extractionStatus: "not_requested",
         referenceCount: 1,
         linkedDocumentIds: ["doc-1"],
+        linkedDocuments: [{ documentId: "doc-1", title: "Cabinet 제품 지도", state: "available" }],
       };
     },
   } as never, selected);

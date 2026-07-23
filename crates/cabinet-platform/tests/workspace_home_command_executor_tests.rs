@@ -9,8 +9,8 @@ use cabinet_platform::workspace_home_command::{
 use cabinet_ports::workspace_home::{
     WorkspaceHomeBackupStatus, WorkspaceHomeChangeProjection, WorkspaceHomeDocumentProjection,
     WorkspaceHomeHealthStatus, WorkspaceHomeProjection, WorkspaceHomeProjectionError,
-    WorkspaceHomeProjectionLimits, WorkspaceHomeProjectionPort, WorkspaceHomeTagProjection,
-    WorkspaceHomeUnfinishedProjection,
+    WorkspaceHomeProjectionLimits, WorkspaceHomeProjectionPort, WorkspaceHomeSummaryProjection,
+    WorkspaceHomeTagProjection, WorkspaceHomeUnfinishedProjection,
 };
 
 struct FakeProjectionPort {
@@ -70,6 +70,9 @@ fn executor_maps_ready_projection_to_ui_safe_owned_dto() {
     assert_eq!(result.unfinished_items[0].label, "Review draft");
     assert_eq!(result.backup_status, "Fresh");
     assert_eq!(result.health_status, "Healthy");
+    assert_eq!(result.document_count, 10_000);
+    assert_eq!(result.asset_count, 2_500);
+    assert_eq!(result.canvas_count, 24);
     assert_eq!(result.product_log_event_name, None);
     assert_eq!(
         port.call.borrow().as_ref(),
@@ -181,6 +184,7 @@ fn populated_projection() -> WorkspaceHomeProjection {
         WorkspaceHomeBackupStatus::Fresh,
         WorkspaceHomeHealthStatus::Healthy,
     )
+    .with_summary(WorkspaceHomeSummaryProjection::new(10_000, 2_500, 24))
 }
 
 fn document(id: &str, title: &str, path: &str) -> WorkspaceHomeDocumentProjection {

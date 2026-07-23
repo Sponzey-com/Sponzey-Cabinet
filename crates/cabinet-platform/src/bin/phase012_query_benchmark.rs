@@ -5,6 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use cabinet_adapters::durable_asset_metadata_catalog::DurableAssetMetadataCatalog;
 use cabinet_adapters::durable_canvas_repository::DurableCanvasRepository;
 use cabinet_adapters::durable_local_graph_projection::DurableLocalGraphProjectionStore;
+use cabinet_adapters::local_current_document_version_pointer::LocalCurrentDocumentVersionPointer;
 use cabinet_adapters::local_document_repository::LocalDocumentRepository;
 use cabinet_adapters::local_link_index::LocalLinkIndex;
 use cabinet_adapters::local_search_index::LocalSearchIndex;
@@ -31,6 +32,7 @@ use cabinet_domain::version::{
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::asset_metadata_catalog::AssetMetadataCatalog;
 use cabinet_ports::canvas_repository::{CanvasRecord, CanvasRepository};
+use cabinet_ports::current_document_version::CurrentDocumentVersionPointerPort;
 use cabinet_ports::document_repository::{CurrentDocumentRecord, DocumentRepository};
 use cabinet_ports::graph_projection::{GraphProjectionRecord, GraphProjectionStore};
 use cabinet_ports::link_index::{LinkIndex, LinkProjectionRecord};
@@ -56,6 +58,8 @@ const HISTORY_VERSION_COUNT: usize = 1_000;
 const LINK_COUNT: usize = 50_000;
 const GRAPH_NODE_COUNT: usize = 10_000;
 const GRAPH_EDGE_COUNT: usize = 50_000;
+const GLOBAL_STANDARD_NODE_COUNT: usize = 500;
+const GLOBAL_STANDARD_EDGE_COUNT: usize = 2_000;
 const CANVAS_NODE_COUNT: usize = 2_000;
 const CANVAS_EDGE_COUNT: usize = 4_000;
 const ASSET_COUNT: usize = 10_000;
@@ -146,8 +150,9 @@ fn main() {
         || {
             let output = GetGlobalKnowledgeGraphUsecase::new()
                 .execute(
-                    GetGlobalKnowledgeGraphInput::new(WORKSPACE, None, 1, 500, 1_000),
+                    GetGlobalKnowledgeGraphInput::new(WORKSPACE, None, true, true, 1, 1_000, 2_000),
                     &fixture.graphs,
+                    &fixture.current_versions,
                 )
                 .map_err(|error| error.code().to_string())?;
             Ok(output.nodes().len().min(PAGE_SIZE))
@@ -224,6 +229,7 @@ struct Fixture {
     search: LocalSearchIndex,
     links: LocalLinkIndex,
     graphs: DurableLocalGraphProjectionStore,
+    current_versions: LocalCurrentDocumentVersionPointer,
     canvas: DurableCanvasRepository,
     assets: DurableAssetMetadataCatalog,
 }
@@ -238,6 +244,8 @@ impl Fixture {
         let mut search = LocalSearchIndex::default();
         let mut links = LocalLinkIndex::default();
         let mut graphs = DurableLocalGraphProjectionStore::new(root.clone());
+        let mut current_versions =
+            LocalCurrentDocumentVersionPointer::new(root.join("document-current-pointers"));
         let mut canvas = DurableCanvasRepository::new(root.clone());
         let mut assets = DurableAssetMetadataCatalog::new(root.clone());
 
@@ -277,7 +285,7 @@ impl Fixture {
 
         seed_history(&mut versions, &workspace, body_policy);
         seed_links(&mut links, &workspace);
-        seed_graph(&mut graphs, &workspace);
+        seed_graph(&mut graphs, &mut current_versions, &workspace);
         seed_canvas(&mut canvas, &workspace);
         seed_assets(&mut assets, &workspace);
 
@@ -287,6 +295,7 @@ impl Fixture {
             search,
             links,
             graphs,
+            current_versions,
             canvas,
             assets,
         }
@@ -389,19 +398,63 @@ fn seed_links(links: &mut LocalLinkIndex, workspace: &WorkspaceId) {
     }
 }
 
-fn seed_graph(graphs: &mut DurableLocalGraphProjectionStore, workspace: &WorkspaceId) {
-    let nodes = (0..GRAPH_NODE_COUNT)
+fn seed_graph(
+    graphs: &mut DurableLocalGraphProjectionStore,
+    current_versions: &mut LocalCurrentDocumentVersionPointer,
+    workspace: &WorkspaceId,
+) {
+    graphs
+        .replace_projection(
+            workspace,
+            graph_record(
+                "doc-00000",
+                "global-standard",
+                GLOBAL_STANDARD_NODE_COUNT,
+                GLOBAL_STANDARD_EDGE_COUNT,
+            ),
+        )
+        .expect("seed global standard graph");
+    graphs
+        .replace_projection(
+            workspace,
+            graph_record(
+                TARGET_DOCUMENT,
+                "local-stress",
+                GRAPH_NODE_COUNT,
+                GRAPH_EDGE_COUNT,
+            ),
+        )
+        .expect("seed local stress graph");
+    for center in ["doc-00000", TARGET_DOCUMENT] {
+        current_versions
+            .compare_and_set_current_version(
+                workspace,
+                &DocumentId::new(center).expect("graph center"),
+                None,
+                VersionId::new("performance-revision").expect("graph version"),
+            )
+            .expect("seed graph current pointer");
+    }
+}
+
+fn graph_record(
+    center: &str,
+    edge_prefix: &str,
+    node_count: usize,
+    edge_count: usize,
+) -> GraphProjectionRecord {
+    let nodes = (0..node_count)
         .map(|index| GraphNode::new_document(document_id(index)))
         .collect::<Vec<_>>();
-    let edges = (0..GRAPH_EDGE_COUNT)
+    let edges = (0..edge_count)
         .map(|index| {
-            let source = index % GRAPH_NODE_COUNT;
-            let mut target = (index * 7 + index / GRAPH_NODE_COUNT + 1) % GRAPH_NODE_COUNT;
+            let source = index % node_count;
+            let mut target = (index * 7 + index / node_count + 1) % node_count;
             if target == source {
-                target = (target + 1) % GRAPH_NODE_COUNT;
+                target = (target + 1) % node_count;
             }
             GraphEdge::new(
-                &format!("edge-{index:05}"),
+                &format!("{edge_prefix}-edge-{index:05}"),
                 document_id(source).as_str().to_string(),
                 document_id(target).as_str().to_string(),
                 GraphEdgeKind::DocumentLink,
@@ -410,19 +463,13 @@ fn seed_graph(graphs: &mut DurableLocalGraphProjectionStore, workspace: &Workspa
         })
         .collect::<Vec<_>>();
     let graph = KnowledgeGraph::new_with_center(
-        DocumentId::new(TARGET_DOCUMENT).expect("center"),
+        DocumentId::new(center).expect("center"),
         nodes,
         edges,
         GraphProjectionStatus::Clean,
     )
     .expect("graph");
-    graphs
-        .replace_projection(
-            workspace,
-            GraphProjectionRecord::new_with_revision(graph, "performance-revision")
-                .expect("record"),
-        )
-        .expect("seed graph");
+    GraphProjectionRecord::new_with_revision(graph, "performance-revision").expect("record")
 }
 
 fn seed_assets(assets: &mut DurableAssetMetadataCatalog, workspace: &WorkspaceId) {

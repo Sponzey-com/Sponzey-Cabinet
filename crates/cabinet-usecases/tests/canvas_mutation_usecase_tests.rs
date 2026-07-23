@@ -20,8 +20,120 @@ use cabinet_usecases::canvas_mutation::{
     CanvasNodeTargetInput, ConnectCanvasEdgeInput, ConnectCanvasEdgeUsecase,
     PreviewAutoArrangeCanvasUsecase, RemoveCanvasEdgeInput, RemoveCanvasEdgeUsecase,
     RemoveCanvasNodeInput, RemoveCanvasNodeUsecase, UpdateCanvasNodeGeometryInput,
-    UpdateCanvasNodeGeometryUsecase, UpdateCanvasViewportInput, UpdateCanvasViewportUsecase,
+    UpdateCanvasNodeGeometryUsecase, UpdateCanvasTextCardInput, UpdateCanvasTextCardUsecase,
+    UpdateCanvasViewportInput, UpdateCanvasViewportUsecase,
 };
+
+#[test]
+fn text_card_edit_is_revisioned_and_preserves_geometry_without_logging_content() {
+    let mut repository = repository_with_state(CanvasLifecycleState::Draft);
+    let mut logger = RecordingLogger::default();
+    AddCanvasNodeMutationUsecase::new()
+        .execute(
+            AddCanvasNodeMutationInput::new(
+                "workspace-1",
+                "canvas-1",
+                1,
+                "memo-1",
+                CanvasNodeTargetInput::Text("old text".into()),
+                40,
+                60,
+                320,
+                180,
+            ),
+            &policy(),
+            &mut repository,
+            &mut logger,
+        )
+        .expect("add text card");
+
+    let edited = UpdateCanvasTextCardUsecase::new()
+        .execute(
+            UpdateCanvasTextCardInput::new(
+                "workspace-1",
+                "canvas-1",
+                2,
+                "memo-1",
+                "new private text",
+            ),
+            &mut repository,
+            &mut logger,
+        )
+        .expect("edit text card");
+
+    assert_eq!(edited.record().revision().value(), 3);
+    let node = &edited.record().canvas().nodes()[0];
+    assert_eq!(node.position().x(), 40);
+    assert_eq!(node.position().y(), 60);
+    assert_eq!(node.geometry().size().width(), 320);
+    assert!(
+        matches!(node.target(), cabinet_domain::canvas::CanvasNodeTarget::TextCard(value) if value.as_str() == "new private text")
+    );
+    assert!(matches!(
+        logger.events.last(),
+        Some(CanvasMutationProductEvent::TextCardUpdated {
+            revision: 3,
+            changed_node_count: 1,
+            ..
+        })
+    ));
+    assert!(!format!("{:?}", logger.events).contains("new private text"));
+}
+
+#[test]
+fn text_card_edit_rejects_invalid_wrong_kind_stale_and_archived_without_write() {
+    let mut repository = repository_with_state(CanvasLifecycleState::Draft);
+    let mut logger = RecordingLogger::default();
+    AddCanvasNodeMutationUsecase::new()
+        .execute(
+            AddCanvasNodeMutationInput::new(
+                "workspace-1",
+                "canvas-1",
+                1,
+                "document-1",
+                CanvasNodeTargetInput::Document("doc-1".into()),
+                0,
+                0,
+                320,
+                180,
+            ),
+            &policy(),
+            &mut repository,
+            &mut logger,
+        )
+        .expect("add document card");
+    let writes = repository.replace_calls;
+    let logs = logger.events.len();
+
+    for (revision, node, text, expected) in [
+        (2, "missing", "text", "CANVAS_NODE_NOT_FOUND"),
+        (2, "document-1", "text", "CANVAS_NODE_TARGET_MISMATCH"),
+        (2, "document-1", "  ", "CANVAS_INVALID_INPUT"),
+        (1, "document-1", "text", "CANVAS_VERSION_CONFLICT"),
+    ] {
+        let error = UpdateCanvasTextCardUsecase::new()
+            .execute(
+                UpdateCanvasTextCardInput::new("workspace-1", "canvas-1", revision, node, text),
+                &mut repository,
+                &mut logger,
+            )
+            .expect_err("edit must fail");
+        assert_eq!(error.code(), expected);
+    }
+    assert_eq!(repository.replace_calls, writes);
+    assert_eq!(logger.events.len(), logs);
+
+    let mut archived = repository_with_state(CanvasLifecycleState::Archived);
+    let error = UpdateCanvasTextCardUsecase::new()
+        .execute(
+            UpdateCanvasTextCardInput::new("workspace-1", "canvas-1", 1, "memo-1", "text"),
+            &mut archived,
+            &mut RecordingLogger::default(),
+        )
+        .expect_err("archived");
+    assert_eq!(error.code(), "CANVAS_INVALID_STATE");
+    assert_eq!(archived.replace_calls, 0);
+}
 
 #[test]
 fn node_edge_and_cascade_remove_are_revisioned_and_safely_logged() {

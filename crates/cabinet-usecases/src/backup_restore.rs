@@ -302,9 +302,28 @@ impl ConfirmBackupRestoreUsecase {
             .apply_restore(&workspace, &operation)
             .map_err(map_restore_error)?;
         if reopener.reopen_workspace(&workspace).is_err() {
-            let rolled_back = restores
-                .rollback_restore(&workspace, &operation)
-                .map_err(map_restore_error)?;
+            let rolled_back = match restores.rollback_restore(&workspace, &operation) {
+                Ok(rolled_back) => rolled_back,
+                Err(_) => {
+                    let recovery = restores
+                        .mark_recovery_required(&workspace, &operation)
+                        .map_err(map_restore_error)?;
+                    write_event(
+                        logger,
+                        "restore.recovery_required",
+                        &workspace,
+                        &package,
+                        &operation,
+                        recovery.state(),
+                        Some("RESTORE_ROLLBACK_FAILED"),
+                    );
+                    return Ok(ConfirmBackupRestoreOutput {
+                        operation_id: operation.as_str().into(),
+                        state: recovery.state(),
+                        error_code: Some("RESTORE_ROLLBACK_FAILED"),
+                    });
+                }
+            };
             write_event(
                 logger,
                 "restore.rolled_back",

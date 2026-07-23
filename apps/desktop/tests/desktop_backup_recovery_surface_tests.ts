@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { renderToStaticMarkup } from "react-dom/server";
 import React from "react";
 
 import { createDesktopBackupRecoverySnapshot } from "../src/desktop_backup_recovery_controller.ts";
 import { createDesktopBackupRecoveryElement } from "../src/react_backup_recovery.ts";
+
+const backupSource = await readFile(new URL("../src/react_backup_recovery.ts", import.meta.url), "utf8");
 
 test("backup surface renders accessible confirmation only for validated preview", () => {
   const snapshot = {
@@ -52,6 +55,32 @@ test("restore confirmation cancel button and Escape share one dismissal callback
   assert.equal(cancelled, 2);
 });
 
+test("restore confirmation explains replacement and rebuild impact without internal data", () => {
+  const snapshot = {
+    ...createDesktopBackupRecoverySnapshot("workspace-1"), state: "AwaitingConfirmation" as const,
+    packageId: "internal-package", manifest: { packageId: "internal-package", schemaVersion: 1, entries: [
+      { dataClass: "current_documents" as const, recordCount: 2, byteCount: 20 },
+      { dataClass: "graph_rebuild_metadata" as const, recordCount: 1, byteCount: 10 },
+    ] },
+  };
+  const markup = renderToStaticMarkup(createDesktopBackupRecoveryElement(snapshot, callbacks()));
+  assert.match(markup, /현재 버전과 호환됨/);
+  assert.match(markup, /백업 시점으로 교체/);
+  assert.match(markup, /복원 후 다시 구성/);
+  assert.doesNotMatch(markup, /internal-package/);
+});
+
+test("failed restore preview exposes retry without a confirm action", () => {
+  const snapshot = {
+    ...createDesktopBackupRecoverySnapshot("workspace-1"), state: "Failed" as const,
+    errorCode: "BACKUP_PACKAGE_CORRUPTED", packageId: "internal-package",
+    manifest: { packageId: "internal-package", schemaVersion: 1, entries: [] },
+  };
+  const markup = renderToStaticMarkup(createDesktopBackupRecoveryElement(snapshot, callbacks()));
+  assert.match(markup, /data-action="retry-backup-restore-preview"/);
+  assert.doesNotMatch(markup, /data-action="confirm-backup-restore"/);
+});
+
 test("retryable backup failure exposes retry while terminal failure does not", () => {
   const retryable = renderToStaticMarkup(createDesktopBackupRecoveryElement({
     ...createDesktopBackupRecoverySnapshot("workspace-1"), state: "Failed", errorCode: "BACKUP_COMMAND_FAILED", retryable: true,
@@ -72,6 +101,15 @@ test("cleanup-required state exposes retry and cancel without confirm", () => {
   assert.match(markup, /작업 취소/);
   assert.match(markup, /data-action="retry-backup-recovery"/);
   assert.doesNotMatch(markup, /RESTORE_CLEANUP_REQUIRED/);
+});
+
+test("recovery-required state is never presented as completed", () => {
+  const snapshot = { ...createDesktopBackupRecoverySnapshot("workspace-1"), state: "RecoveryRequired" as const, errorCode: "RESTORE_ROLLBACK_FAILED", retryable: true };
+  const markup = renderToStaticMarkup(createDesktopBackupRecoveryElement(snapshot, callbacks()));
+  assert.match(markup, /복구가 필요합니다/);
+  assert.match(markup, /복구 다시 시도/);
+  assert.doesNotMatch(markup, /복원 완료/);
+  assert.doesNotMatch(markup, /data-action="confirm-backup-restore"/);
 });
 
 test("created manifest exposes restore validation action", () => {
@@ -130,9 +168,19 @@ test("idle backup surface exposes navigation and creation contracts without iden
     callbacks(),
   ));
   assert.match(markup, /data-action="navigate-home"/);
+  assert.match(markup, /data-action="workspace-search-input"/);
+  assert.doesNotMatch(markup, /data-action="navigate-search"/);
   assert.match(markup, /data-action="create-backup"/);
+  assert.match(markup, />백업과 복원</);
+  assert.doesNotMatch(markup, /백업 및 복원/);
   assert.doesNotMatch(markup, /workspace-1/);
   assertNoUnidentifiedInteractiveControls(markup);
+});
+
+test("backup surface uses the shared primary navigation contract without injecting Search as a route", () => {
+  assert.match(backupSource, /WORKSPACE_SHELL_PRIMARY_ROUTES/);
+  assert.doesNotMatch(backupSource, /const shellRoutes[\s\S]*\bSearch\b/);
+  assert.doesNotMatch(backupSource, /availableActions:\s*shellRoutes/);
 });
 
 test("applying restore exposes cancel only while native operation is staging", () => {
@@ -145,8 +193,53 @@ test("applying restore exposes cancel only while native operation is staging", (
   assert.doesNotMatch(renderToStaticMarkup(createDesktopBackupRecoveryElement(applying, callbacks())), /복원 취소/);
 });
 
+test("backup catalog renders safe selectable summaries and load more without package identity", () => {
+  const first = { packageId: "internal-package-1", schemaVersion: 1, createdAtEpochMs: 1_784_064_000_000, entries: [
+    { dataClass: "current_documents" as const, recordCount: 2, byteCount: 20 },
+  ] };
+  const markup = renderToStaticMarkup(createDesktopBackupRecoveryElement({
+    ...createDesktopBackupRecoverySnapshot("workspace-1"),
+    catalogState: "Ready",
+    catalogRecords: [first],
+    catalogNextCursor: "opaque-cursor",
+    selectedCatalogPackageId: first.packageId,
+    state: "Ready",
+    packageId: first.packageId,
+    manifest: first,
+  }, callbacks()));
+  assert.match(markup, /최근 백업/);
+  assert.match(markup, /data-action="select-backup-catalog"/);
+  assert.match(markup, /aria-pressed="true"/);
+  assert.match(markup, /data-action="load-more-backup-catalog"/);
+  assert.doesNotMatch(markup, /internal-package-1|opaque-cursor/);
+});
+
+test("backup safety panel summarizes latest local backup without package identity or paths", () => {
+  const markup = renderToStaticMarkup(createDesktopBackupRecoveryElement({
+    ...createDesktopBackupRecoverySnapshot("workspace-1"),
+    catalogState: "Ready",
+    catalogRecords: [{
+      packageId: "internal-package-safe",
+      schemaVersion: 1,
+      createdAtEpochMs: 1_784_150_400_000,
+      entries: [
+        { dataClass: "current_documents" as const, recordCount: 4, byteCount: 40 },
+        { dataClass: "asset_metadata" as const, recordCount: 3, byteCount: 30 },
+        { dataClass: "canvas_records" as const, recordCount: 2, byteCount: 20 },
+      ],
+    }],
+  }, callbacks()));
+
+  assert.match(markup, /class="backup-safety-panel"/);
+  assert.match(markup, /내 지식 공간이 안전합니다/);
+  assert.match(markup, /마지막 백업/);
+  assert.match(markup, /이 Mac에 저장/);
+  assert.match(markup, /문서 4개 · 첨부 3개 · 캔버스 2개/);
+  assert.doesNotMatch(markup, /internal-package-safe|1784150400000|\/Users|file:\/\//);
+});
+
 function callbacks() {
-  return { onHome() {}, onCreateBackup() {}, onCancelBackup() {}, onPreviewRestore() {}, onConfirmRestore() {}, onCancelRestore() {}, onRecover() {} };
+  return { onHome() {}, onCreateBackup() {}, onCancelBackup() {}, onPreviewRestore() {}, onConfirmRestore() {}, onCancelRestore() {}, onRecover() {}, onReloadCatalog() {}, onLoadMoreCatalog() {}, onSelectCatalogPackage() {} };
 }
 
 function findElement(

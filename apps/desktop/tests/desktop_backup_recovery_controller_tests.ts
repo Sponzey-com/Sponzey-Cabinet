@@ -6,13 +6,25 @@ import {
   confirmDesktopRestore,
   createDesktopBackupRecoverySnapshot,
   dismissDesktopRestoreConfirmation,
+  loadDesktopBackupCatalog,
   pollDesktopBackupOperation,
   pollDesktopRestoreOperation,
   previewDesktopRestore,
   startDesktopBackupOperation,
   startDesktopRestoreOperation,
+  selectDesktopBackupCatalogPackage,
   type DesktopBackupClient,
 } from "../src/desktop_backup_recovery_controller.ts";
+
+test("backup catalog loads independently and selects only a loaded package", async () => {
+  const loaded = await loadDesktopBackupCatalog(fakeClient(), createDesktopBackupRecoverySnapshot("workspace-1"), { limit: 20 });
+  assert.equal(loaded.catalogState, "Ready");
+  assert.equal(loaded.catalogRecords.length, 1);
+  const selected = selectDesktopBackupCatalogPackage(loaded, "package-1");
+  assert.equal(selected.state, "Ready");
+  assert.equal(selected.manifest?.packageId, "package-1");
+  assert.equal(selectDesktopBackupCatalogPackage(loaded, "missing"), loaded);
+});
 
 test("durable backup start remains creating until completed status is validated", async () => {
   const client = fakeClient();
@@ -93,6 +105,16 @@ test("reopen rollback is explicit and does not become completed", async () => {
   assert.equal(result.errorCode, "RESTORE_REOPEN_FAILED");
 });
 
+test("rollback failure remains recovery required and retryable", async () => {
+  const client = fakeClient({ confirmState: "RecoveryRequired", confirmError: "RESTORE_ROLLBACK_FAILED" });
+  const preview = await previewDesktopRestore(client, createDesktopBackupRecoverySnapshot("workspace-1"), "package-1");
+
+  const result = await confirmDesktopRestore(client, preview, "operation-1");
+
+  assert.equal(result.state, "RecoveryRequired");
+  assert.equal(result.errorCode, "RESTORE_ROLLBACK_FAILED");
+});
+
 test("dismiss closes only a validated confirmation without native I/O", async () => {
   const preview = await previewDesktopRestore(fakeClient(), createDesktopBackupRecoverySnapshot("workspace-1"), "package-1");
   const dismissed = dismissDesktopRestoreConfirmation(preview);
@@ -101,8 +123,9 @@ test("dismiss closes only a validated confirmation without native I/O", async ()
   assert.equal(dismissDesktopRestoreConfirmation(createDesktopBackupRecoverySnapshot("workspace-1")).state, "Idle");
 });
 
-function fakeClient(options: { onConfirm?: () => void; confirmState?: "Completed" | "RolledBack"; confirmError?: string } = {}): DesktopBackupClient {
+function fakeClient(options: { onConfirm?: () => void; confirmState?: "Completed" | "RolledBack" | "RecoveryRequired"; confirmError?: string } = {}): DesktopBackupClient {
   return {
+    async listBackups() { return { records: Object.freeze([manifest()]) }; },
     async createBackup() { return manifest(); },
     async startBackupOperation(input) { return { operationId: input.operationId, state: "Queued", progressCompletedUnits: 0, progressTotalUnits: 8 }; },
     async getBackupOperationStatus(input) { return { operationId: input.operationId, state: "Completed", progressCompletedUnits: 8, progressTotalUnits: 8 }; },

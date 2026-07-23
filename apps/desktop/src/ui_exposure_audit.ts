@@ -2,6 +2,9 @@ export type UiExposureIssueCode =
   | "IDENTITY_EXPOSED"
   | "ERROR_CODE_EXPOSED"
   | "ABSOLUTE_PATH_EXPOSED"
+  | "MARKDOWN_FILENAME_EXPOSED"
+  | "SNAPSHOT_TERM_EXPOSED"
+  | "GIT_TERM_EXPOSED"
   | "ENGLISH_COPY_EXPOSED";
 
 export interface UiExposureIssue {
@@ -12,6 +15,9 @@ const RULES: readonly { readonly code: UiExposureIssueCode; readonly pattern: Re
   { code: "IDENTITY_EXPOSED", pattern: /\b(?:workspace|document|doc|canvas|asset|version|operation|package)-[a-z0-9][a-z0-9_-]*\b/i },
   { code: "ERROR_CODE_EXPOSED", pattern: /\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+){2,}\b/ },
   { code: "ABSOLUTE_PATH_EXPOSED", pattern: /(?:\/(?:Users|home|private|var)\/|[A-Z]:\\|file:\/\/)/i },
+  { code: "MARKDOWN_FILENAME_EXPOSED", pattern: /\b[\w./ -]+\.md\b/i },
+  { code: "SNAPSHOT_TERM_EXPOSED", pattern: /\b(?:snapshot|snapshot path|snapshot ref|snapshot reference)\b/i },
+  { code: "GIT_TERM_EXPOSED", pattern: /\b(?:git|commit|branch|repository|repo)\b/i },
   { code: "ENGLISH_COPY_EXPOSED", pattern: /\b(?:Retry|Save failed|Read-only recovery|Unsaved changes|Loading documents|Confirm restore|Cancel restore|Create backup|Load history)\b/i },
 ]);
 

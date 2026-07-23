@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cabinet_adapters::durable_canvas_repository::DurableCanvasRepository;
+use cabinet_adapters::durable_last_canvas_selection::DurableLastCanvasSelection;
 use cabinet_domain::asset::AssetId;
 use cabinet_domain::canvas::{
     Canvas, CanvasEdge, CanvasEdgeId, CanvasGeometry, CanvasGeometryPolicy, CanvasId,
@@ -11,6 +12,9 @@ use cabinet_domain::canvas::{
 };
 use cabinet_domain::document::DocumentId;
 use cabinet_domain::workspace::WorkspaceId;
+use cabinet_ports::canvas_catalog::{
+    CanvasCatalogError, CanvasCatalogPort, LastCanvasSelectionError, LastCanvasSelectionPort,
+};
 use cabinet_ports::canvas_recovery::CanvasRecoveryRepository;
 use cabinet_ports::canvas_repository::{CanvasRecord, CanvasRepository, CanvasRepositoryError};
 use cabinet_ports::canvas_viewport_query::{
@@ -70,6 +74,108 @@ fn durable_canvas_roundtrips_revisions_geometry_targets_edges_and_viewport() {
     assert_eq!(loaded, next);
     assert!(revision_path(&root.path, 1).exists());
     assert!(revision_path(&root.path, 2).exists());
+}
+
+#[test]
+fn durable_canvas_discovers_current_records_with_workspace_identity_and_limit() {
+    let root = TempRoot::new("current-discovery");
+    let workspace = WorkspaceId::new("workspace-1").expect("workspace");
+    let record = canvas_record(1, 100, CanvasLifecycleState::Saved);
+    let mut repository = DurableCanvasRepository::new(root.path.clone());
+    repository
+        .create_canvas(&workspace, record.clone())
+        .expect("create");
+
+    let discovered = DurableCanvasRepository::new(root.path.clone())
+        .list_current_canvas_records(10)
+        .expect("discover current Canvas records");
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].workspace_id(), &workspace);
+    assert_eq!(discovered[0].record(), &record);
+    assert_eq!(
+        repository.list_current_canvas_records(0),
+        Err(CanvasRepositoryError::InvalidInput)
+    );
+
+    let second_workspace = WorkspaceId::new("workspace-2").expect("second workspace");
+    repository
+        .create_canvas(&second_workspace, record)
+        .expect("create second workspace Canvas");
+    assert_eq!(
+        repository.list_current_canvas_records(1),
+        Err(CanvasRepositoryError::InvalidInput)
+    );
+}
+
+#[test]
+fn durable_canvas_catalog_is_workspace_bounded_and_filters_archived_records() {
+    let root = TempRoot::new("catalog-port");
+    let workspace = WorkspaceId::new("workspace-1").unwrap();
+    let another_workspace = WorkspaceId::new("workspace-2").unwrap();
+    let mut repository = DurableCanvasRepository::new(root.path.clone());
+    repository
+        .create_canvas(
+            &workspace,
+            catalog_record("active-canvas", "작업 Canvas", CanvasLifecycleState::Saved),
+        )
+        .unwrap();
+    repository
+        .create_canvas(
+            &workspace,
+            catalog_record(
+                "archived-canvas",
+                "보관 Canvas",
+                CanvasLifecycleState::Archived,
+            ),
+        )
+        .unwrap();
+    repository
+        .create_canvas(
+            &another_workspace,
+            catalog_record("other-canvas", "다른 Canvas", CanvasLifecycleState::Saved),
+        )
+        .unwrap();
+
+    let active = repository
+        .list_canvas_entries(&workspace, 10, false)
+        .expect("active catalog");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].canvas_id().as_str(), "active-canvas");
+    assert_eq!(active[0].title().as_str(), "작업 Canvas");
+    assert_eq!(active[0].revision().value(), 1);
+    assert_eq!(
+        repository.list_canvas_entries(&workspace, 1, true),
+        Err(CanvasCatalogError::LimitExceeded)
+    );
+}
+
+#[test]
+fn durable_last_canvas_selection_roundtrips_and_rejects_corruption() {
+    let root = TempRoot::new("last-selection");
+    let workspace = WorkspaceId::new("workspace-1").unwrap();
+    let canvas = CanvasId::new("canvas-recent").unwrap();
+    let mut selection = DurableLastCanvasSelection::new(root.path.clone());
+    assert_eq!(selection.load_last_canvas_id(&workspace).unwrap(), None);
+
+    selection
+        .save_last_canvas_id(&workspace, &canvas)
+        .expect("save selection");
+    assert_eq!(
+        DurableLastCanvasSelection::new(root.path.clone())
+            .load_last_canvas_id(&workspace)
+            .unwrap(),
+        Some(canvas)
+    );
+
+    let selection_file = root
+        .path
+        .join("preferences/canvas-selection")
+        .join(format!("{}.selection", hex("workspace-1")));
+    fs::write(selection_file, "schema\t99\ncanvas\tprivate-path\n").unwrap();
+    assert_eq!(
+        DurableLastCanvasSelection::new(root.path.clone()).load_last_canvas_id(&workspace),
+        Err(LastCanvasSelectionError::CorruptedSelection)
+    );
 }
 
 #[test]
@@ -268,6 +374,15 @@ fn canvas_record(revision: u64, zoom: u16, state: CanvasLifecycleState) -> Canva
         CanvasTitle::new("Product map").expect("title"),
         CanvasRevision::new(revision).expect("revision"),
         CanvasViewport::new(400, 300, zoom, &policy).expect("viewport"),
+    )
+}
+
+fn catalog_record(id: &str, title: &str, state: CanvasLifecycleState) -> CanvasRecord {
+    CanvasRecord::with_metadata(
+        Canvas::new(CanvasId::new(id).unwrap(), vec![], vec![], state).unwrap(),
+        CanvasTitle::new(title).unwrap(),
+        CanvasRevision::new(1).unwrap(),
+        CanvasViewport::default(),
     )
 }
 

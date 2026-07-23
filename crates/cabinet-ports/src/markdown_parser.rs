@@ -7,6 +7,8 @@ pub struct ParsedMarkdown {
     headings: Vec<MarkdownHeading>,
     wikilinks: Vec<ParsedWikilink>,
     asset_references: Vec<ParsedAssetReference>,
+    external_links: Vec<ParsedExternalLink>,
+    document_links: Vec<ParsedDocumentLink>,
 }
 
 impl ParsedMarkdown {
@@ -19,7 +21,19 @@ impl ParsedMarkdown {
             headings,
             wikilinks,
             asset_references,
+            external_links: Vec::new(),
+            document_links: Vec::new(),
         }
+    }
+
+    pub fn with_external_links(mut self, external_links: Vec<ParsedExternalLink>) -> Self {
+        self.external_links = external_links;
+        self
+    }
+
+    pub fn with_document_links(mut self, document_links: Vec<ParsedDocumentLink>) -> Self {
+        self.document_links = document_links;
+        self
     }
 
     pub fn headings(&self) -> &[MarkdownHeading] {
@@ -32,6 +46,96 @@ impl ParsedMarkdown {
 
     pub fn asset_references(&self) -> &[ParsedAssetReference] {
         &self.asset_references
+    }
+
+    pub fn external_links(&self) -> &[ParsedExternalLink] {
+        &self.external_links
+    }
+
+    pub fn document_links(&self) -> &[ParsedDocumentLink] {
+        &self.document_links
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDocumentLink {
+    target: String,
+    label: String,
+    source_range: SourceRange,
+}
+
+impl ParsedDocumentLink {
+    pub fn new(
+        target: &str,
+        label: &str,
+        source_range: SourceRange,
+    ) -> Result<Self, MarkdownParserError> {
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(MarkdownParserError::EmptyDocumentLinkTarget);
+        }
+        let label = label.trim();
+        if label.is_empty() {
+            return Err(MarkdownParserError::EmptyDocumentLinkLabel);
+        }
+        Ok(Self {
+            target: target.to_string(),
+            label: label.to_string(),
+            source_range,
+        })
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn source_range(&self) -> SourceRange {
+        self.source_range
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedExternalLink {
+    target: String,
+    label: String,
+    source_range: SourceRange,
+}
+
+impl ParsedExternalLink {
+    pub fn new(
+        target: &str,
+        label: &str,
+        source_range: SourceRange,
+    ) -> Result<Self, MarkdownParserError> {
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(MarkdownParserError::EmptyExternalLinkTarget);
+        }
+        let label = label.trim();
+        if label.is_empty() {
+            return Err(MarkdownParserError::EmptyExternalLinkLabel);
+        }
+        Ok(Self {
+            target: target.to_string(),
+            label: label.to_string(),
+            source_range,
+        })
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn source_range(&self) -> SourceRange {
+        self.source_range
     }
 }
 
@@ -163,6 +267,10 @@ pub enum MarkdownParserError {
     EmptyHeadingText,
     EmptyWikilinkTarget,
     EmptyAssetReferenceLabel,
+    EmptyExternalLinkTarget,
+    EmptyExternalLinkLabel,
+    EmptyDocumentLinkTarget,
+    EmptyDocumentLinkLabel,
     InvalidSourceRange,
 }
 
@@ -173,6 +281,10 @@ impl MarkdownParserError {
             Self::EmptyHeadingText => "markdown_parser.empty_heading_text",
             Self::EmptyWikilinkTarget => "markdown_parser.empty_wikilink_target",
             Self::EmptyAssetReferenceLabel => "markdown_parser.empty_asset_reference_label",
+            Self::EmptyExternalLinkTarget => "markdown_parser.empty_external_link_target",
+            Self::EmptyExternalLinkLabel => "markdown_parser.empty_external_link_label",
+            Self::EmptyDocumentLinkTarget => "markdown_parser.empty_document_link_target",
+            Self::EmptyDocumentLinkLabel => "markdown_parser.empty_document_link_label",
             Self::InvalidSourceRange => "markdown_parser.invalid_source_range",
         }
     }

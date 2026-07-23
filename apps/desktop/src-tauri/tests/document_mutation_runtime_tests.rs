@@ -12,7 +12,9 @@ use cabinet_adapters::local_document_repository::LocalDocumentRepository;
 use cabinet_adapters::local_version_store::LocalVersionStore;
 use cabinet_adapters::local_workspace_home_projection::LocalWorkspaceHomeProjectionStore;
 use cabinet_desktop_shell::{
-    DesktopDocumentMutationRequestDto, DesktopDocumentMutationRuntime, DesktopProjectionRuntime,
+    DesktopDocumentMutationRequestDto, DesktopDocumentMutationRuntime,
+    DesktopLocalCommandPayloadDto, DesktopLocalCommandRequestDto, DesktopProjectionRuntime,
+    DesktopWorkspaceHomeRuntime,
 };
 use cabinet_domain::document::DocumentId;
 use cabinet_domain::workspace::WorkspaceId;
@@ -153,6 +155,26 @@ fn authoritative_mutation_updates_home_and_enqueues_projection_work_for_each_rev
         .unwrap();
     assert_eq!(home.recent_documents().len(), 1);
     assert_eq!(home.recent_documents()[0].title(), "바뀐 제목");
+
+    let home_response = DesktopWorkspaceHomeRuntime::new(temp.path.clone()).execute(home_request());
+    assert!(home_response.ok);
+    let home_data = home_response.data.expect("home command data");
+    assert_eq!(home_data.recent_documents.len(), 1);
+    assert_eq!(home_data.recent_documents[0].title, "바뀐 제목");
+    assert_eq!(home_data.document_count, 1);
+    assert!(home_data.summary_unavailable.is_empty());
+
+    let restarted_home_response =
+        DesktopWorkspaceHomeRuntime::new(temp.path.clone()).execute(home_request());
+    assert!(restarted_home_response.ok);
+    let restarted_home_data = restarted_home_response
+        .data
+        .expect("restarted home command data");
+    assert_eq!(restarted_home_data.recent_documents.len(), 1);
+    assert_eq!(restarted_home_data.recent_documents[0].title, "바뀐 제목");
+    assert_eq!(restarted_home_data.document_count, 1);
+    assert!(restarted_home_data.summary_unavailable.is_empty());
+
     let updated_work = DurableProjectionWorkRepository::new(temp.path.clone())
         .list_resumable(20)
         .unwrap();
@@ -293,6 +315,20 @@ fn create_request(operation_id: &str, body: &str) -> DesktopDocumentMutationRequ
         body: body.into(),
         author: "local-user".into(),
         summary: "Create".into(),
+    }
+}
+
+fn home_request() -> DesktopLocalCommandRequestDto {
+    DesktopLocalCommandRequestDto {
+        command_name: "local_workspace_home".into(),
+        payload: DesktopLocalCommandPayloadDto::WorkspaceHome {
+            workspace_id: "workspace-1".into(),
+            recent_documents: 10,
+            favorites: 10,
+            tags: 10,
+            recent_changes: 10,
+            unfinished_items: 10,
+        },
     }
 }
 

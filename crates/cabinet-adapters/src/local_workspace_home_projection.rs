@@ -8,7 +8,8 @@ use cabinet_ports::workspace_home::{
     WorkspaceHomeBackupStatus, WorkspaceHomeChangeProjection, WorkspaceHomeDocumentMutation,
     WorkspaceHomeDocumentMutationPort, WorkspaceHomeDocumentProjection, WorkspaceHomeHealthStatus,
     WorkspaceHomeProjection, WorkspaceHomeProjectionError, WorkspaceHomeProjectionLimits,
-    WorkspaceHomeProjectionPort, WorkspaceHomeTagProjection, WorkspaceHomeUnfinishedProjection,
+    WorkspaceHomeProjectionPort, WorkspaceHomeSummaryProjection, WorkspaceHomeTagProjection,
+    WorkspaceHomeUnfinishedProjection,
 };
 
 use crate::local_atomic_file::write_text_atomically;
@@ -125,7 +126,8 @@ fn apply_document_mutation(
                 current.unfinished_items().to_vec(),
                 current.backup_status(),
                 current.health_status(),
-            ))
+            )
+            .with_summary(current.summary()))
         }
         WorkspaceHomeDocumentMutation::RemoveDocument { document_id } => {
             let document_id = document_id.as_str();
@@ -157,7 +159,8 @@ fn apply_document_mutation(
                     .collect(),
                 current.backup_status(),
                 current.health_status(),
-            ))
+            )
+            .with_summary(current.summary()))
         }
     }
 }
@@ -172,6 +175,12 @@ fn encode_projection(projection: &WorkspaceHomeProjection) -> String {
         format!(
             "health\t{}",
             encode_health_status(projection.health_status())
+        ),
+        format!(
+            "summary\t{}\t{}\t{}",
+            projection.summary().document_count(),
+            projection.summary().asset_count(),
+            projection.summary().canvas_count()
         ),
     ];
     lines.extend(
@@ -218,6 +227,7 @@ fn decode_projection(text: &str) -> Result<WorkspaceHomeProjection, WorkspaceHom
 
     let mut backup_status = None;
     let mut health_status = None;
+    let mut summary = None;
     let mut recent_documents = Vec::new();
     let mut favorites = Vec::new();
     let mut tags = Vec::new();
@@ -232,6 +242,13 @@ fn decode_projection(text: &str) -> Result<WorkspaceHomeProjection, WorkspaceHom
             }
             ["health", value] if health_status.is_none() => {
                 health_status = Some(decode_health_status(value)?);
+            }
+            ["summary", document_count, asset_count, canvas_count] if summary.is_none() => {
+                summary = Some(WorkspaceHomeSummaryProjection::new(
+                    decode_count(document_count)?,
+                    decode_count(asset_count)?,
+                    decode_count(canvas_count)?,
+                ));
             }
             ["recent", id, title, path] => {
                 recent_documents.push(decode_document(id, title, path)?);
@@ -278,13 +295,15 @@ fn decode_projection(text: &str) -> Result<WorkspaceHomeProjection, WorkspaceHom
         unfinished_items,
         backup_status.ok_or(WorkspaceHomeProjectionError::CorruptedProjection)?,
         health_status.ok_or(WorkspaceHomeProjectionError::CorruptedProjection)?,
-    ))
+    )
+    .with_summary(summary.unwrap_or_default()))
 }
 
 fn apply_limits(
     projection: WorkspaceHomeProjection,
     limits: WorkspaceHomeProjectionLimits,
 ) -> WorkspaceHomeProjection {
+    let summary = projection.summary();
     WorkspaceHomeProjection::new(
         projection
             .recent_documents()
@@ -319,6 +338,13 @@ fn apply_limits(
         projection.backup_status(),
         projection.health_status(),
     )
+    .with_summary(summary)
+}
+
+fn decode_count(value: &str) -> Result<u32, WorkspaceHomeProjectionError> {
+    value
+        .parse::<u32>()
+        .map_err(|_| WorkspaceHomeProjectionError::CorruptedProjection)
 }
 
 fn encode_document(kind: &str, item: &WorkspaceHomeDocumentProjection) -> String {

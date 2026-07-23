@@ -178,7 +178,11 @@ fn phase011_fixture_upgrades_extends_backs_up_restores_and_reopens() {
     );
     let restored = backup.run_restore_operation(restore);
     assert!(restored.ok, "restore error={:?}", restored.error_code);
-    assert_eq!(restored.state, "Completed");
+    assert_eq!(
+        restored.state, "Completed",
+        "restore error={:?}",
+        restored.error_code
+    );
 
     let reopened_query = DesktopDocumentQueryRuntime::new(runtime_root.path.clone(), BODY_LIMIT)
         .expect("reopened query");
@@ -257,7 +261,12 @@ fn phase011_fixture_upgrades_extends_backs_up_restores_and_reopens() {
             .iter()
             .filter(|work| work.identity().change_kind() == ProjectionChangeKind::Restored)
             .count(),
-        3
+        0,
+        "a completed restore must process every derived projection before returning"
+    );
+    assert!(
+        directory_has_file(&runtime_root.path.join("graph-projections")),
+        "a completed restore must publish a durable graph projection"
     );
     assert_eq!(fingerprint(&source.path), source_before);
 }
@@ -331,6 +340,16 @@ fn copy_tree(source: &Path, destination: &Path) {
             fs::copy(entry.path(), target).expect("copy fixture file");
         }
     }
+}
+
+fn directory_has_file(root: &Path) -> bool {
+    fs::read_dir(root).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            entry.file_type().is_ok_and(|kind| {
+                kind.is_file() || (kind.is_dir() && directory_has_file(&entry.path()))
+            })
+        })
+    })
 }
 
 fn fingerprint(root: &Path) -> Vec<(String, Vec<u8>)> {

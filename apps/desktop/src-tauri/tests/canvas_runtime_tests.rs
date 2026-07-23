@@ -3,9 +3,12 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cabinet_adapters::durable_asset_metadata_catalog::DurableAssetMetadataCatalog;
+use cabinet_adapters::durable_local_graph_projection::DurableLocalGraphProjectionStore;
 use cabinet_adapters::local_document_repository::LocalDocumentRepository;
 use cabinet_desktop_shell::{
     DesktopCanvasProductEvent, DesktopCanvasRequestDto, DesktopCanvasRuntime,
+    DesktopGlobalKnowledgeGraphRequestDto, DesktopGlobalKnowledgeGraphRuntime,
+    DesktopKnowledgeGraphRuntime, DesktopLocalCommandPayloadDto, DesktopLocalCommandRequestDto,
 };
 use cabinet_domain::asset::{
     AssetCatalogRecord, AssetExtractionStatus, AssetFileName, AssetId, AssetMediaType,
@@ -14,10 +17,171 @@ use cabinet_domain::asset::{
 use cabinet_domain::document::{
     DocumentBody, DocumentBodyPolicy, DocumentId, DocumentMetadata, DocumentPath, DocumentTitle,
 };
+use cabinet_domain::graph::{GraphNode, GraphProjectionStatus, KnowledgeGraph};
 use cabinet_domain::version::CurrentDocumentSnapshot;
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::asset_metadata_catalog::AssetMetadataCatalog;
 use cabinet_ports::document_repository::{CurrentDocumentRecord, DocumentRepository};
+use cabinet_ports::graph_projection::{GraphProjectionRecord, GraphProjectionStore};
+
+#[test]
+fn desktop_canvas_edges_flow_to_local_and_global_topology_and_disappear_on_remove_and_archive() {
+    let root = temp_root("graph-projection");
+    seed_canvas_targets(&root);
+    seed_base_graph(&root);
+    let canvas = DesktopCanvasRuntime::new(root.clone()).expect("runtime");
+    assert!(
+        canvas
+            .execute(DesktopCanvasRequestDto::Create {
+                workspace_id: "workspace-1".into(),
+                canvas_id: "canvas-1".into(),
+                title: "Topology".into(),
+            })
+            .ok
+    );
+    assert!(
+        canvas
+            .execute(DesktopCanvasRequestDto::AddDocumentNode {
+                workspace_id: "workspace-1".into(),
+                canvas_id: "canvas-1".into(),
+                expected_revision: 1,
+                node_id: "document-1".into(),
+                document_id: "doc-1".into(),
+                x: 0,
+                y: 0,
+                width: 320,
+                height: 180,
+                operation_id: "add-document".into(),
+            })
+            .ok
+    );
+    assert!(
+        canvas
+            .execute(DesktopCanvasRequestDto::AddAssetNode {
+                workspace_id: "workspace-1".into(),
+                canvas_id: "canvas-1".into(),
+                expected_revision: 2,
+                node_id: "asset-1".into(),
+                asset_id: "a".repeat(64),
+                x: 400,
+                y: 0,
+                width: 320,
+                height: 180,
+                operation_id: "add-asset".into(),
+            })
+            .ok
+    );
+    let connected = canvas.execute(DesktopCanvasRequestDto::ConnectEdge {
+        workspace_id: "workspace-1".into(),
+        canvas_id: "canvas-1".into(),
+        expected_revision: 3,
+        edge_id: "edge-1".into(),
+        source_node_id: "document-1".into(),
+        target_node_id: "asset-1".into(),
+        operation_id: "connect".into(),
+    });
+    assert!(connected.ok, "connected={connected:?}");
+
+    let local = graph(&root);
+    assert!(local.ok, "local={local:?}");
+    let data = local.data.unwrap();
+    assert!(data.edges.iter().any(|edge| edge.kind == "canvas_relation"));
+    assert!(data.nodes.iter().any(|node| {
+        node.kind == "attachment" && node.label == "canvas.txt" && node.can_navigate
+    }));
+    let global = DesktopGlobalKnowledgeGraphRuntime::new(root.clone()).execute(
+        DesktopGlobalKnowledgeGraphRequestDto {
+            workspace_id: "workspace-1".into(),
+            cursor: None,
+            include_unresolved: true,
+            include_assets: true,
+            projection_limit: 10,
+            node_limit: 10,
+            edge_limit: 10,
+        },
+    );
+    assert!(global.ok, "global={global:?}");
+    assert!(
+        global
+            .data
+            .unwrap()
+            .edges
+            .iter()
+            .any(|edge| edge.kind == "canvas_relation")
+    );
+    assert!(
+        graph(&root)
+            .data
+            .unwrap()
+            .edges
+            .iter()
+            .any(|edge| edge.kind == "canvas_relation")
+    );
+    fs::remove_dir_all(
+        root.join("canvas-graph-relations")
+            .join(hex("workspace-1"))
+            .join("by-document"),
+    )
+    .expect("remove Canvas relation references");
+    assert!(graph(&root).data.unwrap().edges.is_empty());
+    let _recovered = DesktopCanvasRuntime::new(root.clone()).expect("startup reference recovery");
+    assert!(
+        graph(&root)
+            .data
+            .unwrap()
+            .edges
+            .iter()
+            .any(|edge| edge.kind == "canvas_relation")
+    );
+
+    fs::remove_dir_all(root.join("canvas-graph-relations"))
+        .expect("remove Canvas relation projection");
+    assert!(graph(&root).data.unwrap().edges.is_empty());
+    let canvas = DesktopCanvasRuntime::new(root.clone()).expect("startup relation recovery");
+    assert!(
+        graph(&root)
+            .data
+            .unwrap()
+            .edges
+            .iter()
+            .any(|edge| edge.kind == "canvas_relation")
+    );
+
+    let removed = canvas.execute(DesktopCanvasRequestDto::RemoveEdge {
+        workspace_id: "workspace-1".into(),
+        canvas_id: "canvas-1".into(),
+        expected_revision: 4,
+        edge_id: "edge-1".into(),
+        operation_id: "remove-edge".into(),
+    });
+    assert!(removed.ok, "removed={removed:?}");
+    assert!(graph(&root).data.unwrap().edges.is_empty());
+
+    assert!(
+        canvas
+            .execute(DesktopCanvasRequestDto::ConnectEdge {
+                workspace_id: "workspace-1".into(),
+                canvas_id: "canvas-1".into(),
+                expected_revision: 5,
+                edge_id: "edge-2".into(),
+                source_node_id: "document-1".into(),
+                target_node_id: "asset-1".into(),
+                operation_id: "reconnect".into(),
+            })
+            .ok
+    );
+    let archived = canvas.execute(DesktopCanvasRequestDto::Archive {
+        workspace_id: "workspace-1".into(),
+        canvas_id: "canvas-1".into(),
+        expected_revision: 6,
+        operation_id: "archive".into(),
+    });
+    assert!(archived.ok, "archived={archived:?}");
+    assert!(graph(&root).data.unwrap().edges.is_empty());
+    let _restarted = DesktopCanvasRuntime::new(root.clone()).expect("archived restart");
+    assert!(graph(&root).data.unwrap().edges.is_empty());
+    let _ = fs::remove_dir_all(root);
+}
 
 #[test]
 fn desktop_canvas_runtime_persists_complete_dto_and_rejects_stale_mutation() {
@@ -116,6 +280,78 @@ fn desktop_canvas_runtime_persists_complete_dto_and_rejects_stale_mutation() {
     let serialized = serde_json::to_string(&data).expect("json");
     assert!(!serialized.contains(root.to_string_lossy().as_ref()));
     assert!(!serialized.contains("bytes"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn desktop_canvas_runtime_edits_text_card_and_reads_it_after_restart() {
+    let root = temp_root("text-edit-restart");
+    let runtime = DesktopCanvasRuntime::new(root.clone()).expect("runtime");
+    assert!(
+        runtime
+            .execute(DesktopCanvasRequestDto::Create {
+                workspace_id: "workspace-1".into(),
+                canvas_id: "canvas-1".into(),
+                title: "Text cards".into(),
+            })
+            .ok
+    );
+    assert!(
+        runtime
+            .execute(DesktopCanvasRequestDto::AddTextNode {
+                workspace_id: "workspace-1".into(),
+                canvas_id: "canvas-1".into(),
+                expected_revision: 1,
+                node_id: "note-1".into(),
+                text: "old private text".into(),
+                x: 40,
+                y: 60,
+                width: 320,
+                height: 180,
+                operation_id: "add-text".into(),
+            })
+            .ok
+    );
+
+    let edited = runtime.execute(DesktopCanvasRequestDto::UpdateTextCard {
+        workspace_id: "workspace-1".into(),
+        canvas_id: "canvas-1".into(),
+        expected_revision: 2,
+        node_id: "note-1".into(),
+        text: "edited private text".into(),
+        operation_id: "edit-text".into(),
+    });
+    assert!(edited.ok, "edited={edited:?}");
+    assert_eq!(edited.operation_id.as_deref(), Some("edit-text"));
+    let edited_data = edited.data.expect("edited data");
+    assert_eq!(edited_data.revision, 3);
+    assert_eq!(edited_data.nodes[0].display_label, "edited private text");
+    assert_eq!(edited_data.nodes[0].x, 40);
+    assert_eq!(edited_data.nodes[0].width, 320);
+
+    let stale = runtime.execute(DesktopCanvasRequestDto::UpdateTextCard {
+        workspace_id: "workspace-1".into(),
+        canvas_id: "canvas-1".into(),
+        expected_revision: 2,
+        node_id: "note-1".into(),
+        text: "must not persist".into(),
+        operation_id: "stale-edit".into(),
+    });
+    assert!(!stale.ok);
+    assert_eq!(stale.error_code.as_deref(), Some("CANVAS_VERSION_CONFLICT"));
+    assert!(!format!("{stale:?}").contains("must not persist"));
+
+    drop(runtime);
+    let reopened = DesktopCanvasRuntime::new(root.clone())
+        .expect("restart")
+        .execute(DesktopCanvasRequestDto::Get {
+            workspace_id: "workspace-1".into(),
+            canvas_id: "canvas-1".into(),
+        });
+    assert!(reopened.ok, "reopened={reopened:?}");
+    let reopened = reopened.data.expect("reopened data");
+    assert_eq!(reopened.revision, 3);
+    assert_eq!(reopened.nodes[0].display_label, "edited private text");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -530,6 +766,14 @@ fn desktop_canvas_runtime_surfaces_corrupt_and_future_schema_as_recovery_require
                 .ok
         );
         fs::write(canvas_current_path(&root), content).expect("overwrite current");
+        let viewport = runtime.execute(viewport_request());
+        assert!(!viewport.ok);
+        assert_eq!(
+            viewport.error_code.as_deref(),
+            Some("CANVAS_RECOVERY_REQUIRED")
+        );
+        assert!(viewport.recovery_required);
+        assert!(viewport.data.is_none());
         let response = runtime.execute(DesktopCanvasRequestDto::Get {
             workspace_id: "workspace-1".into(),
             canvas_id: "canvas-1".into(),
@@ -647,6 +891,40 @@ fn viewport_request() -> DesktopCanvasRequestDto {
         node_limit: 250,
         edge_limit: 500,
     }
+}
+
+fn seed_base_graph(root: &std::path::Path) {
+    let workspace = WorkspaceId::new("workspace-1").unwrap();
+    let center = DocumentId::new("doc-1").unwrap();
+    let graph = KnowledgeGraph::new_with_center(
+        center.clone(),
+        vec![GraphNode::new_document(center)],
+        vec![],
+        GraphProjectionStatus::Clean,
+    )
+    .unwrap();
+    DurableLocalGraphProjectionStore::new(root.to_path_buf())
+        .replace_projection(
+            &workspace,
+            GraphProjectionRecord::new_with_revision(graph, "doc-v1").unwrap(),
+        )
+        .unwrap();
+}
+
+fn graph(root: &std::path::Path) -> cabinet_desktop_shell::DesktopKnowledgeGraphCommandResponse {
+    DesktopKnowledgeGraphRuntime::new(root.to_path_buf()).execute(DesktopLocalCommandRequestDto {
+        command_name: "get_graph_projection".into(),
+        payload: DesktopLocalCommandPayloadDto::GraphProjection {
+            workspace_id: "workspace-1".into(),
+            document_id: "doc-1".into(),
+            depth: 1,
+            direction: "both".into(),
+            include_unresolved: true,
+            include_assets: true,
+            node_limit: 20,
+            edge_limit: 20,
+        },
+    })
 }
 
 fn canvas_current_path(root: &std::path::Path) -> PathBuf {

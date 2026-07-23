@@ -5,8 +5,8 @@ use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::workspace_home::{
     WorkspaceHomeBackupStatus, WorkspaceHomeChangeProjection, WorkspaceHomeDocumentProjection,
     WorkspaceHomeHealthStatus, WorkspaceHomeProjection, WorkspaceHomeProjectionError,
-    WorkspaceHomeProjectionLimits, WorkspaceHomeProjectionPort, WorkspaceHomeTagProjection,
-    WorkspaceHomeUnfinishedProjection,
+    WorkspaceHomeProjectionLimits, WorkspaceHomeProjectionPort, WorkspaceHomeSummaryProjection,
+    WorkspaceHomeTagProjection, WorkspaceHomeUnfinishedProjection,
 };
 use cabinet_usecases::workspace_home::{
     GetWorkspaceHomeError, GetWorkspaceHomeInput, GetWorkspaceHomeUsecase, WorkspaceHomeLoadEvent,
@@ -68,6 +68,9 @@ fn get_workspace_home_returns_bounded_projection_without_success_product_log() {
     assert_eq!(output.unfinished_items()[0].label(), "Review draft");
     assert_eq!(output.backup_status(), WorkspaceHomeBackupStatus::Fresh);
     assert_eq!(output.health_status(), WorkspaceHomeHealthStatus::Healthy);
+    assert_eq!(output.summary().document_count(), 10_000);
+    assert_eq!(output.summary().asset_count(), 2_500);
+    assert_eq!(output.summary().canvas_count(), 24);
     assert_eq!(output.product_log_event_name(), None);
     assert_eq!(port.call_count.get(), 1);
     assert_eq!(port.last_limit.get(), Some(12));
@@ -97,6 +100,24 @@ fn get_workspace_home_classifies_empty_and_degraded_projection_states() {
     assert_eq!(degraded.state(), WorkspaceHomeLoadState::Degraded);
     assert_eq!(empty.total_item_count(), 0);
     assert_eq!(degraded.product_log_event_name(), None);
+}
+
+#[test]
+fn get_workspace_home_does_not_classify_summary_only_workspace_as_empty() {
+    let projection = WorkspaceHomeProjection::empty(
+        WorkspaceHomeBackupStatus::NeverCreated,
+        WorkspaceHomeHealthStatus::Healthy,
+    )
+    .with_summary(WorkspaceHomeSummaryProjection::new(1, 0, 0));
+
+    let output = GetWorkspaceHomeUsecase::new()
+        .execute(
+            valid_input(10),
+            &FakeWorkspaceHomeProjectionPort::returning(projection),
+        )
+        .expect("summary-only home");
+
+    assert_eq!(output.state(), WorkspaceHomeLoadState::Ready);
 }
 
 #[test]
@@ -223,6 +244,7 @@ fn populated_projection() -> WorkspaceHomeProjection {
         WorkspaceHomeBackupStatus::Fresh,
         WorkspaceHomeHealthStatus::Healthy,
     )
+    .with_summary(WorkspaceHomeSummaryProjection::new(10_000, 2_500, 24))
 }
 
 fn document(id: &str, title: &str, path: &str) -> WorkspaceHomeDocumentProjection {

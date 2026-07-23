@@ -1,6 +1,8 @@
 import type { KoKrMessageKey, MessageCatalog } from "./ko_kr_catalog.ts";
 
 export type WorkspaceShellRouteKind = "Home" | "Search" | "Document" | "Graph" | "Canvas" | "Assets" | "Backup";
+export type WorkspaceShellPrimaryRouteKind = Exclude<WorkspaceShellRouteKind, "Search">;
+export type WorkspaceShellGlobalToolRouteKind = Extract<WorkspaceShellRouteKind, "Search">;
 export type WorkspaceShellLayoutVariant = "standard" | "focused" | "immersive";
 
 export interface WorkspaceShellInput {
@@ -32,6 +34,19 @@ export const WORKSPACE_SHELL_LAYOUT = Object.freeze({
   contentGapPx: 24,
 });
 
+export const WORKSPACE_SHELL_PRIMARY_ROUTES: readonly WorkspaceShellPrimaryRouteKind[] = Object.freeze([
+  "Home",
+  "Document",
+  "Graph",
+  "Canvas",
+  "Assets",
+  "Backup",
+]);
+
+export const WORKSPACE_SHELL_GLOBAL_TOOL_ROUTES: readonly WorkspaceShellGlobalToolRouteKind[] = Object.freeze([
+  "Search",
+]);
+
 const routeDefinitions: readonly Readonly<{
   route: WorkspaceShellRouteKind;
   labelKey: KoKrMessageKey;
@@ -61,8 +76,12 @@ export function createWorkspaceShellModel(input: WorkspaceShellInput): Workspace
   if (!activeDefinition) throw new WorkspaceShellContractError("SHELL_ROUTE_UNKNOWN");
   const available = new Set(input.availableActions);
   if (available.size !== input.availableActions.length) throw new WorkspaceShellContractError("SHELL_ACTION_DUPLICATE");
-  if (routeDefinitions.some((definition) => !available.has(definition.route))) throw new WorkspaceShellContractError("SHELL_ACTION_MISSING");
-  const navigation = Object.freeze(routeDefinitions.map((definition) => Object.freeze({
+  if (WORKSPACE_SHELL_PRIMARY_ROUTES.some((route) => !available.has(route))) throw new WorkspaceShellContractError("SHELL_ACTION_MISSING");
+  const navigation = Object.freeze(routeDefinitions
+    .filter((definition): definition is typeof definition & { readonly route: WorkspaceShellPrimaryRouteKind } =>
+      WORKSPACE_SHELL_PRIMARY_ROUTES.includes(definition.route as WorkspaceShellPrimaryRouteKind)
+    )
+    .map((definition) => Object.freeze({
     route: definition.route,
     label: input.messages.message(definition.labelKey),
     active: definition.route === input.route,

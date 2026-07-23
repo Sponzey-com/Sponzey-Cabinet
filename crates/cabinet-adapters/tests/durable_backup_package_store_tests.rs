@@ -7,12 +7,97 @@ use cabinet_adapters::durable_backup_package_store::{
 };
 use cabinet_domain::backup::{BackupDataClass, BackupJobId};
 use cabinet_domain::workspace::WorkspaceId;
+use cabinet_ports::backup_catalog::{BackupCatalogError, BackupCatalogPort};
 use cabinet_ports::backup_package::{BackupPackageStore, BackupPackageStoreError};
 
 const FIXED_CREATED_AT_EPOCH_MS: u64 = 1_784_064_000_000;
 
 fn fixed_clock() -> u64 {
     FIXED_CREATED_AT_EPOCH_MS
+}
+
+fn older_clock() -> u64 {
+    FIXED_CREATED_AT_EPOCH_MS - 1_000
+}
+
+fn newer_clock() -> u64 {
+    FIXED_CREATED_AT_EPOCH_MS + 1_000
+}
+
+#[test]
+fn catalog_pages_newest_first_and_survives_adapter_restart() {
+    let fixture = Fixture::new("catalog-restart");
+    fixture.seed_complete_workspace();
+    fixture
+        .store_with_clock(older_clock)
+        .build_package(&workspace(), &BackupJobId::new("backup-old").unwrap())
+        .unwrap();
+    fixture
+        .store_with_clock(newer_clock)
+        .build_package(&workspace(), &BackupJobId::new("backup-new").unwrap())
+        .unwrap();
+
+    let first = fixture
+        .store()
+        .list_backup_packages(&workspace(), None, 1)
+        .unwrap();
+    assert_eq!(first.records()[0].package_id().as_str(), "backup-new");
+    assert_eq!(first.next_cursor(), Some("1"));
+
+    let second = fixture
+        .store()
+        .list_backup_packages(&workspace(), first.next_cursor(), 1)
+        .unwrap();
+    assert_eq!(second.records()[0].package_id().as_str(), "backup-old");
+    assert_eq!(second.next_cursor(), None);
+
+    let restarted = fixture
+        .store()
+        .list_backup_packages(&workspace(), None, 1)
+        .unwrap();
+    assert_eq!(restarted, first);
+}
+
+#[test]
+fn catalog_rejects_noncanonical_cursor_and_corrupt_package_entry() {
+    let fixture = Fixture::new("catalog-corrupt");
+    fixture.seed_complete_workspace();
+    fixture
+        .store_with_clock(fixed_clock)
+        .build_package(&workspace(), &package())
+        .unwrap();
+
+    assert_eq!(
+        fixture
+            .store()
+            .list_backup_packages(&workspace(), Some("01"), 1),
+        Err(BackupCatalogError::InvalidCursor),
+    );
+    fs::write(fixture.package_root().join("manifest.tsv"), b"corrupt").unwrap();
+    assert_eq!(
+        fixture.store().list_backup_packages(&workspace(), None, 10),
+        Err(BackupCatalogError::CorruptedCatalog),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn catalog_rejects_symlink_package_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new("catalog-symlink");
+    let external = fixture.root.join("outside");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("manifest.tsv"), b"outside").unwrap();
+    let package_root = fixture.package_root();
+    fs::create_dir_all(package_root.parent().unwrap()).unwrap();
+    symlink(&external, &package_root).unwrap();
+
+    assert_eq!(
+        fixture.store().list_backup_packages(&workspace(), None, 10),
+        Err(BackupCatalogError::CorruptedCatalog),
+    );
+    assert_eq!(fs::read(external.join("manifest.tsv")).unwrap(), b"outside");
 }
 
 #[test]

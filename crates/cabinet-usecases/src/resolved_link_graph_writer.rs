@@ -138,6 +138,18 @@ impl<
                 _ => ProjectionWriteError::Permanent,
             })
     }
+    fn resolve_relative(
+        &self,
+        id: &ProjectionWorkIdentity,
+        target: &str,
+    ) -> Result<LinkTargetResolution, ProjectionWriteError> {
+        self.resolver
+            .resolve_relative(id.workspace_id(), id.document_id(), target)
+            .map_err(|error| match error {
+                LinkTargetResolverError::Unavailable => ProjectionWriteError::Retryable,
+                _ => ProjectionWriteError::Permanent,
+            })
+    }
     fn write_links(
         &mut self,
         id: &ProjectionWorkIdentity,
@@ -147,6 +159,20 @@ impl<
         let mut unresolved = vec![];
         for link in parsed.wikilinks() {
             match self.resolve(id, link.target())? {
+                LinkTargetResolution::Resolved(target) => backlinks.push(Backlink::new(
+                    id.document_id().clone(),
+                    target.document_id().clone(),
+                    link.source_range(),
+                )),
+                LinkTargetResolution::Unresolved(slug) => unresolved.push(DocumentLink::new(
+                    id.document_id().clone(),
+                    LinkTarget::unresolved(slug),
+                    link.source_range(),
+                )),
+            }
+        }
+        for link in parsed.document_links() {
+            match self.resolve_relative(id, link.target())? {
                 LinkTargetResolution::Resolved(target) => backlinks.push(Backlink::new(
                     id.document_id().clone(),
                     target.document_id().clone(),
@@ -191,6 +217,43 @@ impl<
                     center.id().to_string(),
                     node.id().to_string(),
                     GraphEdgeKind::DocumentLink,
+                )
+                .map_err(|_| ProjectionWriteError::Permanent)?,
+            )
+        }
+        for (index, link) in parsed.document_links().iter().enumerate() {
+            let node = match self.resolve_relative(id, link.target())? {
+                LinkTargetResolution::Resolved(target) => {
+                    GraphNode::new_document(target.document_id().clone())
+                }
+                LinkTargetResolution::Unresolved(slug) => GraphNode::new_unresolved(slug.as_str())
+                    .map_err(|_| ProjectionWriteError::Permanent)?,
+            };
+            if seen.insert(node.id().to_string()) {
+                nodes.push(node.clone())
+            }
+            edges.push(
+                GraphEdge::new(
+                    &format!("markdown-link-{index}"),
+                    center.id().to_string(),
+                    node.id().to_string(),
+                    GraphEdgeKind::DocumentLink,
+                )
+                .map_err(|_| ProjectionWriteError::Permanent)?,
+            )
+        }
+        for (index, link) in parsed.external_links().iter().enumerate() {
+            let node = GraphNode::new_external_link(link.target())
+                .map_err(|_| ProjectionWriteError::Permanent)?;
+            if seen.insert(node.id().to_string()) {
+                nodes.push(node.clone())
+            }
+            edges.push(
+                GraphEdge::new(
+                    &format!("external-{index}"),
+                    center.id().to_string(),
+                    node.id().to_string(),
+                    GraphEdgeKind::ExternalReference,
                 )
                 .map_err(|_| ProjectionWriteError::Permanent)?,
             )

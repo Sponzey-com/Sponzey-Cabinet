@@ -50,6 +50,57 @@ fn local_markdown_parser_ignores_invalid_asset_reference_without_failing_parse()
     assert_eq!(parsed.wikilinks()[0].target(), "Still Parsed");
 }
 
+#[test]
+fn local_markdown_parser_extracts_standard_external_links_but_ignores_code_and_relative_targets() {
+    let body = body(
+        "# Links\n[Cabinet](https://user:secret@example.com/docs?q=private)\n\
+         [Mail](mailto:team@example.com)\n[Relative](../local.md)\n\
+         `[Code](https://code.example)`\n```md\n[Fence](https://fence.example)\n```\n",
+    );
+
+    let parsed = LocalMarkdownParser::new().parse(&body).expect("parse");
+
+    assert_eq!(parsed.external_links().len(), 2);
+    assert_eq!(
+        parsed.external_links()[0].target(),
+        "https://user:secret@example.com/docs?q=private"
+    );
+    assert_eq!(parsed.external_links()[0].label(), "Cabinet");
+    assert_eq!(
+        parsed.external_links()[1].target(),
+        "mailto:team@example.com"
+    );
+    assert_eq!(parsed.external_links()[1].label(), "Mail");
+    let range = parsed.external_links()[0].source_range();
+    assert_eq!(
+        &body.as_str()[range.start()..range.end()],
+        "[Cabinet](https://user:secret@example.com/docs?q=private)"
+    );
+}
+
+#[test]
+fn local_markdown_parser_extracts_relative_document_links_with_fragments_and_ignores_images() {
+    let body = body(
+        "# Links\n[Sibling](sibling.md)\n[Parent](../shared/note.md#details)\n\
+         ![Image](images/picture.md)\n`[Code](hidden.md)`\n[Query](note.md?q=private)\n",
+    );
+
+    let parsed = LocalMarkdownParser::new().parse(&body).expect("parse");
+
+    assert_eq!(parsed.document_links().len(), 2);
+    assert_eq!(parsed.document_links()[0].target(), "sibling.md");
+    assert_eq!(parsed.document_links()[0].label(), "Sibling");
+    assert_eq!(
+        parsed.document_links()[1].target(),
+        "../shared/note.md#details"
+    );
+    let range = parsed.document_links()[1].source_range();
+    assert_eq!(
+        &body.as_str()[range.start()..range.end()],
+        "[Parent](../shared/note.md#details)"
+    );
+}
+
 fn body(value: &str) -> DocumentBody {
     DocumentBody::new(value, DocumentBodyPolicy::new(4096).expect("policy")).expect("body")
 }

@@ -18,11 +18,13 @@ test("backup transport maps all commands and returns immutable typed results", a
     if (command === "recover_desktop_backup_startup") {
       return { ok: true, state: "Completed", recovery: { cleanedStagingCount: 1, rolledBackOperationIds: [], cleanupRequiredOperationIds: [] }, retryable: false };
     }
+    if (command === "list_desktop_backup_catalog") return { ok: true, state: "Ready", records: [manifest()], nextCursor: "1", retryable: false };
     if (command === "confirm_desktop_backup_restore") return { ok: true, state: "Completed", operationId: "operation-1", retryable: false };
     if (command === "cancel_desktop_backup_restore") return { ok: true, state: "Cancelled", operationId: "operation-1", retryable: false };
     return { ok: true, state: command.startsWith("preview") ? "AwaitingConfirmation" : "Ready", confirmationReady: command.startsWith("preview") ? true : undefined, manifest: manifest(), retryable: false };
   });
 
+  const catalog = await transport.listBackups({ workspaceId: "workspace-1", limit: 20 });
   const created = await transport.createBackup({ workspaceId: "workspace-1", packageId: "package-1" });
   const started = await transport.startBackupOperation({ workspaceId: "workspace-1", operationId: "operation-1" });
   const status = await transport.getBackupOperationStatus({ workspaceId: "workspace-1", operationId: "operation-1" });
@@ -35,6 +37,8 @@ test("backup transport maps all commands and returns immutable typed results", a
   const recovery = await transport.recoverStartup({ workspaceId: "workspace-1" });
 
   assert.equal(created.entries.length, 8);
+  assert.equal(catalog.records.length, 1);
+  assert.equal(catalog.nextCursor, "1");
   assert.equal(created.createdAtEpochMs, 1_784_064_000_000);
   assert.equal(started.state, "Queued");
   assert.equal(status.state, "Completed");
@@ -47,14 +51,15 @@ test("backup transport maps all commands and returns immutable typed results", a
   assert.equal(cancelled.state, "Cancelled");
   assert.equal(recovery.cleanedStagingCount, 1);
   assert.deepEqual(calls.map((call) => call.command), [
-    "create_desktop_backup_package", "start_desktop_backup_operation",
+    "list_desktop_backup_catalog", "create_desktop_backup_package", "start_desktop_backup_operation",
     "get_desktop_backup_operation_status", "cancel_desktop_backup_operation",
     "start_desktop_restore_operation", "get_desktop_restore_operation_status",
     "preview_desktop_backup_restore",
     "confirm_desktop_backup_restore", "cancel_desktop_backup_restore",
     "recover_desktop_backup_startup",
   ]);
-  assert.deepEqual(calls[0]?.args, { request: { workspaceId: "workspace-1", packageId: "package-1" } });
+  assert.deepEqual(calls[0]?.args, { request: { workspaceId: "workspace-1", limit: 20 } });
+  assert.deepEqual(calls[1]?.args, { request: { workspaceId: "workspace-1", packageId: "package-1" } });
   assert.ok(Object.isFrozen(created));
   assert.ok(Object.isFrozen(created.entries));
 });
@@ -80,6 +85,41 @@ test("backup transport accepts legacy manifest without creation time", async () 
     (await legacy.createBackup({ workspaceId: "workspace-1", packageId: "package-1" })).createdAtEpochMs,
     undefined,
   );
+});
+
+test("backup transport preserves explicit restore recovery-required state", async () => {
+  const transport = createTauriBackupRecoveryTransport(async (command) => {
+    if (command === "confirm_desktop_backup_restore") {
+      return { ok: true, state: "RecoveryRequired", operationId: "operation-1", errorCode: "RESTORE_ROLLBACK_FAILED", retryable: true };
+    }
+    return restoreOperation("RecoveryRequired");
+  });
+
+  const confirmed = await transport.confirmRestore({ workspaceId: "workspace-1", packageId: "package-1", operationId: "operation-1", confirmed: true });
+  const status = await transport.getRestoreOperationStatus({ workspaceId: "workspace-1", operationId: "operation-1" });
+
+  assert.equal(confirmed.state, "RecoveryRequired");
+  assert.equal(confirmed.errorCode, "RESTORE_ROLLBACK_FAILED");
+  assert.equal(status.state, "RecoveryRequired");
+});
+
+test("backup catalog transport rejects duplicate, unsorted, and sensitive records", async () => {
+  const duplicate = createTauriBackupRecoveryTransport(async () => ({
+    ok: true, state: "Ready", records: [manifest(), manifest()], retryable: false,
+  }));
+  const unsorted = createTauriBackupRecoveryTransport(async () => ({
+    ok: true, state: "Ready", records: [
+      { ...manifest(), packageId: "older", createdAtEpochMs: 100 },
+      { ...manifest(), packageId: "newer", createdAtEpochMs: 200 },
+    ], retryable: false,
+  }));
+  const leaking = createTauriBackupRecoveryTransport(async () => ({
+    ok: true, state: "Ready", records: [{ ...manifest(), path: "/private/backup" }], retryable: false,
+  }));
+
+  await assert.rejects(() => duplicate.listBackups({ workspaceId: "workspace-1", limit: 20 }), /COMMAND_BRIDGE_FAILED/);
+  await assert.rejects(() => unsorted.listBackups({ workspaceId: "workspace-1", limit: 20 }), /COMMAND_BRIDGE_FAILED/);
+  await assert.rejects(() => leaking.listBackups({ workspaceId: "workspace-1", limit: 20 }), /COMMAND_BRIDGE_FAILED/);
 });
 
 function manifest() {

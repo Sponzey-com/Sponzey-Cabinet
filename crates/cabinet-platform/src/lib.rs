@@ -1,5 +1,6 @@
 //! Platform shell boundary for desktop, web server, and future mobile adapters.
 
+pub mod asset_search_command;
 pub mod document_authoring_command;
 pub mod document_navigator_command;
 pub mod local_desktop_runtime;

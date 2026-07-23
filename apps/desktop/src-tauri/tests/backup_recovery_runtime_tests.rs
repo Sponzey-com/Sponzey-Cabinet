@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 
 use cabinet_adapters::durable_projection_work_repository::DurableProjectionWorkRepository;
 use cabinet_desktop_shell::{
-    DesktopBackupPackageRequestDto, DesktopBackupProductEvent, DesktopBackupRecoveryRequestDto,
-    DesktopBackupRecoveryRuntime, DesktopDocumentMutationRequestDto,
-    DesktopDocumentMutationRuntime, DesktopRestoreCancelRequestDto,
-    DesktopRestoreConfirmRequestDto,
+    DesktopBackupCatalogRequestDto, DesktopBackupPackageRequestDto, DesktopBackupProductEvent,
+    DesktopBackupRecoveryRequestDto, DesktopBackupRecoveryRuntime,
+    DesktopDocumentMutationRequestDto, DesktopDocumentMutationRuntime,
+    DesktopRestoreCancelRequestDto, DesktopRestoreConfirmRequestDto,
 };
 use cabinet_domain::projection_work::ProjectionChangeKind;
 use cabinet_ports::projection_work::ProjectionWorkRepository;
@@ -47,6 +47,36 @@ fn native_runtime_creates_and_previews_ui_safe_complete_manifest() {
         assert!(!json.contains(prohibited), "response leaked {prohibited}");
     }
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_runtime_lists_bounded_backup_catalog_after_restart() {
+    let root = temp_root("catalog");
+    seed_workspace(&root, "workspace-1");
+    let initial_runtime = runtime(root.clone());
+    for package_id in ["package-1", "package-2"] {
+        assert!(
+            initial_runtime
+                .create(DesktopBackupPackageRequestDto {
+                    workspace_id: "workspace-1".into(),
+                    package_id: package_id.into(),
+                })
+                .ok
+        );
+    }
+    drop(initial_runtime);
+
+    let page = runtime(root.clone()).list_catalog(DesktopBackupCatalogRequestDto {
+        workspace_id: "workspace-1".into(),
+        cursor: None,
+        limit: 1,
+    });
+    assert!(page.ok);
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.next_cursor.as_deref(), Some("1"));
+    let json = serde_json::to_string(&page).unwrap();
+    assert!(!json.contains("checksum"));
+    assert!(!json.contains(root.to_str().unwrap()));
 }
 
 #[test]
@@ -165,10 +195,14 @@ fn restore_runtime_starts_statuses_and_runs_a_durable_operation() {
         .iter()
         .filter(|work| work.identity().change_kind() == ProjectionChangeKind::Restored)
         .count();
-    assert_eq!(restored_count, 3, "resumable works: {works:?}");
+    assert_eq!(restored_count, 0, "resumable works: {works:?}");
     assert!(runtime.product_events().iter().any(|event| matches!(event,
         DesktopBackupProductEvent::Operation { event_name, state, error_code }
             if event_name == "restore.projection_rebuild.requested" && state == "Pending" && error_code.is_none()
+    )));
+    assert!(runtime.product_events().iter().any(|event| matches!(event,
+        DesktopBackupProductEvent::Operation { event_name, state, error_code }
+            if event_name == "restore.projection_rebuild.completed" && state == "Completed" && error_code.is_none()
     )));
     let _ = fs::remove_dir_all(root);
 }

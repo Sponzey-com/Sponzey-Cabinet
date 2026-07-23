@@ -1,5 +1,6 @@
 use cabinet_domain::projection_work::{
-    ProjectionChangeKind, ProjectionKind, ProjectionWork, ProjectionWorkIdentity,
+    ProjectionChangeKind, ProjectionKind, ProjectionWork, ProjectionWorkEvent,
+    ProjectionWorkIdentity, ProjectionWorkState,
 };
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::current_document_projection_catalog::{
@@ -26,6 +27,7 @@ pub struct RebuildRestoreProjectionsOutput {
     document_count: usize,
     enqueued_count: usize,
     duplicate_count: usize,
+    reset_count: usize,
 }
 impl RebuildRestoreProjectionsOutput {
     pub const fn document_count(self) -> usize {
@@ -36,6 +38,10 @@ impl RebuildRestoreProjectionsOutput {
     }
     pub const fn duplicate_count(self) -> usize {
         self.duplicate_count
+    }
+
+    pub const fn reset_count(self) -> usize {
+        self.reset_count
     }
 }
 
@@ -86,12 +92,46 @@ impl RebuildRestoreProjectionsUsecase {
             .map_err(map_catalog_error)?;
         let mut enqueued_count = 0;
         let mut duplicate_count = 0;
+        let mut reset_count = 0;
         for current in &identities {
             for kind in [
                 ProjectionKind::Search,
                 ProjectionKind::Links,
                 ProjectionKind::Graph,
             ] {
+                for change_kind in [
+                    ProjectionChangeKind::Created,
+                    ProjectionChangeKind::Updated,
+                    ProjectionChangeKind::Restored,
+                    ProjectionChangeKind::Renamed,
+                    ProjectionChangeKind::Deleted,
+                    ProjectionChangeKind::AssetAttached,
+                    ProjectionChangeKind::AssetDetached,
+                ] {
+                    let existing_identity = ProjectionWorkIdentity::for_change(
+                        workspace.clone(),
+                        current.document_id().clone(),
+                        current.version_id().clone(),
+                        kind,
+                        change_kind,
+                    );
+                    let Some(existing) = repository
+                        .get(&existing_identity)
+                        .map_err(map_repository_error)?
+                    else {
+                        continue;
+                    };
+                    if existing.state() != ProjectionWorkState::Failed {
+                        continue;
+                    }
+                    let reset = existing
+                        .transition(ProjectionWorkEvent::ReindexRequested)
+                        .map_err(|_| RebuildRestoreProjectionsError::RepositoryCorrupted)?;
+                    repository
+                        .replace(reset, ProjectionWorkState::Failed)
+                        .map_err(map_repository_error)?;
+                    reset_count += 1;
+                }
                 let identity = ProjectionWorkIdentity::for_change(
                     workspace.clone(),
                     current.document_id().clone(),
@@ -112,6 +152,7 @@ impl RebuildRestoreProjectionsUsecase {
             document_count: identities.len(),
             enqueued_count,
             duplicate_count,
+            reset_count,
         })
     }
 }

@@ -295,7 +295,9 @@ impl BackupRestoreStore for LocalBackupRestoreStore {
         }
         for slot in &slots {
             let rollback = root.join("rollback").join(slot.key);
-            if slot.target.exists() {
+            let rollback_expected = slot.target.exists();
+            write_slot_marker(&root, slot, rollback_expected, SlotMarkerPhase::Intent)?;
+            if rollback_expected {
                 create_parent(&rollback)?;
                 fs::rename(&slot.target, &rollback)
                     .map_err(|_| BackupRestoreStoreError::StorageUnavailable)?;
@@ -310,8 +312,7 @@ impl BackupRestoreStore for LocalBackupRestoreStore {
                     return Err(BackupRestoreStoreError::StorageUnavailable);
                 }
             }
-            write_text_atomically(&slot_marker(&root, slot), "applied\n")
-                .map_err(|_| BackupRestoreStoreError::StorageUnavailable)?;
+            write_slot_marker(&root, slot, rollback_expected, SlotMarkerPhase::Applied)?;
         }
         let applied = snapshot.with_state(RestoreState::Reopening);
         self.write_status(&root, &applied)?;
@@ -401,6 +402,25 @@ impl BackupRestoreStore for LocalBackupRestoreStore {
         self.write_status(&self.operation_root(workspace_id, operation_id), &required)?;
         Ok(required)
     }
+
+    fn mark_recovery_required(
+        &mut self,
+        workspace_id: &WorkspaceId,
+        operation_id: &BackupJobId,
+    ) -> Result<BackupRestoreOperationSnapshot, BackupRestoreStoreError> {
+        let snapshot = self.load_required(workspace_id, operation_id)?;
+        if !matches!(
+            snapshot.state(),
+            RestoreState::Reopening
+                | RestoreState::RollbackRequired
+                | RestoreState::RecoveryRequired
+        ) {
+            return Err(BackupRestoreStoreError::Conflict);
+        }
+        let required = snapshot.with_state(RestoreState::RecoveryRequired);
+        self.write_status(&self.operation_root(workspace_id, operation_id), &required)?;
+        Ok(required)
+    }
 }
 
 impl BackupRecoveryStore for LocalBackupRestoreStore {
@@ -459,7 +479,10 @@ impl BackupRecoveryStore for LocalBackupRestoreStore {
             };
             if matches!(
                 snapshot.state(),
-                RestoreState::Applying | RestoreState::Reopening | RestoreState::RollbackRequired
+                RestoreState::Applying
+                    | RestoreState::Reopening
+                    | RestoreState::RollbackRequired
+                    | RestoreState::RecoveryRequired
             ) {
                 let root = self.operation_root(workspace_id, &operation);
                 if restore_slots(&root, &self.target_slots(workspace_id)).is_err() {
@@ -519,21 +542,133 @@ impl TargetSlot {
 }
 
 fn restore_slots(root: &Path, slots: &[TargetSlot]) -> Result<(), BackupRestoreStoreError> {
-    for slot in slots.iter().rev() {
-        let rollback = root.join("rollback").join(slot.key);
-        let marker = slot_marker(root, slot);
-        if !rollback.exists() && !marker.exists() {
+    let markers = validate_restore_slots(root, slots)?;
+    for (slot, marker) in slots.iter().zip(markers).rev() {
+        let Some(marker) = marker else {
             continue;
-        }
+        };
+        let rollback = root.join("rollback").join(slot.key);
         remove_path(&slot.target)?;
-        if rollback.exists() {
+        if marker.rollback_expected {
             create_parent(&slot.target)?;
             fs::rename(rollback, &slot.target)
                 .map_err(|_| BackupRestoreStoreError::StorageUnavailable)?;
         }
-        remove_path(&marker)?;
+        remove_path(&slot_marker(root, slot))?;
     }
     Ok(())
+}
+
+fn validate_restore_slots(
+    root: &Path,
+    slots: &[TargetSlot],
+) -> Result<Vec<Option<SlotMarker>>, BackupRestoreStoreError> {
+    let mut markers = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let marker_path = slot_marker(root, slot);
+        let marker = match fs::symlink_metadata(&marker_path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                let text = fs::read_to_string(&marker_path)
+                    .map_err(|_| BackupRestoreStoreError::CorruptedOperation)?;
+                Some(decode_slot_marker(&text)?)
+            }
+            Ok(_) => return Err(BackupRestoreStoreError::CorruptedOperation),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(BackupRestoreStoreError::StorageUnavailable),
+        };
+        let rollback = root.join("rollback").join(slot.key);
+        if let Some(marker) = marker {
+            match fs::symlink_metadata(&rollback) {
+                Ok(metadata)
+                    if marker.rollback_expected
+                        && !metadata.file_type().is_symlink()
+                        && (metadata.is_dir() || metadata.is_file()) => {}
+                Ok(_) => return Err(BackupRestoreStoreError::CorruptedOperation),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && !marker.rollback_expected => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(BackupRestoreStoreError::CorruptedOperation);
+                }
+                Err(_) => return Err(BackupRestoreStoreError::StorageUnavailable),
+            }
+        } else {
+            match fs::symlink_metadata(&rollback) {
+                Ok(_) => return Err(BackupRestoreStoreError::CorruptedOperation),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(BackupRestoreStoreError::StorageUnavailable),
+            }
+        }
+        markers.push(marker);
+    }
+    Ok(markers)
+}
+
+#[derive(Clone, Copy)]
+struct SlotMarker {
+    rollback_expected: bool,
+    _phase: SlotMarkerPhase,
+}
+
+#[derive(Clone, Copy)]
+enum SlotMarkerPhase {
+    Intent,
+    Applied,
+}
+
+fn write_slot_marker(
+    root: &Path,
+    slot: &TargetSlot,
+    rollback_expected: bool,
+    phase: SlotMarkerPhase,
+) -> Result<(), BackupRestoreStoreError> {
+    let phase = match phase {
+        SlotMarkerPhase::Intent => "intent",
+        SlotMarkerPhase::Applied => "applied",
+    };
+    write_text_atomically(
+        &slot_marker(root, slot),
+        format!(
+            "schema\t1\nrollback_expected\t{}\nphase\t{phase}\n",
+            u8::from(rollback_expected)
+        ),
+    )
+    .map(|_| ())
+    .map_err(|_| BackupRestoreStoreError::StorageUnavailable)
+}
+
+fn decode_slot_marker(text: &str) -> Result<SlotMarker, BackupRestoreStoreError> {
+    let mut schema = None;
+    let mut rollback_expected = None;
+    let mut phase = None;
+    for line in text.lines() {
+        let (key, value) = line
+            .split_once('\t')
+            .ok_or(BackupRestoreStoreError::CorruptedOperation)?;
+        match key {
+            "schema" if schema.replace(value).is_none() => {}
+            "rollback_expected" if rollback_expected.replace(value).is_none() => {}
+            "phase" if phase.replace(value).is_none() => {}
+            _ => return Err(BackupRestoreStoreError::CorruptedOperation),
+        }
+    }
+    if schema != Some("1") {
+        return Err(BackupRestoreStoreError::CorruptedOperation);
+    }
+    let rollback_expected = match rollback_expected {
+        Some("0") => false,
+        Some("1") => true,
+        _ => return Err(BackupRestoreStoreError::CorruptedOperation),
+    };
+    let phase = match phase {
+        Some("intent") => SlotMarkerPhase::Intent,
+        Some("applied") => SlotMarkerPhase::Applied,
+        _ => return Err(BackupRestoreStoreError::CorruptedOperation),
+    };
+    Ok(SlotMarker {
+        rollback_expected,
+        _phase: phase,
+    })
 }
 
 fn slot_marker(root: &Path, slot: &TargetSlot) -> PathBuf {
@@ -671,6 +806,7 @@ fn state_name(state: RestoreState) -> &'static str {
         RestoreState::Applying => "applying",
         RestoreState::Reopening => "reopening",
         RestoreState::RollbackRequired => "rollback_required",
+        RestoreState::RecoveryRequired => "recovery_required",
         RestoreState::RolledBack => "rolled_back",
         RestoreState::Completed => "completed",
         RestoreState::CleanupRequired => "cleanup_required",
@@ -685,6 +821,7 @@ fn parse_state(value: &str) -> Result<RestoreState, BackupRestoreStoreError> {
         "applying" => Ok(RestoreState::Applying),
         "reopening" => Ok(RestoreState::Reopening),
         "rollback_required" => Ok(RestoreState::RollbackRequired),
+        "recovery_required" => Ok(RestoreState::RecoveryRequired),
         "rolled_back" => Ok(RestoreState::RolledBack),
         "completed" => Ok(RestoreState::Completed),
         "cleanup_required" => Ok(RestoreState::CleanupRequired),

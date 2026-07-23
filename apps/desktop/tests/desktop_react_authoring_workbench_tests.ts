@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { DocumentSaveCoordinatorState } from "@sponzey-cabinet/ui";
@@ -10,7 +11,218 @@ import {
   applyDesktopAssetResult,
   createDesktopAssetSnapshot,
   requestDesktopAssetLoad,
+  requestDesktopWorkspaceAssetLoad,
 } from "../src/desktop_asset_controller.ts";
+import {
+  applyAttachmentFileStatus,
+  createAttachmentFileSnapshot,
+} from "../src/attachment_operation_presenter.ts";
+import {
+  applyDesktopGraphResult,
+  createDesktopGraphSnapshot,
+  requestDesktopGraphLoad,
+  selectDesktopGraphNode,
+} from "../src/desktop_graph_controller.ts";
+
+test("React authoring keeps the global workspace search available", () => {
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(
+    snapshot(),
+    callbacks(),
+  ));
+
+  assert.match(markup, /data-action="workspace-search-input"/);
+  assert.match(markup, /data-action="submit-workspace-search"/);
+  assert.match(markup, /data-action="workspace-search-input"[^>]*aria-label="검색"/);
+  assert.match(markup, /data-action="submit-workspace-search"[^>]*aria-label="검색"/);
+  assert.match(markup, /placeholder="문서와 첨부 파일 검색"/);
+  assert.equal((markup.match(/role="search"/g) ?? []).length, 1);
+});
+
+test("React authoring search button uses an explicit click handler instead of submit-only behavior", async () => {
+  const source = await readFile(new URL("../src/react_document_authoring_workbench.ts", import.meta.url), "utf8");
+
+  assert.match(source, /type:\s*"button",[\s\S]{0,260}"data-action":\s*"submit-workspace-search"[\s\S]{0,260}onClick:/);
+  assert.match(source, /event\.currentTarget\.form/);
+});
+
+test("React authoring source keeps legacy editor modes out of the desktop boundary", async () => {
+  const workbench = await readFile(new URL("../src/react_document_authoring_workbench.ts", import.meta.url), "utf8");
+  const entry = await readFile(new URL("../src/desktop_entry.ts", import.meta.url), "utf8");
+  const smoke = await readFile(new URL("../src/packaged_ui_smoke.ts", import.meta.url), "utf8");
+  const manifest = await readFile(new URL("../src/core_ui_action_manifest.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(workbench, /DocumentEditorViewMode|viewMode|renderPreviewBlock|createMarkdownPreviewModel/);
+  assert.doesNotMatch(entry, /editorViewMode|setEditorViewMode|DocumentEditorViewMode/);
+  for (const source of [workbench, entry, smoke, manifest]) {
+    assert.doesNotMatch(source, /authoring-mode-(?:source|split|preview)/);
+  }
+});
+
+test("React authoring WYSIWYG edits flow through the synchronization session guard", async () => {
+  const workbench = await readFile(new URL("../src/react_document_authoring_workbench.ts", import.meta.url), "utf8");
+
+  assert.match(workbench, /applyWysiwygPatchToSyncSession/);
+  assert.match(workbench, /createWysiwygPlainTextSyncSession/);
+  assert.match(workbench, /baseRevision:\s*revision/);
+  assert.doesNotMatch(workbench, /callbacks\.onBodyChange\(result\.nextBody\)/);
+});
+
+test("React authoring exposes Penpot 20260721 formatting commands in icon order", () => {
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(
+    snapshot(),
+    callbacks(),
+  ));
+  const actions = [...markup.matchAll(/data-action="format-([^"]+)"/g)].map((match) => match[1]);
+
+  assert.deepEqual(actions, ["heading", "bold", "italic", "link", "list", "checklist", "table"]);
+  for (const [action, label] of [
+    ["heading", "제목"],
+    ["bold", "굵게"],
+    ["italic", "기울임"],
+    ["link", "링크"],
+    ["list", "목록"],
+    ["checklist", "체크리스트"],
+    ["table", "표"],
+  ]) {
+    assert.match(markup, new RegExp(`data-action="format-${action}"[^>]*aria-label="${label}"`));
+  }
+
+  const toolbar = markup.match(/<div class="formatting-toolbar"[\s\S]*?<\/div>/)?.[0] ?? "";
+  assert.doesNotMatch(toolbar, />제목<|>굵게<|>기울임<|>링크<|>목록<|>체크리스트<|>표</);
+});
+
+test("React authoring formatting commands dispatch through an explicit callback boundary", () => {
+  const commands: string[] = [];
+  const tree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(
+    snapshot(),
+    { ...callbacks(), onFormatCommand(command) { commands.push(command); } },
+  ));
+
+  clickElement(tree, (props) => props["data-action"] === "format-bold");
+  clickElement(tree, (props) => props["data-action"] === "format-table");
+
+  assert.deepEqual(commands, ["bold", "table"]);
+});
+
+test("React authoring workbench renders the current document local graph instead of decorative topology", () => {
+  const loading = requestDesktopGraphLoad(createDesktopGraphSnapshot("workspace-1"), {
+    centerDocumentId: "doc-1",
+    scope: "local",
+  });
+  const graph = applyDesktopGraphResult(loading, loading.generation, {
+    centerDocumentId: "doc-1",
+    status: "clean",
+    nodes: [
+      { id: "doc-1", kind: "document", label: "Source", availability: "available", canNavigate: true },
+      { id: "doc-2", kind: "document", label: "연결된 설계", availability: "available", canNavigate: true },
+    ],
+    edges: [{ id: "edge-1", sourceId: "doc-1", targetId: "doc-2", kind: "document_link" }],
+    stats: { candidateCount: 2, filteredCount: 0 },
+    freshnessRevision: "version-1",
+  });
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(
+    snapshot(),
+    {
+      ...callbacks(),
+      onGraph() {},
+      onLocalGraphNodeSelect() {},
+      onLocalGraphRetry() {},
+      onLocalGraphRepair() {},
+      onOpenLinkedDocument() {},
+    },
+    { graph },
+  ));
+
+  assert.match(markup, /data-authoring-local-graph-state="Ready"/);
+  assert.match(markup, /data-topology-renderer-host="accelerated"/);
+  assert.match(markup, /data-topology-semantic-list="available"/);
+  assert.match(markup, />연결된 설계</);
+  assert.match(markup, /data-action="select-graph-node"/);
+  assert.match(markup, /data-action="open-graph-document"/);
+  assert.doesNotMatch(markup, /map-dot|map-spoke|authoring-map-preview/);
+  assert.doesNotMatch(markup, /notes\/source\.md|version-1/);
+});
+
+test("React authoring local graph controls dispatch bounded query, recenter, and attachment actions", () => {
+  const loading = requestDesktopGraphLoad(createDesktopGraphSnapshot("workspace-1"), {
+    centerDocumentId: "doc-1",
+    scope: "local",
+  });
+  const ready = applyDesktopGraphResult(loading, loading.generation, {
+    centerDocumentId: "doc-1",
+    status: "clean",
+    nodes: [
+      { id: "doc-1", kind: "document", label: "Source", availability: "available", canNavigate: true },
+      { id: "doc-2", kind: "document", label: "연결된 설계", availability: "available", canNavigate: true },
+      { id: "asset-1", kind: "attachment", label: "설계 자료", availability: "available", canNavigate: true },
+    ],
+    edges: [
+      { id: "edge-1", sourceId: "doc-1", targetId: "doc-2", kind: "document_link" },
+      { id: "edge-2", sourceId: "doc-1", targetId: "asset-1", kind: "attachment_reference" },
+    ],
+    stats: { candidateCount: 3, filteredCount: 0 },
+    freshnessRevision: "version-1",
+  });
+  const patches: unknown[] = [];
+  let openedAsset: string | undefined;
+  const baseCallbacks = {
+    ...callbacks(),
+    onGraph() {},
+    onLocalGraphNodeSelect() {},
+    onLocalGraphRetry() {},
+    onLocalGraphRepair() {},
+    onLocalGraphQuery(patch: unknown) { patches.push(patch); },
+    onOpenLocalGraphAsset(assetId: string) { openedAsset = assetId; },
+    onOpenLinkedDocument() {},
+  };
+  const readyTree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), baseCallbacks, { graph: ready }));
+
+  clickElement(readyTree, (props) => props["data-action"] === "authoring-graph-depth-2");
+  clickElement(readyTree, (props) => props["data-action"] === "authoring-graph-direction-outgoing");
+  clickElement(readyTree, (props) => props["data-action"] === "authoring-graph-toggle-assets");
+  assert.deepEqual(patches, [{ depth: 2 }, { direction: "outgoing" }, { includeAssets: true }]);
+
+  const documentTree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), baseCallbacks, {
+    graph: selectDesktopGraphNode(ready, "doc-2"),
+  }));
+  clickElement(documentTree, (props) => props["data-action"] === "recenter-authoring-graph");
+  assert.deepEqual(patches.at(-1), { scope: "local", centerDocumentId: "doc-2" });
+
+  const assetTree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), baseCallbacks, {
+    graph: selectDesktopGraphNode(ready, "asset-1"),
+  }));
+  clickElement(assetTree, (props) => props["data-action"] === "open-authoring-graph-asset");
+  assert.equal(openedAsset, "asset-1");
+  const assetMarkup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), baseCallbacks, {
+    graph: selectDesktopGraphNode(ready, "asset-1"),
+  }));
+  assert.match(assetMarkup, /설계 자료/);
+  assert.match(assetMarkup, /들어오는 연결/);
+  assert.doesNotMatch(assetMarkup, />asset-1</);
+});
+
+test("React authoring local graph uses the controlled shared visual search", () => {
+  const loading = requestDesktopGraphLoad(createDesktopGraphSnapshot("workspace-1"), { centerDocumentId: "doc-1" });
+  const graph = applyDesktopGraphResult(loading, loading.generation, {
+    centerDocumentId: "doc-1", status: "clean",
+    nodes: [
+      { id: "doc-1", kind: "document", label: "Source", availability: "available", canNavigate: true },
+      { id: "doc-2", kind: "document", label: "설계 결정", availability: "available", canNavigate: true },
+    ],
+    edges: [{ id: "edge-1", sourceId: "doc-1", targetId: "doc-2", kind: "document_link" }],
+    stats: { candidateCount: 2, filteredCount: 0 }, freshnessRevision: "version-1",
+  });
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), {
+    ...callbacks(), onGraph() {}, onLocalGraphVisualSearch() {},
+  }, { graph, graphVisualSearch: "설계" }));
+
+  assert.match(markup, /data-action="search-authoring-graph"/);
+  assert.match(markup, /aria-label="이 문서의 지식 지도 검색"/);
+  assert.match(markup, /value="설계"/);
+  assert.match(markup, /설계 결정/);
+  assert.equal((markup.match(/data-action="select-graph-node"/g) ?? []).length, 1);
+  assert.doesNotMatch(markup, /<strong>Source<\/strong><small>문서<\/small>/);
+});
 
 test("React authoring workbench renders split source preview table and semantic controls", () => {
   const assetLoading = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
@@ -34,13 +246,20 @@ test("React authoring workbench renders split source preview table and semantic 
       viewMode: "split",
       assets,
       inspector: { tab: "attachments", unlink: { status: "Closed" } },
+      documentShortcuts: [{
+        label: "고정된 최근 문서",
+        actionId: "open-sidebar-document",
+        onOpen() {},
+      }],
     }),
   );
 
   assert.match(markup, /data-cabinet-authoring-state="Dirty"/);
-  assert.match(markup, /data-design-reference="penpot-20260713"/);
+  assert.match(markup, /data-design-reference="penpot-20260721"/);
   assert.match(markup, />Cabinet</);
-  assert.match(markup, /내 지식 지도/);
+  assert.match(markup, />프로젝트 \/ Cabinet</);
+  assert.doesNotMatch(markup, /내 캐비닛 \/ 프로젝트 \/ Cabinet/);
+  assert.match(markup, /이 문서의 지식 지도/);
   assert.match(markup, />연결<\/button>/);
   assert.match(markup, /첨부 파일/);
   assert.match(markup, /role="tablist"/);
@@ -52,28 +271,360 @@ test("React authoring workbench renders split source preview table and semantic 
   assert.match(markup, /기본 앱으로 열기/);
   assert.doesNotMatch(markup.replace(/\sdata-asset-id="[^"]*"/g, ""), /internal-asset-id/);
   assert.match(markup, /aria-label="편집 화면"/);
-  assert.match(markup, /data-editor-mode="source"/);
-  assert.match(markup, /data-editor-mode="split"/);
-  assert.match(markup, /data-editor-mode="preview"/);
-  assert.match(markup, /aria-pressed="true"[^>]*>나란히/);
-  assert.match(markup, /aria-label="Markdown 원문"/);
-  assert.match(markup, /data-codemirror-host="pending"/);
-  assert.match(markup, /aria-label="Markdown 미리보기"/);
+  assert.match(markup, /data-editor-surface="wysiwyg"/);
+  assert.match(markup, /data-action="open-plain-text-editor"/);
+  assert.doesNotMatch(markup, /data-editor-mode="(?:source|split|preview)"/);
+  assert.doesNotMatch(markup, /data-action="authoring-mode-(?:source|split|preview)"/);
+  assert.doesNotMatch(markup, /aria-label="Markdown 원문"/);
+  assert.doesNotMatch(markup, /data-codemirror-host="pending"/);
+  assert.doesNotMatch(markup, /aria-label="Markdown 미리보기"/);
   assert.match(markup, /<table/);
   assert.match(markup, /<th[^>]*>Item/);
   assert.match(markup, /<td[^>]*>Grid/);
   assert.match(markup, /저장되지 않음/);
   assert.match(markup, /data-action="navigate-graph"[^>]*disabled/);
-  assert.match(markup, /class="sidebar-current-document"[^>]*aria-current="page"/);
+  assert.match(markup, /data-action="open-sidebar-document"[^>]*>고정된 최근 문서<\/button>/);
   assert.doesNotMatch(markup, /data-action="(?:open-settings|toggle-theme|open-ai)"/);
   assert.match(markup, /data-action="open-authoring-graph"[^>]*disabled/);
   assert.doesNotMatch(markup, /연결된 문서가 없습니다|이력 불러오기/);
   assert.equal((markup.match(/class="desktop-sidebar"/g) ?? []).length, 1);
   assert.equal((markup.match(/class="desktop-topbar"/g) ?? []).length, 1);
   assert.equal((markup.match(/<main/g) ?? []).length, 1);
-  assert.doesNotMatch(markup, /로컬 우선 원칙|검색 인덱스|백업과 복원/);
+  assert.doesNotMatch(markup, /로컬 우선 원칙|검색 인덱스/);
   assert.doesNotMatch(markup, /server|tenant|billing|admin-console/i);
   assertNoUnidentifiedInteractiveControls(markup);
+});
+
+test("React authoring workbench exposes a WYSIWYG surface placeholder and plain text action contract", () => {
+  const markup = renderToStaticMarkup(
+    createDesktopDocumentAuthoringWorkbenchElement(snapshot(), callbacks()),
+  );
+
+  assert.match(markup, /data-editor-surface="wysiwyg"/);
+  assert.match(markup, /aria-label="WYSIWYG 문서 편집"/);
+  assert.match(markup, /data-action="open-plain-text-editor"/);
+  assert.match(markup, /aria-label="Markdown 원문 편집"/);
+  assert.match(markup, />원문 편집<\/button>/);
+  assert.doesNotMatch(markup, /data-codemirror-host="pending"/);
+  assert.doesNotMatch(markup, /aria-label="Markdown 미리보기"/);
+  assert.doesNotMatch(markup, /authoring-mode-(?:source|split|preview)/);
+});
+
+test("React authoring workbench renders WYSIWYG blocks from the shared editor presentation model", () => {
+  const document = {
+    ...snapshot(),
+    title: "첫번째 문서",
+    body: [
+      "# 첫번째 문서",
+      "",
+      "본문 첫 줄",
+      "본문 둘째 줄",
+      "",
+      "- [ ] 정리 필요",
+      "- [x] 정리 완료",
+      "",
+      "| Item | Value |",
+      "| :--- | ---: |",
+      "| Grid | Ready |",
+    ].join("\n"),
+  };
+  const markup = renderToStaticMarkup(
+    createDesktopDocumentAuthoringWorkbenchElement(document, callbacks()),
+  );
+  const surface = markup.match(/<section class="wysiwyg-document-surface"[\s\S]*?<\/section>/)?.[0] ?? "";
+
+  assert.match(surface, /data-editor-surface="wysiwyg"/);
+  assert.match(surface, /data-wysiwyg-block-type="heading"/);
+  assert.match(surface, />첫번째 문서</);
+  assert.match(surface, /data-wysiwyg-block-type="paragraph"/);
+  assert.match(surface, />본문 첫 줄/);
+  assert.match(surface, /data-wysiwyg-block-type="checklist"/);
+  assert.match(surface, />정리 완료/);
+  assert.match(surface, /data-wysiwyg-block-type="table"/);
+  assert.match(surface, /<table/);
+  assert.match(surface, /<th[^>]*>Item/);
+  assert.doesNotMatch(surface, /WYSIWYG 편집 준비 중/);
+  assert.doesNotMatch(markup, /data-codemirror-host="pending"/);
+  assert.doesNotMatch(markup, /aria-label="Markdown 미리보기"/);
+});
+
+test("React authoring workbench opens a plain text editor modal contract without a separate body owner", () => {
+  let opened = false;
+  let closed = false;
+  const tree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), {
+    ...callbacks(),
+    onOpenPlainTextEditor() { opened = true; },
+    onClosePlainTextEditor() { closed = true; },
+  }));
+
+  clickElement(tree, (props) => props["data-action"] === "open-plain-text-editor");
+  assert.equal(opened, true);
+
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), {
+    ...callbacks(),
+    onOpenPlainTextEditor() {},
+    onClosePlainTextEditor() { closed = true; },
+  }, {
+    viewMode: "split",
+    plainTextEditorOpen: true,
+  }));
+
+  assert.match(markup, /role="dialog"/);
+  assert.match(markup, /data-editor-surface="plain-text"/);
+  assert.match(markup, /aria-label="Markdown 원문 편집"/);
+  assert.match(markup, /data-action="close-plain-text-editor"/);
+  assert.match(markup, /data-codemirror-host="pending"/);
+  assert.doesNotMatch(markup, /data-plain-text-body=/);
+
+  const modalTree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), {
+    ...callbacks(),
+    onOpenPlainTextEditor() {},
+    onClosePlainTextEditor() { closed = true; },
+  }, { plainTextEditorOpen: true }));
+  clickElement(modalTree, (props) => props["data-action"] === "close-plain-text-editor");
+  assert.equal(closed, true);
+});
+
+test("React authoring plain text modal forwards source changes through the canonical body callback", () => {
+  const document = {
+    ...snapshot(),
+    body: "# 첫번째 문서\n\n원문 편집 대상",
+  };
+  const changes: string[] = [];
+  const tree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onBodyChange(body) { changes.push(body); },
+  }, {
+    viewMode: "preview",
+    plainTextEditorOpen: true,
+  }));
+  const sourceEditor = findElement(tree, (props) =>
+    props.documentId === document.documentId &&
+    props.body === document.body &&
+    typeof props.onChange === "function",
+  );
+
+  assert.ok(sourceEditor, "plain text CodeMirror source region must exist");
+  const onChange = (sourceEditor.props as { readonly onChange: (body: string) => void }).onChange;
+  onChange("# 첫번째 문서\n\n수정한 원문");
+  assert.deepEqual(changes, ["# 첫번째 문서\n\n수정한 원문"]);
+});
+
+test("React authoring WYSIWYG heading and paragraph edits flow through canonical body changes", () => {
+  const document = {
+    ...snapshot(),
+    body: [
+      "# 첫번째 문서",
+      "",
+      "본문 첫 줄",
+      "본문 둘째 줄",
+      "",
+      "| Item | Value |",
+      "| :--- | ---: |",
+      "| Grid | Ready |",
+    ].join("\n"),
+  };
+  const changes: string[] = [];
+  const tree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onBodyChange(body) { changes.push(body); },
+  }));
+
+  blurElement(tree, (props) => props["data-wysiwyg-block-type"] === "heading", "새 제목");
+  assert.equal(changes.at(-1)?.startsWith("# 새 제목\n\n본문 첫 줄"), true);
+
+  blurElement(tree, (props) => props["data-wysiwyg-block-type"] === "paragraph", "수정한 본문");
+  assert.equal(changes.at(-1), document.body.replace("본문 첫 줄\n본문 둘째 줄", "수정한 본문"));
+
+  const unchangedCount = changes.length;
+  blurElement(tree, (props) => props["data-wysiwyg-block-type"] === "paragraph", "본문 첫 줄\n본문 둘째 줄");
+  assert.equal(changes.length, unchangedCount);
+
+  const table = findElement(tree, (props) => props["data-wysiwyg-block-type"] === "table");
+  assert.ok(table);
+  assert.notEqual((table.props as Record<string, unknown>).contentEditable, true);
+});
+
+test("React authoring WYSIWYG checklist toggles update only Markdown checkbox markers", () => {
+  const document = {
+    ...snapshot(),
+    body: [
+      "# 첫번째 문서",
+      "",
+      "- [ ] 정리 필요",
+      "- [x] 정리 완료",
+      "",
+      "본문",
+    ].join("\n"),
+  };
+  const changes: string[] = [];
+  const tree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onBodyChange(body) { changes.push(body); },
+  }));
+
+  clickElement(tree, (props) =>
+    props["data-action"] === "toggle-wysiwyg-checklist-item" && props["data-wysiwyg-checklist-index"] === 0,
+  );
+  assert.equal(changes.at(-1), document.body.replace("- [ ] 정리 필요\n- [x] 정리 완료", "- [x] 정리 필요\n- [x] 정리 완료"));
+
+  clickElement(tree, (props) =>
+    props["data-action"] === "toggle-wysiwyg-checklist-item" && props["data-wysiwyg-checklist-index"] === 1,
+  );
+  assert.equal(changes.at(-1), document.body.replace("- [ ] 정리 필요\n- [x] 정리 완료", "- [ ] 정리 필요\n- [ ] 정리 완료"));
+
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onBodyChange() {},
+  }));
+  assert.match(markup, /data-action="toggle-wysiwyg-checklist-item"[^>]*aria-label="체크리스트 항목 완료로 표시"/);
+  assert.match(markup, /data-action="toggle-wysiwyg-checklist-item"[^>]*aria-label="체크리스트 항목 미완료로 표시"/);
+});
+
+test("React authoring WYSIWYG table cell edits preserve Markdown table structure", () => {
+  const document = {
+    ...snapshot(),
+    body: [
+      "# 첫번째 문서",
+      "",
+      "| 항목 | 내용 | 상태 |",
+      "| :--- | :---: | ---: |",
+      "| 1번 | 가운데 | 완료 |",
+    ].join("\n"),
+  };
+  const changes: string[] = [];
+  const tree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onBodyChange(body) { changes.push(body); },
+  }));
+
+  blurElement(tree, (props) =>
+    props["data-wysiwyg-table-row"] === 0 && props["data-wysiwyg-table-cell"] === 1,
+  "수정 | 값");
+
+  assert.equal(changes.at(-1), document.body.replace(
+    "| 1번 | 가운데 | 완료 |",
+    "| 1번 | 수정 \\| 값 | 완료 |",
+  ));
+
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onBodyChange() {},
+  }));
+  assert.match(markup, /data-wysiwyg-table-row="0"[^>]*data-wysiwyg-table-cell="1"[^>]*contentEditable="true"/);
+  assert.match(markup, /aria-label="표 셀 편집"/);
+  assert.doesNotMatch(markup, />:---</);
+});
+
+test("React authoring WYSIWYG fallback blocks open plain text editor without exposing raw source", () => {
+  const document = {
+    ...snapshot(),
+    body: [
+      "# 안전한 문서",
+      "",
+      "<script>globalThis.compromised=true</script>",
+    ].join("\n"),
+  };
+  let opened = false;
+  const tree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onOpenPlainTextEditor() { opened = true; },
+  }));
+
+  clickElement(tree, (props) => props["data-action"] === "edit-wysiwyg-fallback-in-source");
+  assert.equal(opened, true);
+
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onOpenPlainTextEditor() {},
+  }));
+  assert.match(markup, /data-wysiwyg-block-type="fallback"/);
+  assert.match(markup, /data-wysiwyg-fallback-reason="raw_html"/);
+  assert.match(markup, /data-action="edit-wysiwyg-fallback-in-source"/);
+  assert.match(markup, /aria-label="원문에서 편집"/);
+  assert.match(markup, />원문에서 편집<\/button>/);
+  assert.doesNotMatch(markup, /globalThis\.compromised|<script>|&lt;script/);
+
+  const disabled = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(document, callbacks()));
+  assert.match(disabled, /data-action="edit-wysiwyg-fallback-in-source"[^>]*disabled/);
+});
+
+test("React authoring WYSIWYG inline references render as safe chips with plain text fallback", () => {
+  const document = {
+    ...snapshot(),
+    body: [
+      "# Cabinet 지도",
+      "",
+      "연결: [[Target Document|대상 문서]] / [외부 링크](https://example.com/private) / ![[asset:asset-private|설계 파일]]",
+    ].join("\n"),
+  };
+  let opened = false;
+  const tree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onOpenPlainTextEditor() { opened = true; },
+  }));
+
+  clickElement(tree, (props) => props["data-action"] === "edit-wysiwyg-inline-source");
+  assert.equal(opened, true);
+
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onOpenPlainTextEditor() {},
+  }));
+  const surface = markup.match(/<section class="wysiwyg-document-surface"[\s\S]*?<\/section>/)?.[0] ?? "";
+
+  assert.match(surface, /data-wysiwyg-inline-type="wikilink"/);
+  assert.match(surface, /data-wysiwyg-inline-type="markdown_link"/);
+  assert.match(surface, /data-wysiwyg-inline-type="asset_reference"/);
+  assert.match(surface, />대상 문서</);
+  assert.match(surface, />외부 링크</);
+  assert.match(surface, />설계 파일</);
+  assert.match(surface, /data-action="edit-wysiwyg-inline-source"/);
+  assert.doesNotMatch(surface, /\[\[Target Document|!\[\[asset:|asset-private|https:\/\/example\.com\/private|\.md\b/);
+});
+
+test("React authoring WYSIWYG code and quote blocks render without raw Markdown markers", () => {
+  const document = {
+    ...snapshot(),
+    body: [
+      "# 개발 노트",
+      "",
+      "```rust",
+      "fn main() {",
+      "  println!(\"cabinet\");",
+      "}",
+      "```",
+      "",
+      "> [!NOTE] 참고",
+      "> 인용 내용",
+    ].join("\n"),
+  };
+  let opened = 0;
+  const tree = renderFunctionElement(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onOpenPlainTextEditor() { opened += 1; },
+  }));
+
+  clickElement(tree, (props) => props["data-action"] === "edit-wysiwyg-code-source");
+  clickElement(tree, (props) => props["data-action"] === "edit-wysiwyg-quote-source");
+  assert.equal(opened, 2);
+
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(document, {
+    ...callbacks(),
+    onOpenPlainTextEditor() {},
+  }));
+  const surface = markup.match(/<section class="wysiwyg-document-surface"[\s\S]*?<\/section>/)?.[0] ?? "";
+
+  assert.match(surface, /data-wysiwyg-block-type="code_block"/);
+  assert.match(surface, /data-wysiwyg-code-language="rust"/);
+  assert.match(surface, /fn main\(\)/);
+  assert.match(surface, /data-wysiwyg-block-type="blockquote"/);
+  assert.match(surface, /data-wysiwyg-callout-kind="NOTE"/);
+  assert.match(surface, />참고/);
+  assert.match(surface, />인용 내용/);
+  assert.match(surface, /data-action="edit-wysiwyg-code-source"/);
+  assert.match(surface, /data-action="edit-wysiwyg-quote-source"/);
+  assert.doesNotMatch(surface, /```|&gt; \[!NOTE]|\[!NOTE]|&gt; 인용/);
 });
 
 function assertNoUnidentifiedInteractiveControls(markup: string): void {
@@ -82,24 +633,27 @@ function assertNoUnidentifiedInteractiveControls(markup: string): void {
   assert.deepEqual(controls.filter((control) => !control.includes("data-action=")), []);
 }
 
-test("React authoring workbench supports source preview modes and escapes unsafe source", () => {
+test("React authoring workbench keeps unsafe source out of the default WYSIWYG surface and source in the modal", () => {
   const unsafe = {
     ...snapshot(),
     body: "# Safe\n\n<script>globalThis.compromised=true</script>",
   };
-  const source = renderToStaticMarkup(
-    createDesktopDocumentAuthoringWorkbenchElement(unsafe, callbacks(), { viewMode: "source" }),
-  );
-  const preview = renderToStaticMarkup(
-    createDesktopDocumentAuthoringWorkbenchElement(unsafe, callbacks(), { viewMode: "preview" }),
-  );
+  const defaultMarkup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(unsafe, callbacks()));
+  const modalMarkup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(unsafe, callbacks(), {
+    plainTextEditorOpen: true,
+  }));
 
-  assert.match(source, /aria-label="Markdown 원문"/);
-  assert.doesNotMatch(source, /aria-label="Markdown 미리보기"/);
-  assert.match(preview, /aria-label="Markdown 미리보기"/);
-  assert.doesNotMatch(preview, /data-codemirror-host/);
-  assert.doesNotMatch(preview, /<script>/);
-  assert.doesNotMatch(preview, /globalThis\.compromised/);
+  assert.match(defaultMarkup, /data-editor-surface="wysiwyg"/);
+  assert.doesNotMatch(defaultMarkup, /aria-label="Markdown 원문"/);
+  assert.doesNotMatch(defaultMarkup, /aria-label="Markdown 미리보기"/);
+  assert.doesNotMatch(defaultMarkup, /data-codemirror-host/);
+  assert.doesNotMatch(defaultMarkup, /<script>/);
+  assert.doesNotMatch(defaultMarkup, /globalThis\.compromised/);
+
+  assert.match(modalMarkup, /role="dialog"/);
+  assert.match(modalMarkup, /data-editor-surface="plain-text"/);
+  assert.match(modalMarkup, /data-codemirror-host="pending"/);
+  assert.doesNotMatch(modalMarkup, /<script>/);
 });
 
 test("React authoring attachment panel presents empty, importing, preview, and mutation actions safely", () => {
@@ -128,7 +682,7 @@ test("React authoring attachment panel presents empty, importing, preview, and m
       ...ready,
       selectedAssetId: "asset-secret",
       detailState: "Ready",
-      detail: { assetId: "asset-secret", fileName: "meeting.txt", mediaType: "text/plain", byteSize: 12, version: 1, previewCapability: "text", extractionStatus: "not_requested", referenceCount: 1, linkedDocumentIds: ["doc-1"] },
+      detail: { assetId: "asset-secret", fileName: "meeting.txt", mediaType: "text/plain", byteSize: 12, version: 1, previewCapability: "text", extractionStatus: "not_requested", referenceCount: 1, linkedDocumentIds: ["doc-1"], linkedDocuments: [{ documentId: "doc-1", title: "회의 기록", state: "available" }] },
       previewState: "Ready",
       preview: { assetId: "asset-secret", capability: "text", mediaType: "text/plain", presentation: "text", content: "safe preview" },
     },
@@ -162,6 +716,177 @@ test("React authoring attachment panel presents empty, importing, preview, and m
     .replace(/\sdata-asset-id="[^"]*"/g, "")
     .replace(/\sdata-document-id="[^"]*"/g, "");
   assert.doesNotMatch(visible, /asset-secret|internal-operation|version-/);
+});
+
+test("React authoring attachment panel keeps per-file partial and recovery outcomes truthful", () => {
+  const loading = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
+  const ready = applyDesktopAssetResult(loading, loading.generation, {
+    queryName: "list-document-assets",
+    workspaceId: "workspace-1",
+    documentId: "doc-1",
+    assets: [],
+  });
+  const completed = createAttachmentFileSnapshot({
+    generation: 1,
+    operationId: "secret-operation-completed",
+    fileName: "done.pdf",
+    byteSize: 10,
+    state: "completed",
+  });
+  const recoveryBase = createAttachmentFileSnapshot({
+    generation: 1,
+    operationId: "secret-operation-recovery",
+    fileName: "/private/design/recover.pdf",
+    byteSize: 20,
+    state: "projecting",
+  });
+  const recovery = applyAttachmentFileStatus(recoveryBase, {
+    generation: 1,
+    operationId: "secret-operation-recovery",
+    state: "recovery_required",
+    errorCode: "asset_graph_reindex.repository_unavailable",
+  });
+  const failedBase = createAttachmentFileSnapshot({
+    generation: 1,
+    operationId: "secret-operation-failed",
+    fileName: "failed.txt",
+    byteSize: 30,
+    state: "selected",
+  });
+  const failed = applyAttachmentFileStatus(failedBase, {
+    generation: 1,
+    operationId: "secret-operation-failed",
+    state: "failed",
+    errorCode: "asset_import.handle_not_found",
+  });
+
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(
+    snapshot(),
+    { ...callbacks(), onAssetImport() {}, onAssetCancel() {} },
+    {
+      assets: {
+        ...ready,
+        importState: "Failed",
+        importOperationId: "secret-operation-recovery",
+        importOperations: [completed, recovery, failed],
+      },
+      inspector: { tab: "attachments", unlink: { status: "Closed" } },
+    },
+  ));
+
+  assert.match(markup, /일부 파일/);
+  assert.match(markup, /done\.pdf/);
+  assert.match(markup, /첨부 완료/);
+  assert.match(markup, /recover\.pdf/);
+  assert.match(markup, /복구 필요/);
+  assert.match(markup, /failed\.txt/);
+  assert.match(markup, /첨부 실패/);
+  assert.match(markup, /data-attachment-operation-stage="Completed"/);
+  assert.match(markup, /data-attachment-operation-stage="RecoveryRequired"/);
+  assert.match(markup, /data-attachment-operation-stage="Failed"/);
+  assert.doesNotMatch(markup, /secret-operation|\/private\/|asset_graph_reindex|asset_import\.handle/);
+  assert.doesNotMatch(markup, /data-action="repair-document-asset-import"/);
+});
+
+test("React authoring attachment panel exposes cancel only for the active cancellable file", () => {
+  const loading = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
+  const active = createAttachmentFileSnapshot({
+    generation: 1,
+    operationId: "active-operation",
+    fileName: "active.pdf",
+    byteSize: 100,
+    state: "staging",
+  });
+  const queued = createAttachmentFileSnapshot({
+    generation: 1,
+    operationId: "other-operation",
+    fileName: "other.pdf",
+    byteSize: 100,
+    state: "selected",
+  });
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(
+    snapshot(),
+    { ...callbacks(), onAssetImport() {}, onAssetCancel() {} },
+    {
+      assets: {
+        ...loading,
+        importState: "Importing",
+        importOperationId: "active-operation",
+        importOperations: [active, queued],
+      },
+      inspector: { tab: "attachments", unlink: { status: "Closed" } },
+    },
+  ));
+
+  assert.equal((markup.match(/data-action="cancel-document-asset-import"/g) ?? []).length, 1);
+  assert.match(markup, /active\.pdf/);
+  assert.match(markup, /파일 선택됨/);
+  assert.doesNotMatch(markup, /active-operation|other-operation/);
+});
+
+test("React authoring attachment panel exposes repair only when a recovery callback exists", () => {
+  const loading = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
+  const projecting = createAttachmentFileSnapshot({ generation: 1, operationId: "repair-internal", fileName: "repair.pdf", byteSize: 5, state: "projecting" });
+  const recovery = applyAttachmentFileStatus(projecting, { generation: 1, operationId: "repair-internal", state: "recovery_required" });
+  const options = {
+    assets: { ...loading, importState: "Failed" as const, importOperations: [recovery] },
+    inspector: { tab: "attachments" as const, unlink: { status: "Closed" as const } },
+  };
+  const withoutCallback = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), callbacks(), options));
+  const withCallback = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), {
+    ...callbacks(),
+    onAssetRepair() {},
+  }, options));
+
+  assert.doesNotMatch(withoutCallback, /data-action="repair-document-asset-import"/);
+  assert.match(withCallback, /data-action="repair-document-asset-import"/);
+  assert.match(withCallback, /aria-label="repair\.pdf 첨부 복구"/);
+  assert.doesNotMatch(withCallback, /repair-internal/);
+});
+
+test("React authoring attachment panel presents a path-free native drop target", () => {
+  const loading = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(
+    snapshot(),
+    callbacks(),
+    {
+      assets: { ...loading, dropState: "Entered", dropFileCount: 2 },
+      inspector: { tab: "attachments", unlink: { status: "Closed" } },
+    },
+  ));
+
+  assert.match(markup, /data-document-attachment-drop-state="Entered"/);
+  assert.match(markup, /여기에 놓아 첨부/);
+  assert.match(markup, /2개 파일/);
+  assert.doesNotMatch(markup, /\/private\//i);
+  assert.doesNotMatch(markup, /data-(?:file-)?path=/i);
+});
+
+test("React authoring attachment panel presents a bounded safe existing-file chooser", () => {
+  const assets = requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1");
+  const libraryAssets = applyDesktopAssetResult(
+    requestDesktopWorkspaceAssetLoad(requestDesktopAssetLoad(createDesktopAssetSnapshot("workspace-1"), "doc-1")),
+    2,
+    {
+      queryName: "list-workspace-assets",
+      workspaceId: "workspace-1",
+      assets: [{ assetId: "asset-private", label: "Architecture", fileName: "architecture.pdf", mediaType: "application/pdf", byteSize: 2048, status: "available" }],
+      nextCursor: "opaque-private-cursor",
+    },
+  );
+  const markup = renderToStaticMarkup(createDesktopDocumentAuthoringWorkbenchElement(snapshot(), callbacks(), {
+    assets,
+    inspector: { tab: "attachments", unlink: { status: "Closed" } },
+    assetLibrary: { status: "Ready", workspaceId: "workspace-1", documentId: "doc-1", generation: 1, assets: libraryAssets },
+  }));
+
+  assert.match(markup, /role="dialog"/);
+  assert.match(markup, /기존 파일 연결/);
+  assert.match(markup, /파일명으로 검색/);
+  assert.match(markup, /architecture\.pdf/);
+  assert.match(markup, /data-action="link-existing-document-asset"/);
+  assert.match(markup, /data-action="load-more-document-asset-library"/);
+  assert.doesNotMatch(markup, /asset-private|opaque-private-cursor|\/private\//);
 });
 
 test("React authoring inspector renders only the selected context panel", () => {
@@ -436,6 +1161,24 @@ test("React authoring presents the derived title without a separate metadata edi
   assert.doesNotMatch(focused, /data-action="edit-document-title"/);
   assert.doesNotMatch(focused, /authoring-title-input/);
   assert.doesNotMatch(focused, /notes\/source\.md/);
+});
+
+test("React authoring exposes search return only for a document opened from results", () => {
+  const regular = renderToStaticMarkup(
+    createDesktopDocumentAuthoringWorkbenchElement(snapshot(), callbacks()),
+  );
+  const fromSearch = renderToStaticMarkup(
+    createDesktopDocumentAuthoringWorkbenchElement(snapshot(), {
+      ...callbacks(),
+      onReturnToSearch() {},
+    }),
+  );
+
+  assert.doesNotMatch(regular, /data-action="return-search-results"/);
+  assert.match(fromSearch, /data-action="return-search-results"/);
+  assert.match(fromSearch, /검색 결과로 돌아가기/);
+  const returnControl = fromSearch.match(/<button[^>]*data-action="return-search-results"[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.doesNotMatch(returnControl, /doc-1|notes\/source\.md/);
 });
 
 test("React authoring history renders user labels without visible version identity", () => {
@@ -835,6 +1578,51 @@ function callbacks() {
     onDiscard() {},
     onCancel() {},
   };
+}
+
+function renderFunctionElement(element: React.ReactElement): React.ReactElement {
+  const component = element.type as (props: Record<string, unknown>) => React.ReactElement;
+  return component(element.props as Record<string, unknown>);
+}
+
+function clickElement(
+  tree: React.ReactNode,
+  predicate: (props: Record<string, unknown>) => boolean,
+): void {
+  const found = findElement(tree, predicate);
+  assert.ok(found, "interactive element must exist");
+  const onClick = (found.props as { readonly onClick?: () => void }).onClick;
+  assert.equal(typeof onClick, "function");
+  onClick?.();
+}
+
+function blurElement(
+  tree: React.ReactNode,
+  predicate: (props: Record<string, unknown>) => boolean,
+  textContent: string,
+): void {
+  const found = findElement(tree, predicate);
+  assert.ok(found, "editable element must exist");
+  const onBlur = (found.props as { readonly onBlur?: (event: { readonly currentTarget: { readonly textContent: string } }) => void }).onBlur;
+  assert.equal(typeof onBlur, "function");
+  onBlur?.({ currentTarget: { textContent } });
+}
+
+function findElement(
+  node: React.ReactNode,
+  predicate: (props: Record<string, unknown>) => boolean,
+): React.ReactElement | undefined {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, predicate);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!React.isValidElement(node)) return undefined;
+  const props = node.props as Record<string, unknown>;
+  if (predicate(props)) return node;
+  return findElement(props.children as React.ReactNode, predicate);
 }
 
 function restoreDiff() {

@@ -47,6 +47,7 @@ pub struct MutateDocumentAttachmentsInput {
     document_id: String,
     expected_current_version: String,
     mutation: AttachmentMutationInput,
+    legacy_attachment_baseline: Option<Vec<AssetReference>>,
     author: String,
     summary: String,
 }
@@ -78,6 +79,7 @@ impl MutateDocumentAttachmentsInput {
                 asset_id: asset_id.to_string(),
                 label: label.to_string(),
             },
+            legacy_attachment_baseline: None,
             author: author.to_string(),
             summary: summary.to_string(),
         }
@@ -101,6 +103,7 @@ impl MutateDocumentAttachmentsInput {
             mutation: AttachmentMutationInput::Unlink {
                 asset_id: asset_id.to_string(),
             },
+            legacy_attachment_baseline: None,
             author: author.to_string(),
             summary: summary.to_string(),
         }
@@ -112,6 +115,15 @@ impl MutateDocumentAttachmentsInput {
 
     pub fn document_id(&self) -> &str {
         &self.document_id
+    }
+
+    pub fn expected_current_version(&self) -> &str {
+        &self.expected_current_version
+    }
+
+    pub fn with_legacy_attachment_baseline(mut self, baseline: Vec<AssetReference>) -> Self {
+        self.legacy_attachment_baseline = Some(baseline);
+        self
     }
 }
 
@@ -233,7 +245,7 @@ impl MutateDocumentAttachmentsUsecase {
         let transitioned = transition_attachment_snapshot(
             expected_record.snapshot().attachment_state(),
             parsed.mutation,
-            None,
+            parsed.legacy_attachment_baseline,
         )
         .map_err(map_transition_error)?;
         let revision_number = expected_record
@@ -347,6 +359,7 @@ struct ParsedAttachmentMutation {
     expected_current_version: VersionId,
     kind: DocumentMutationKind,
     mutation: AttachmentSnapshotMutation,
+    legacy_attachment_baseline: Option<Vec<AssetReference>>,
     author: VersionAuthor,
     summary: VersionSummary,
 }
@@ -385,6 +398,7 @@ impl ParsedAttachmentMutation {
                 .map_err(|_| MutateDocumentAttachmentsError::InvalidInput)?,
             kind,
             mutation,
+            legacy_attachment_baseline: input.legacy_attachment_baseline,
             author: VersionAuthor::new(&input.author)
                 .map_err(|_| MutateDocumentAttachmentsError::InvalidInput)?,
             summary: VersionSummary::new(&input.summary)

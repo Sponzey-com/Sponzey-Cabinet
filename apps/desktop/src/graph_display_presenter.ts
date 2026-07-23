@@ -1,5 +1,5 @@
 import type { KnowledgeGraphNodeView } from "@sponzey-cabinet/client-core";
-import type { DisplayReference, DisplayReferenceState } from "./display_reference_resolver.ts";
+import type { DisplayReferenceState } from "./display_reference_resolver.ts";
 
 export interface GraphDisplayNode {
   readonly identity: string;
@@ -8,6 +8,7 @@ export interface GraphDisplayNode {
   readonly breadcrumbLabel: string;
   readonly kindLabel: string;
   readonly state: DisplayReferenceState;
+  readonly canNavigate: boolean;
 }
 
 const kindLabels = Object.freeze({
@@ -26,18 +27,17 @@ const missingLabels = Object.freeze({
 
 export function presentGraphNodes(
   nodes: readonly KnowledgeGraphNodeView[],
-  references: readonly DisplayReference[],
 ): readonly GraphDisplayNode[] {
-  const byIdentity = new Map(references.map((reference) => [reference.identity, reference]));
   return Object.freeze(nodes.map((node) => {
-    const reference = node.kind === "document" ? byIdentity.get(node.id) : undefined;
+    const available = node.availability === "available";
     return Object.freeze({
       identity: node.id,
       kind: node.kind,
-      label: reference?.label ?? missingLabels[node.kind],
-      breadcrumbLabel: reference?.breadcrumbLabel ?? "",
+      label: node.label?.trim() || missingLabels[node.kind],
+      breadcrumbLabel: node.breadcrumbLabel?.trim() || "",
       kindLabel: kindLabels[node.kind],
-      state: reference?.state ?? "missing",
+      state: available ? "resolved" : "missing",
+      canNavigate: available && node.canNavigate === true,
     });
   }));
 }

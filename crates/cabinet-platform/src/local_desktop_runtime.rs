@@ -311,6 +311,11 @@ pub enum LocalDesktopUsecaseInput {
         text: String,
         limit: u16,
     },
+    SearchAssets {
+        workspace_id: String,
+        text: String,
+        limit: u16,
+    },
     GetLinkOverview {
         workspace_id: String,
         document_id: String,
@@ -368,6 +373,7 @@ impl LocalDesktopUsecaseInput {
             Self::PreviewDocumentRestore { .. } => "PreviewDocumentRestore",
             Self::RestoreDocumentVersion { .. } => "RestoreDocumentVersion",
             Self::SearchDocuments { .. } => "SearchDocuments",
+            Self::SearchAssets { .. } => "SearchAssets",
             Self::GetLinkOverview { .. } => "GetLinkOverview",
             Self::GetGraphProjection { .. } => "GetGraphProjection",
             Self::ListDocumentAssets { .. } => "ListDocumentAssets",
@@ -572,6 +578,28 @@ pub fn map_core_local_desktop_command_request(
             })
         }
         (
+            "search_assets",
+            LocalDesktopCommandPayload::Search {
+                workspace_id,
+                text,
+                limit,
+            },
+        ) => {
+            let workspace_id = validate_workspace_id(workspace_id)?;
+            let text = validate_non_empty(text, "text")?;
+            if limit == 0 {
+                return Err(mapping_error(
+                    LocalDesktopCommandErrorCode::InvalidInput,
+                    "limit",
+                ));
+            }
+            Ok(LocalDesktopUsecaseInput::SearchAssets {
+                workspace_id,
+                text,
+                limit,
+            })
+        }
+        (
             "get_link_overview",
             LocalDesktopCommandPayload::DocumentIdentity {
                 workspace_id,
@@ -731,6 +759,7 @@ pub fn map_core_local_desktop_command_request(
             | "preview_document_restore"
             | "restore_document_version"
             | "search_documents"
+            | "search_assets"
             | "get_link_overview"
             | "get_graph_projection"
             | "list_document_assets"

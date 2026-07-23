@@ -12,7 +12,9 @@ import { createDesktopBackupRecoverySnapshot } from "../src/desktop_backup_recov
 import { auditUserExposedMarkup } from "../src/ui_exposure_audit.ts";
 
 const home = createPersonalWorkspaceHomeModelFromResult(createPersonalLocalDesktopCapabilityProfile(), { workspaceId: "workspace-secret", state: "Ready", healthStatus: "Healthy", backupStatus: "Fresh", recentDocuments: [{ documentId: "doc-secret", title: "설계 문서", path: "project/design.md" }], favorites: [], tags: [], recentChanges: [], unfinishedItems: [] });
-const callbacks: any = new Proxy({}, { get: () => () => {} });
+const callbacks: any = new Proxy({}, {
+  get: (_target, property) => property === "documentShortcuts" ? [] : () => {},
+});
 
 test("all seven ready routes expose no internal identity, error, path, or banned English action", () => {
   const loading = createDocumentNavigatorLoadingModel({ workspaceId: "workspace-secret", view: "Tree", generation: 1 });

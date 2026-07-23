@@ -57,6 +57,32 @@ test("asset import transport invokes typed path-free command and validates compl
   assert.equal(JSON.stringify(received).includes("path"), false);
 });
 
+test("asset import transport preserves immediate recovery-required result", async () => {
+  const client = createTauriAssetImportTransport(async () => ({
+    ok: true,
+    operationId: "asset-import-recovery-1",
+    assetId: "b".repeat(64),
+    state: "recovery_required",
+    errorCode: "asset_graph_reindex.repository_unavailable",
+    retryable: true,
+    repairRequired: true,
+  }));
+
+  const result = await client.importFile({
+    workspaceId: "workspace-1",
+    documentId: "doc-1",
+    handle: "picker:recovery",
+    label: "Recovery",
+    attachmentOperationId: "attachment-import-recovery-1",
+    expectedCurrentVersionToken: "version-current",
+  });
+
+  assert.equal(result.state, "recovery_required");
+  assert.equal(result.repairRequired, true);
+  assert.equal(result.retryable, true);
+  assert.equal(result.errorCode, "asset_graph_reindex.repository_unavailable");
+});
+
 test("asset import transport rejects malformed and native failure responses safely", async () => {
   const failed = createTauriAssetImportTransport(async () => ({
     ok: false,
@@ -109,7 +135,12 @@ test("asset lifecycle transport maps detail and unlink without object path or by
     commands.push(command);
     if (command === "get_desktop_asset_detail") return {
       ok: true,
-      data: { assetId: "a".repeat(64), fileName: "spec.pdf", mediaType: "application/pdf", byteSize: 42, version: 1, previewCapability: "pdf", extractionStatus: "not_requested", referenceCount: 1, linkedDocumentIds: ["doc-1"] },
+      data: {
+        assetId: "a".repeat(64), fileName: "spec.pdf", mediaType: "application/pdf", byteSize: 42,
+        version: 1, previewCapability: "pdf", extractionStatus: "not_requested", referenceCount: 1,
+        linkedDocumentIds: ["doc-1"],
+        linkedDocuments: [{ documentId: "doc-1", title: "현재 문서 제목", state: "available" }],
+      },
       retryable: false,
     };
     return { ok: true, outcome: "fresh", delta: "unlinked", revisionNumber: 2, retryable: false, repairRequired: false };
@@ -119,9 +150,42 @@ test("asset lifecycle transport maps detail and unlink without object path or by
   const unlink = await client.unlink({ workspaceId: "workspace-1", documentId: "doc-1", assetId: "a".repeat(64), operationId: "unlink-1", expectedCurrentVersionToken: "version-current" });
 
   assert.equal(detail.previewCapability, "pdf");
+  assert.deepEqual(detail.linkedDocuments, [{ documentId: "doc-1", title: "현재 문서 제목", state: "available" }]);
+  assert.equal(Object.isFrozen(detail.linkedDocuments), true);
+  assert.equal(Object.isFrozen(detail.linkedDocuments[0]), true);
   assert.equal(unlink.delta, "unlinked");
   assert.deepEqual(commands, ["get_desktop_asset_detail", "unlink_desktop_asset"]);
   assert.equal(JSON.stringify({ detail, unlink }).includes("path"), false);
+});
+
+test("asset detail rejects mismatched linked document references and unsafe fields", async () => {
+  for (const data of [
+    {
+      assetId: "a".repeat(64), fileName: "spec.pdf", mediaType: "application/pdf", byteSize: 42,
+      version: 1, previewCapability: "pdf", extractionStatus: "not_requested", referenceCount: 1,
+      linkedDocumentIds: ["doc-1"], linkedDocuments: [],
+    },
+    {
+      assetId: "a".repeat(64), fileName: "spec.pdf", mediaType: "application/pdf", byteSize: 42,
+      version: 1, previewCapability: "pdf", extractionStatus: "not_requested", referenceCount: 1,
+      linkedDocumentIds: ["doc-1"],
+      linkedDocuments: [{ documentId: "doc-2", title: "다른 문서", state: "available" }],
+    },
+    {
+      assetId: "a".repeat(64), fileName: "spec.pdf", mediaType: "application/pdf", byteSize: 42,
+      version: 1, previewCapability: "pdf", extractionStatus: "not_requested", referenceCount: 1,
+      linkedDocumentIds: ["doc-1"],
+      linkedDocuments: [{ documentId: "doc-1", title: "현재 문서", state: "available", path: "/private/doc.md" }],
+    },
+  ]) {
+    const client = createTauriAssetImportTransport(async () => ({ ok: true, data }));
+    await assert.rejects(
+      () => client.getDetail({ workspaceId: "workspace-1", assetId: "a".repeat(64) }),
+      (error) => error instanceof DesktopAssetImportTransportError
+        && error.code === "COMMAND_BRIDGE_FAILED"
+        && !String(error).includes("/private"),
+    );
+  }
 });
 
 test("asset import transport accepts immediate operation and reads durable status", async () => {
@@ -134,6 +198,18 @@ test("asset import transport accepts immediate operation and reads durable statu
 
   assert.equal(started.state, "selected");
   assert.equal(status.state, "completed");
+});
+
+test("asset import transport accepts planned post-commit states and rejects unknown state", async () => {
+  for (const state of ["preparing_revision", "associating", "projecting", "verifying", "conflict", "recovery_required"] as const) {
+    const client = createTauriAssetImportTransport(async () => ({ ok: true, operationId: "operation-1", state }));
+    assert.equal((await client.getImportStatus({ workspaceId: "workspace-1", operationId: "operation-1" })).state, state);
+  }
+  const invalid = createTauriAssetImportTransport(async () => ({ ok: true, operationId: "operation-1", state: "mystery" }));
+  await assert.rejects(
+    () => invalid.getImportStatus({ workspaceId: "workspace-1", operationId: "operation-1" }),
+    (error) => error instanceof DesktopAssetImportTransportError && error.code === "COMMAND_BRIDGE_FAILED",
+  );
 });
 
 test("asset transport maps workspace page and existing link through typed commands", async () => {

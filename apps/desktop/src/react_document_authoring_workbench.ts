@@ -1,12 +1,39 @@
 import React, { useEffect, useRef } from "react";
-import { History, Link2, Paperclip, RotateCcw, X } from "lucide-react";
+import {
+  ArrowLeft,
+  Bold,
+  Heading1,
+  History,
+  Italic,
+  Link2,
+  List,
+  ListChecks,
+  Paperclip,
+  RotateCcw,
+  Search,
+  Table2,
+  X,
+} from "lucide-react";
 
 import {
   DocumentSaveCoordinatorState,
-  createMarkdownPreviewModel,
-  type DocumentEditorViewMode,
-  type MarkdownPreviewBlock,
 } from "@sponzey-cabinet/ui";
+import {
+  applyWysiwygPatchToSyncSession,
+  applyWysiwygMarkdownChecklistItemToggle,
+  applyWysiwygMarkdownBlockTextEdit,
+  applyWysiwygMarkdownTableCellEdit,
+  createWysiwygPlainTextSyncSession,
+  createWysiwygMarkdownPresentationModel,
+  type WysiwygMarkdownBlock,
+  type WysiwygMarkdownBlockquoteBlock,
+  type WysiwygMarkdownChecklistBlock,
+  type WysiwygMarkdownCodeBlock,
+  type WysiwygMarkdownHeadingBlock,
+  type WysiwygMarkdownInlineNode,
+  type WysiwygMarkdownParagraphBlock,
+  type WysiwygMarkdownTableBlock,
+} from "@sponzey-cabinet/editor";
 
 import type { DesktopDocumentAuthoringSnapshot } from "./desktop_document_authoring_controller.ts";
 import type { DesktopLinkOverviewSnapshot } from "./desktop_link_overview_controller.ts";
@@ -21,10 +48,15 @@ import {
   type CodeMirrorDocumentEditor,
 } from "./codemirror_document_editor.ts";
 import { createWorkspaceShellModel, type WorkspaceShellRouteKind } from "./workspace_shell_contract.ts";
-import { createWorkspaceShellElement } from "./react_workspace_shell.ts";
+import {
+  createWorkspaceShellElement,
+  type WorkspaceShellDocumentShortcut,
+} from "./react_workspace_shell.ts";
 import { formatHistoryRangeKoKr, KO_KR_MESSAGES } from "./ko_kr_catalog.ts";
 import { mapUserFacingError } from "./user_facing_error_presenter.ts";
 import type { DesktopAssetSurfaceSnapshot } from "./desktop_asset_controller.ts";
+import type { DesktopGraphQueryState, DesktopGraphSurfaceSnapshot } from "./desktop_graph_controller.ts";
+import type { DocumentAssetLibraryState } from "./document_asset_library_state.ts";
 import {
   createDocumentAttachmentPanelElement,
   type DocumentAttachmentPanelCallbacks,
@@ -52,13 +84,34 @@ import {
   reconcileDocumentHistoryWindow,
   type DocumentHistoryFocusRequest,
 } from "./document_history_window.ts";
+import { presentGraphNodes } from "./graph_display_presenter.ts";
+import { ReactTopologyVisualHost } from "./react_topology_visual_host.ts";
+import { createTopologyRendererModel } from "./topology_visual_orchestrator.ts";
+import { filterTopologyVisualGraph } from "./topology_visual_filter.ts";
+import type { DesktopGraphCameraPreference } from "./desktop_graph_preference.ts";
+import { presentTopologyEmptyState } from "./topology_empty_state_presenter.ts";
 
 const shellRoutes: readonly WorkspaceShellRouteKind[] = ["Home", "Search", "Document", "Graph", "Canvas", "Assets", "Backup"];
 
+export type DocumentFormattingCommand = "heading" | "bold" | "italic" | "link" | "list" | "checklist" | "table";
+
+const formattingCommands = [
+  { command: "heading", action: "format-heading", label: "제목", Icon: Heading1 },
+  { command: "bold", action: "format-bold", label: "굵게", Icon: Bold },
+  { command: "italic", action: "format-italic", label: "기울임", Icon: Italic },
+  { command: "link", action: "format-link", label: "링크", Icon: Link2 },
+  { command: "list", action: "format-list", label: "목록", Icon: List },
+  { command: "checklist", action: "format-checklist", label: "체크리스트", Icon: ListChecks },
+  { command: "table", action: "format-table", label: "표", Icon: Table2 },
+] as const;
+
 export interface DesktopDocumentAuthoringWorkbenchCallbacks extends DocumentAttachmentPanelCallbacks {
   readonly onHome: () => void;
-  readonly onMode: (mode: DocumentEditorViewMode) => void;
+  readonly onReturnToSearch?: () => void;
   readonly onBodyChange: (body: string) => void;
+  readonly onOpenPlainTextEditor?: () => void;
+  readonly onClosePlainTextEditor?: () => void;
+  readonly onFormatCommand?: (command: DocumentFormattingCommand) => void;
   readonly onSave: () => void;
   readonly onRetry: () => void;
   readonly onDiscard: () => void;
@@ -77,8 +130,17 @@ export interface DesktopDocumentAuthoringWorkbenchCallbacks extends DocumentAtta
   readonly onApplyRestore?: () => void;
   readonly onRefreshRestorePreview?: () => void;
   readonly onContinueRestoreRecovery?: () => void;
-  readonly onSearch?: () => void;
+  readonly onSearchOpen?: () => void;
+  readonly onSearch?: (query?: string) => void;
   readonly onGraph?: () => void;
+  readonly onLocalGraphNodeSelect?: (nodeId: string) => void;
+  readonly onLocalGraphQuery?: (patch: Partial<DesktopGraphQueryState>) => void;
+  readonly onOpenLocalGraphAsset?: (assetId: string) => void;
+  readonly onLocalGraphVisualSearch?: (query: string) => void;
+  readonly onLocalGraphCameraPreferenceChanged?: (camera: DesktopGraphCameraPreference) => void;
+  readonly onLocalGraphIncludeExternalChange?: (include: boolean) => void;
+  readonly onLocalGraphRetry?: () => void;
+  readonly onLocalGraphRepair?: () => void;
   readonly onCanvas?: () => void;
   readonly onAssets?: () => void;
   readonly onBackup?: () => void;
@@ -88,11 +150,17 @@ export interface DesktopDocumentAuthoringWorkbenchCallbacks extends DocumentAtta
 }
 
 export interface DesktopDocumentAuthoringWorkbenchOptions {
-  readonly viewMode?: DocumentEditorViewMode;
+  readonly documentShortcuts?: readonly WorkspaceShellDocumentShortcut[];
   readonly history?: DesktopDocumentHistoryWorkbenchState;
   readonly links?: DesktopLinkOverviewSnapshot;
   readonly assets?: DesktopAssetSurfaceSnapshot;
+  readonly assetLibrary?: DocumentAssetLibraryState;
   readonly inspector?: DocumentInspectorState;
+  readonly graph?: DesktopGraphSurfaceSnapshot;
+  readonly graphVisualSearch?: string;
+  readonly graphCameraPreference?: DesktopGraphCameraPreference;
+  readonly graphIncludeExternal?: boolean;
+  readonly plainTextEditorOpen?: boolean;
 }
 
 export interface DesktopDocumentHistoryEntryView {
@@ -160,11 +228,17 @@ export type DesktopDocumentDiffWorkbenchState =
 interface WorkbenchProps {
   readonly snapshot: DesktopDocumentAuthoringSnapshot;
   readonly callbacks: DesktopDocumentAuthoringWorkbenchCallbacks;
-  readonly viewMode: DocumentEditorViewMode;
   readonly history: DesktopDocumentHistoryWorkbenchState;
   readonly links?: DesktopLinkOverviewSnapshot;
   readonly assets?: DesktopAssetSurfaceSnapshot;
+  readonly assetLibrary?: DocumentAssetLibraryState;
   readonly inspector: DocumentInspectorState;
+  readonly graph?: DesktopGraphSurfaceSnapshot;
+  readonly graphVisualSearch: string;
+  readonly graphCameraPreference?: DesktopGraphCameraPreference;
+  readonly graphIncludeExternal: boolean;
+  readonly plainTextEditorOpen: boolean;
+  readonly documentShortcuts?: readonly WorkspaceShellDocumentShortcut[];
 }
 
 export function createDesktopDocumentAuthoringWorkbenchElement(
@@ -175,41 +249,99 @@ export function createDesktopDocumentAuthoringWorkbenchElement(
   return React.createElement(DesktopDocumentAuthoringWorkbench, {
     snapshot,
     callbacks,
-    viewMode: options.viewMode ?? "split",
     history: options.history ?? { status: "Idle", entries: [] },
     links: options.links,
     assets: options.assets,
+    assetLibrary: options.assetLibrary,
     inspector: options.inspector ?? createDocumentInspectorState(),
+    graph: options.graph,
+    graphVisualSearch: options.graphVisualSearch ?? "",
+    graphCameraPreference: options.graphCameraPreference,
+    graphIncludeExternal: options.graphIncludeExternal ?? false,
+    plainTextEditorOpen: options.plainTextEditorOpen ?? false,
+    documentShortcuts: options.documentShortcuts,
   });
 }
 
 function DesktopDocumentAuthoringWorkbench({
   snapshot,
   callbacks,
-  viewMode,
   history,
   links,
   assets,
+  assetLibrary,
   inspector,
+  graph,
+  graphVisualSearch,
+  graphCameraPreference,
+  graphIncludeExternal,
+  plainTextEditorOpen,
+  documentShortcuts,
 }: WorkbenchProps): React.ReactElement {
   const e = React.createElement;
-  const showSource = viewMode === "source" || viewMode === "split";
-  const showPreview = viewMode === "preview" || viewMode === "split";
   const body = snapshot.body ?? "";
-  const preview = createMarkdownPreviewModel({
-    documentId: snapshot.documentId ?? "unloaded",
-    versionId: snapshot.expectedVersionId ?? "unloaded",
-    source: body,
-  });
+  const wysiwyg = createWysiwygMarkdownPresentationModel({ source: body });
   const restoreConfirmation = history.restore?.status === "Confirming" ? history.restore : undefined;
 
   const topbar = e(
       React.Fragment,
       null,
       e(
-        "button",
-        { type: "button", className: "authoring-breadcrumb", "data-action": "authoring-home", onClick: callbacks.onHome },
-        "내 캐비닛 / 프로젝트 / Cabinet",
+        "div",
+        { className: "authoring-navigation" },
+        callbacks.onReturnToSearch
+          ? e(
+              "button",
+              {
+                type: "button",
+                className: "authoring-search-return",
+                "data-action": "return-search-results",
+                "aria-label": "검색 결과로 돌아가기",
+                title: "검색 결과로 돌아가기",
+                onClick: callbacks.onReturnToSearch,
+              },
+              e(ArrowLeft, { size: 15, "aria-hidden": true }),
+              e("span", null, "검색 결과"),
+            )
+          : null,
+        e(
+          "button",
+          { type: "button", className: "authoring-breadcrumb", "data-action": "authoring-home", onClick: callbacks.onHome },
+          "프로젝트 / Cabinet",
+        ),
+      ),
+      e(
+        "form",
+        {
+          className: "topbar-search authoring-global-search",
+          role: "search",
+          onSubmit: (event: React.FormEvent<HTMLFormElement>) => {
+            event.preventDefault();
+            const query = new FormData(event.currentTarget).get("workspace-search");
+            callbacks.onSearch(typeof query === "string" ? query.trim() : "");
+          },
+        },
+        e(
+          "button",
+          {
+            type: "button",
+            className: "topbar-search-submit",
+            "data-action": "submit-workspace-search",
+            "aria-label": KO_KR_MESSAGES.message("shell.searchPrompt"),
+            onClick: (event: React.MouseEvent<HTMLButtonElement>) => {
+              const query = new FormData(event.currentTarget.form ?? undefined).get("workspace-search");
+              callbacks.onSearch(typeof query === "string" ? query.trim() : "");
+            },
+          },
+          e(Search, { size: 15, "aria-hidden": true }),
+        ),
+        e("input", {
+          type: "search",
+          name: "workspace-search",
+          "data-action": "workspace-search-input",
+          placeholder: KO_KR_MESSAGES.message("shell.searchPlaceholder"),
+          "aria-label": KO_KR_MESSAGES.message("shell.searchPrompt"),
+        }),
       ),
       e(
         "div",
@@ -248,20 +380,37 @@ function DesktopDocumentAuthoringWorkbench({
         { className: "authoring-toolbar" },
         e(
           "div",
-          { className: "editor-mode-control", role: "group", "aria-label": "편집 화면" },
-          (["source", "split", "preview"] as const).map((mode) =>
+          { className: "formatting-toolbar", role: "toolbar", "aria-label": "문서 서식" },
+          formattingCommands.map(({ command, action, label, Icon }) =>
             e(
               "button",
               {
-                key: mode,
+                key: action,
                 type: "button",
-                "data-action": `authoring-mode-${mode}`,
-                "data-editor-mode": mode,
-                "aria-pressed": viewMode === mode,
-                onClick: () => callbacks.onMode(mode),
+                className: "formatting-command",
+                "data-action": action,
+                "aria-label": label,
+                title: label,
+                onClick: callbacks.onFormatCommand ? () => callbacks.onFormatCommand?.(command) : undefined,
+                disabled: !callbacks.onFormatCommand,
               },
-              mode === "source" ? "원문" : mode === "split" ? "나란히" : "미리보기",
+              e(Icon, { size: 17, "aria-hidden": true }),
             ),
+          ),
+        ),
+        e(
+          "div",
+          { className: "editor-mode-control", role: "group", "aria-label": "편집 화면" },
+          e(
+            "button",
+            {
+              type: "button",
+              "data-action": "open-plain-text-editor",
+              "aria-label": "Markdown 원문 편집",
+              onClick: callbacks.onOpenPlainTextEditor,
+              disabled: !callbacks.onOpenPlainTextEditor,
+            },
+            "원문 편집",
           ),
         ),
         e(
@@ -275,32 +424,30 @@ function DesktopDocumentAuthoringWorkbench({
         { className: "authoring-layout" },
         e(
           "div",
-          { className: history.diff || restoreConfirmation ? "authoring-workspace mode-compare" : `authoring-workspace mode-${viewMode}` },
+          { className: history.diff || restoreConfirmation ? "authoring-workspace mode-compare" : "authoring-workspace mode-wysiwyg" },
           history.diff
             ? renderDocumentDiff(history.diff, callbacks)
             : restoreConfirmation
               ? renderRestoreConfirmation(restoreConfirmation, callbacks)
-            : showSource
-            ? e(CodeMirrorSourceRegion, {
-                key: "source",
-                body,
-                documentId: snapshot.documentId,
-                onChange: callbacks.onBodyChange,
-              })
-            : null,
-          !history.diff && !restoreConfirmation && showPreview
-            ? e(
+            : e(
                 "section",
-                { className: "markdown-preview", "aria-label": "Markdown 미리보기" },
-                preview.blocks.map((block, index) => renderPreviewBlock(block, index)),
-              )
-            : null,
+                {
+                  className: "wysiwyg-document-surface",
+                  "data-editor-surface": "wysiwyg",
+                  "aria-label": "WYSIWYG 문서 편집",
+                },
+                wysiwyg.blocks.length > 0
+                  ? wysiwyg.blocks.map((block) =>
+                    renderWysiwygBlock(block, body, snapshot.documentId, snapshot.revision, callbacks)
+                  )
+                  : e("p", { className: "wysiwyg-empty-state", role: "status" }, "빈 문서"),
+              ),
         ),
         e(
           "aside",
           { className: "authoring-context-column", "aria-label": "문서 정보" },
-          renderAuthoringKnowledgeMap(callbacks.onGraph),
-          renderDocumentInspector(inspector, links, assets, history, callbacks),
+          renderAuthoringKnowledgeMap(graph, graphVisualSearch, graphCameraPreference, graphIncludeExternal, callbacks),
+          renderDocumentInspector(inspector, links, assets, assetLibrary, history, callbacks),
         ),
       ),
     );
@@ -309,6 +456,7 @@ function DesktopDocumentAuthoringWorkbench({
     messages: KO_KR_MESSAGES,
     routeActions: { Home: callbacks.onHome, Search: callbacks.onSearch, Graph: callbacks.onGraph, Canvas: callbacks.onCanvas, Assets: callbacks.onAssets, Backup: callbacks.onBackup },
     onCreateDocument: callbacks.onCreateDocument,
+    onSearchOpen: callbacks.onSearchOpen,
     onSearch: callbacks.onSearch,
     rootClassName: "authoring-shell",
     rootAttributes: {
@@ -318,8 +466,13 @@ function DesktopDocumentAuthoringWorkbench({
       "data-persisted-revision": String(snapshot.persistedRevision),
     },
     topbarContent: topbar,
-    globalLayer: renderRecovery(snapshot, callbacks),
-    documentShortcuts: [{ label: snapshot.title ?? "Untitled", actionId: "current-document" }],
+    globalLayer: e(
+      React.Fragment,
+      null,
+      renderRecovery(snapshot, callbacks),
+      plainTextEditorOpen ? renderPlainTextEditorDialog(snapshot, callbacks) : null,
+    ),
+    documentShortcuts,
     content: main,
   });
 }
@@ -328,6 +481,7 @@ function renderDocumentInspector(
   inspector: DocumentInspectorState,
   links: DesktopLinkOverviewSnapshot | undefined,
   assets: DesktopAssetSurfaceSnapshot | undefined,
+  assetLibrary: DocumentAssetLibraryState | undefined,
   history: DesktopDocumentHistoryWorkbenchState,
   callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
 ): React.ReactElement {
@@ -341,7 +495,7 @@ function renderDocumentInspector(
     ? renderConnectedDocuments(links, callbacks)
     : inspector.tab === "attachments"
       ? assets
-        ? createDocumentAttachmentPanelElement(assets, callbacks, inspector.unlink)
+        ? createDocumentAttachmentPanelElement(assets, callbacks, inspector.unlink, assetLibrary)
         : e("p", { className: "document-inspector-empty", role: "status" }, "첨부 파일을 준비하는 중입니다")
       : renderHistoryRestorePanel(history, callbacks);
   return e(
@@ -381,13 +535,165 @@ function renderDocumentInspector(
   );
 }
 
-function renderAuthoringKnowledgeMap(onOpenGraph?: () => void): React.ReactElement {
+function renderAuthoringKnowledgeMap(
+  snapshot: DesktopGraphSurfaceSnapshot | undefined,
+  visualSearch: string,
+  cameraPreference: DesktopGraphCameraPreference | undefined,
+  includeExternal: boolean,
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+): React.ReactElement {
   const e = React.createElement;
+  const graph = snapshot?.graph;
+  const nodes = presentGraphNodes(graph?.nodes ?? []);
+  const visibleGraph = filterTopologyVisualGraph(nodes, graph?.edges ?? [], visualSearch, { includeExternal });
+  const visibleNodes = visibleGraph.nodes;
+  const emptyState = presentTopologyEmptyState({
+    sourceNodeCount: graph?.nodes.length ?? 0,
+    sourceEdgeCount: graph?.edges.length ?? 0,
+    visibleNodeCount: visibleNodes.length,
+    visualFilterActive: Boolean(visualSearch.trim()) || (graph?.stats?.filteredCount ?? 0) > 0,
+  });
+  const rendererModel = createTopologyRendererModel(
+    visibleNodes,
+    visibleGraph.edges,
+    snapshot?.selectedNodeId,
+    graph?.centerDocumentId,
+  );
+  const hasGraph = graph !== undefined && visibleNodes.length > 0;
+  const state = snapshot?.state ?? "Idle";
+  const selected = visibleNodes.find((node) => node.identity === snapshot?.selectedNodeId);
+  const incoming = selected ? graph?.edges.filter((edge) => edge.targetId === selected.identity).length ?? 0 : 0;
+  const outgoing = selected ? graph?.edges.filter((edge) => edge.sourceId === selected.identity).length ?? 0 : 0;
   return e(
     "section",
-    { className: "overview-card authoring-map-card", "aria-labelledby": "authoring-map-title" },
-    e("div", { className: "section-heading" }, e("h2", { id: "authoring-map-title" }, "내 지식 지도"), e("button", { type: "button", className: "text-action", "data-action": "open-authoring-graph", disabled: !onOpenGraph, onClick: onOpenGraph }, "전체 화면")),
-    e("div", { className: "authoring-map-preview", "aria-hidden": "true" }, e("span", { className: "map-spoke spoke-a" }), e("span", { className: "map-spoke spoke-b" }), e("i", { className: "map-dot dot-center" }), e("i", { className: "map-dot dot-a" }), e("i", { className: "map-dot dot-b" }), e("i", { className: "map-dot dot-c" })),
+    {
+      className: "overview-card authoring-map-card",
+      "aria-labelledby": "authoring-map-title",
+      "data-authoring-local-graph-state": state,
+    },
+    e(
+      "div",
+      { className: "section-heading" },
+      e("h2", { id: "authoring-map-title" }, "이 문서의 지식 지도"),
+      e("button", { type: "button", className: "text-action", "data-action": "open-authoring-graph", disabled: !callbacks.onGraph, onClick: callbacks.onGraph }, "전체 화면"),
+    ),
+    snapshot
+      ? e(
+          "div",
+          { className: "authoring-local-graph-filters", "aria-label": "문서 관계 범위" },
+          e("input", {
+            type: "search",
+            className: "authoring-local-graph-search",
+            "data-action": "search-authoring-graph",
+            "aria-label": "이 문서의 지식 지도 검색",
+            placeholder: "관계에서 찾기",
+            value: visualSearch,
+            onChange: (event: React.ChangeEvent<HTMLInputElement>) => callbacks.onLocalGraphVisualSearch?.(event.currentTarget.value),
+            disabled: !callbacks.onLocalGraphVisualSearch,
+          }),
+          ([1, 2] as const).map((depth) => e("button", {
+            key: `depth-${depth}`,
+            type: "button",
+            "data-action": `authoring-graph-depth-${depth}`,
+            "aria-pressed": snapshot.query.depth === depth,
+            title: `${depth}단계 관계`,
+            onClick: () => callbacks.onLocalGraphQuery?.({ depth }),
+            disabled: !callbacks.onLocalGraphQuery,
+          }, `${depth}단계`)),
+          (["both", "incoming", "outgoing"] as const).map((direction) => e("button", {
+            key: direction,
+            type: "button",
+            "data-action": `authoring-graph-direction-${direction}`,
+            "aria-pressed": snapshot.query.direction === direction,
+            title: direction === "both" ? "모든 방향" : direction === "incoming" ? "들어오는 관계" : "나가는 관계",
+            onClick: () => callbacks.onLocalGraphQuery?.({ direction }),
+            disabled: !callbacks.onLocalGraphQuery,
+          }, direction === "both" ? "전체" : direction === "incoming" ? "들어옴" : "나감")),
+          e("button", {
+            type: "button",
+            "data-action": "authoring-graph-toggle-unresolved",
+            "aria-pressed": snapshot.query.includeUnresolved,
+            title: "미해결 링크 표시",
+            onClick: () => callbacks.onLocalGraphQuery?.({ includeUnresolved: !snapshot.query.includeUnresolved }),
+            disabled: !callbacks.onLocalGraphQuery,
+          }, "미해결"),
+          e("button", {
+            type: "button",
+            "data-action": "authoring-graph-toggle-assets",
+            "aria-pressed": snapshot.query.includeAssets,
+            title: "첨부 파일 표시",
+            onClick: () => callbacks.onLocalGraphQuery?.({ includeAssets: !snapshot.query.includeAssets }),
+            disabled: !callbacks.onLocalGraphQuery,
+          }, "첨부"),
+          e("button", {
+            type: "button",
+            "data-action": "authoring-graph-toggle-external",
+            "aria-pressed": includeExternal,
+            title: "외부 링크 표시",
+            onClick: () => callbacks.onLocalGraphIncludeExternalChange?.(!includeExternal),
+            disabled: !callbacks.onLocalGraphIncludeExternalChange,
+          }, "외부"),
+        )
+      : null,
+    hasGraph
+      ? e(
+          React.Fragment,
+          null,
+          e(
+            "div",
+            { className: "authoring-local-graph-stage", "aria-label": "현재 문서 관계 지도" },
+            e(ReactTopologyVisualHost, {
+              model: rendererModel,
+              semanticNodes: visibleNodes,
+              onNodeSelected: (nodeId: string) => callbacks.onLocalGraphNodeSelect?.(nodeId),
+              onNodeActivated: (nodeId: string) => {
+                const node = visibleNodes.find((candidate) => candidate.identity === nodeId);
+                if (node?.kind === "document" && node.canNavigate) callbacks.onOpenLinkedDocument?.(nodeId);
+                if (node?.kind === "attachment" && node.canNavigate) callbacks.onOpenLocalGraphAsset?.(nodeId);
+              },
+              cameraPreference,
+              onCameraPreferenceChanged: callbacks.onLocalGraphCameraPreferenceChanged,
+            }),
+            (state === "Ready" || state === "Empty") && emptyState
+              ? e("p", { className: "authoring-local-graph-overlay", role: "status", "data-topology-empty-kind": emptyState.kind }, emptyState.message)
+              : null,
+            state === "Stale"
+              ? e("div", { className: "authoring-local-graph-overlay", role: "status" }, e("span", null, "문서 관계를 갱신해야 합니다."), e("button", { type: "button", "data-action": "repair-authoring-graph", disabled: !callbacks.onLocalGraphRepair, onClick: callbacks.onLocalGraphRepair }, "관계 다시 만들기"))
+              : state === "Repairing"
+                ? e("p", { className: "authoring-local-graph-overlay", role: "status" }, "문서 관계를 다시 만드는 중입니다.")
+                : state === "Loading"
+                  ? e("p", { className: "authoring-local-graph-overlay", role: "status" }, "최신 문서 관계를 불러오는 중입니다.")
+                  : null,
+          ),
+          selected
+            ? e(
+                "section",
+                { className: "authoring-local-graph-detail", "aria-label": "선택한 관계 항목" },
+                e("div", null, e("span", null, selected.kindLabel), e("strong", null, selected.label)),
+                e("dl", null,
+                  e("div", null, e("dt", null, "들어오는 연결"), e("dd", null, String(incoming))),
+                  e("div", null, e("dt", null, "나가는 연결"), e("dd", null, String(outgoing))),
+                ),
+                selected.kind === "document" && selected.canNavigate
+                  ? e("div", { className: "authoring-local-graph-detail-actions" },
+                      e("button", { type: "button", "data-action": "open-authoring-graph-document", onClick: () => callbacks.onOpenLinkedDocument?.(selected.identity), disabled: !callbacks.onOpenLinkedDocument }, "문서 열기"),
+                      selected.identity !== graph?.centerDocumentId
+                        ? e("button", { type: "button", "data-action": "recenter-authoring-graph", onClick: () => callbacks.onLocalGraphQuery?.({ scope: "local", centerDocumentId: selected.identity }), disabled: !callbacks.onLocalGraphQuery }, "이 문서 중심으로")
+                        : null,
+                    )
+                  : selected.kind === "attachment" && selected.canNavigate
+                    ? e("button", { type: "button", "data-action": "open-authoring-graph-asset", onClick: () => callbacks.onOpenLocalGraphAsset?.(selected.identity), disabled: !callbacks.onOpenLocalGraphAsset }, "첨부 파일 열기")
+                    : null,
+              )
+            : null,
+        )
+      : state === "Loading" || state === "Idle"
+        ? e("p", { className: "authoring-local-graph-message", role: "status" }, "문서 관계를 불러오는 중입니다.")
+        : state === "Repairing"
+          ? e("p", { className: "authoring-local-graph-message", role: "status" }, "문서 관계를 다시 만드는 중입니다.")
+          : state === "Failed"
+            ? e("div", { className: "authoring-local-graph-message", role: "alert" }, e("span", null, "문서 관계를 불러오지 못했습니다."), e("button", { type: "button", "data-action": snapshot?.retryable ? "repair-authoring-graph" : "retry-authoring-graph", onClick: snapshot?.retryable ? callbacks.onLocalGraphRepair : callbacks.onLocalGraphRetry, disabled: snapshot?.retryable ? !callbacks.onLocalGraphRepair : !callbacks.onLocalGraphRetry }, snapshot?.retryable ? "관계 다시 만들기" : "다시 시도"))
+            : e("p", { className: "authoring-local-graph-message" }, "이 문서에 연결된 항목이 없습니다."),
   );
 }
 
@@ -1240,46 +1546,367 @@ function renderRecovery(
   return null;
 }
 
-function renderPreviewBlock(block: MarkdownPreviewBlock, index: number): React.ReactElement {
+function renderPlainTextEditorDialog(
+  snapshot: DesktopDocumentAuthoringSnapshot,
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+): React.ReactElement {
   const e = React.createElement;
-  const key = `${block.kind}-${index}`;
-  switch (block.kind) {
+  return e(
+    "div",
+    {
+      className: "plain-text-editor-backdrop",
+      "data-editor-surface": "plain-text",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-label": "Markdown 원문 편집",
+    },
+    e(
+      "section",
+      { className: "plain-text-editor-panel" },
+      e(
+        "header",
+        { className: "plain-text-editor-header" },
+        e("strong", null, "원문 편집"),
+        e(
+          "button",
+          {
+            type: "button",
+            "data-action": "close-plain-text-editor",
+            "aria-label": "Markdown 원문 편집 닫기",
+            onClick: callbacks.onClosePlainTextEditor,
+            disabled: !callbacks.onClosePlainTextEditor,
+          },
+          e(X, { size: 16, "aria-hidden": true }),
+        ),
+      ),
+      e(CodeMirrorSourceRegion, {
+        key: "plain-text-source",
+        body: snapshot.body ?? "",
+        documentId: snapshot.documentId,
+        onChange: callbacks.onBodyChange,
+      }),
+    ),
+  );
+}
+
+function renderWysiwygBlock(
+  block: WysiwygMarkdownBlock,
+  body: string,
+  documentId: string,
+  revision: number,
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+): React.ReactElement {
+  const e = React.createElement;
+  const blockProps = {
+    key: block.blockId,
+    className: `wysiwyg-block wysiwyg-block-${block.blockType}`,
+    "data-wysiwyg-block-id": block.blockId,
+    "data-wysiwyg-block-type": block.blockType,
+  };
+
+  switch (block.blockType) {
     case "heading":
-      return e(`h${Math.min(6, Math.max(1, block.level))}`, { key, id: block.anchor }, block.text);
+      return e(
+        `h${Math.min(6, Math.max(1, block.level))}`,
+        {
+          ...blockProps,
+          ...(hasWysiwygReferenceInline(block.inlines)
+            ? { "data-wysiwyg-inline-editing": "plain-text" }
+            : createEditableWysiwygBlockProps(block, body, documentId, revision, callbacks)),
+        },
+        renderWysiwygInlineChildren(block.inlines, callbacks),
+      );
     case "paragraph":
-      return e("p", { key }, block.text);
+      return e("p", {
+        ...blockProps,
+        ...(hasWysiwygReferenceInline(block.inlines)
+          ? { "data-wysiwyg-inline-editing": "plain-text" }
+          : createEditableWysiwygBlockProps(block, body, documentId, revision, callbacks)),
+      }, renderWysiwygInlineChildren(block.inlines, callbacks));
+    case "checklist":
+      return e(
+        "ul",
+        { ...blockProps, className: `${blockProps.className} wysiwyg-checklist` },
+        block.items.map((item, itemIndex) =>
+          e(
+            "li",
+            { key: itemIndex, "data-wysiwyg-checklist-state": item.checked ? "checked" : "open" },
+            e(
+              "button",
+              {
+                type: "button",
+                className: "wysiwyg-task-checkbox",
+                "data-action": "toggle-wysiwyg-checklist-item",
+                "data-wysiwyg-checklist-index": itemIndex,
+                "aria-label": item.checked ? "체크리스트 항목 미완료로 표시" : "체크리스트 항목 완료로 표시",
+                onClick: () => toggleWysiwygChecklistItem(block, itemIndex, body, documentId, revision, callbacks),
+              },
+              item.checked ? "☑" : "☐",
+            ),
+            e("span", null, item.text),
+          ),
+        ),
+      );
     case "table":
       return e(
         "div",
-        { key, className: "preview-table-scroll" },
+        { ...blockProps, className: `${blockProps.className} wysiwyg-table-scroll` },
         e(
           "table",
           null,
-          e("thead", null, e("tr", null, block.headers.map((header, cell) => e("th", { key: cell }, header)))),
+          e(
+            "thead",
+            null,
+            e(
+              "tr",
+              null,
+              block.headers.map((header, cellIndex) =>
+                e("th", { key: cellIndex, "data-wysiwyg-table-align": block.alignments[cellIndex] ?? "default" }, header),
+              ),
+            ),
+          ),
           e(
             "tbody",
             null,
             block.rows.map((row, rowIndex) =>
-              e("tr", { key: rowIndex }, row.map((cell, cellIndex) => e("td", { key: cellIndex }, cell))),
+              e(
+                "tr",
+                { key: rowIndex },
+                row.map((cell, cellIndex) =>
+                  e(
+                    "td",
+                    {
+                      key: cellIndex,
+                      "data-wysiwyg-table-align": block.alignments[cellIndex] ?? "default",
+                      "data-wysiwyg-table-row": rowIndex,
+                      "data-wysiwyg-table-cell": cellIndex,
+                      contentEditable: true,
+                      suppressContentEditableWarning: true,
+                      role: "textbox",
+                      "aria-label": "표 셀 편집",
+                      onBlur: (event: React.FocusEvent<HTMLElement>) =>
+                        editWysiwygTableCell(block, rowIndex, cellIndex, event.currentTarget.textContent ?? "", body, documentId, revision, callbacks),
+                    },
+                    cell,
+                  ),
+                ),
+              ),
             ),
           ),
         ),
       );
-    case "checklist":
+    case "code_block":
+      return renderWysiwygCodeBlock(block, blockProps, callbacks);
+    case "blockquote":
+      return renderWysiwygBlockquoteBlock(block, blockProps, callbacks);
+    case "fallback":
       return e(
-        "ul",
-        { key, className: "preview-checklist" },
-        block.items.map((item, itemIndex) =>
-          e("li", { key: itemIndex }, e("span", { className: "task-checkbox", "aria-hidden": "true" }, item.checked ? "☑" : "☐"), item.text),
+        "div",
+        { ...blockProps, "data-wysiwyg-fallback-reason": block.fallbackReason },
+        e("p", null, block.displayText),
+        e(
+          "button",
+          {
+            type: "button",
+            "data-action": "edit-wysiwyg-fallback-in-source",
+            "aria-label": "원문에서 편집",
+            onClick: callbacks.onOpenPlainTextEditor,
+            disabled: !callbacks.onOpenPlainTextEditor,
+          },
+          "원문에서 편집",
         ),
       );
-    case "code":
-      return e("pre", { key }, e("code", null, `${block.lineCount} lines${block.language ? ` · ${block.language}` : ""}`));
-    case "blockquote":
-      return e("blockquote", { key }, block.text);
-    case "callout":
-      return e("aside", { key, className: "preview-callout" }, e("strong", null, block.title), e("p", null, block.text));
   }
+}
+
+function renderWysiwygCodeBlock(
+  block: WysiwygMarkdownCodeBlock,
+  blockProps: Record<string, unknown>,
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+): React.ReactElement {
+  const e = React.createElement;
+  return e(
+    "figure",
+    {
+      ...blockProps,
+      "data-wysiwyg-code-language": block.language ?? "plain",
+    },
+    block.language ? e("figcaption", null, block.language) : null,
+    e("pre", null, e("code", null, block.displayText)),
+    e(
+      "button",
+      {
+        type: "button",
+        "data-action": "edit-wysiwyg-code-source",
+        "aria-label": "코드 원문에서 편집",
+        onClick: callbacks.onOpenPlainTextEditor,
+        disabled: !callbacks.onOpenPlainTextEditor,
+      },
+      "원문에서 편집",
+    ),
+  );
+}
+
+function renderWysiwygBlockquoteBlock(
+  block: WysiwygMarkdownBlockquoteBlock,
+  blockProps: Record<string, unknown>,
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+): React.ReactElement {
+  const e = React.createElement;
+  return e(
+    "blockquote",
+    {
+      ...blockProps,
+      ...(block.calloutKind ? { "data-wysiwyg-callout-kind": block.calloutKind } : {}),
+    },
+    block.displayText.split("\n").map((line, index) => e("p", { key: index }, line)),
+    e(
+      "button",
+      {
+        type: "button",
+        "data-action": "edit-wysiwyg-quote-source",
+        "aria-label": "인용 원문에서 편집",
+        onClick: callbacks.onOpenPlainTextEditor,
+        disabled: !callbacks.onOpenPlainTextEditor,
+      },
+      "원문에서 편집",
+    ),
+  );
+}
+
+function renderWysiwygInlineChildren(
+  inlines: readonly WysiwygMarkdownInlineNode[],
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+): React.ReactNode {
+  const children: React.ReactNode[] = inlines.map((inline, index) => renderWysiwygInlineNode(inline, index));
+  if (hasWysiwygReferenceInline(inlines)) {
+    children.push(
+      React.createElement(
+        "button",
+        {
+          key: "edit-inline-source",
+          type: "button",
+          className: "wysiwyg-inline-source-action",
+          "data-action": "edit-wysiwyg-inline-source",
+          "aria-label": "원문에서 편집",
+          onClick: callbacks.onOpenPlainTextEditor,
+          disabled: !callbacks.onOpenPlainTextEditor,
+        },
+        "원문에서 편집",
+      ),
+    );
+  }
+  return children;
+}
+
+function renderWysiwygInlineNode(inline: WysiwygMarkdownInlineNode, index: number): React.ReactNode {
+  if (inline.inlineType === "text") return inline.text;
+  return React.createElement(
+    "span",
+    {
+      key: index,
+      className: `wysiwyg-inline-chip wysiwyg-inline-${inline.inlineType.replace("_", "-")}`,
+      "data-wysiwyg-inline-type": inline.inlineType,
+    },
+    inline.text,
+  );
+}
+
+function hasWysiwygReferenceInline(inlines: readonly WysiwygMarkdownInlineNode[]): boolean {
+  return inlines.some((inline) => inline.inlineType !== "text");
+}
+
+function toggleWysiwygChecklistItem(
+  block: WysiwygMarkdownChecklistBlock,
+  itemIndex: number,
+  body: string,
+  documentId: string,
+  revision: number,
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+): void {
+  const expectedSourceText = body.slice(block.sourceRange.start, block.sourceRange.end);
+  applyGuardedWysiwygPatch(body, documentId, revision, callbacks, () =>
+    applyWysiwygMarkdownChecklistItemToggle({
+      body,
+      sourceRange: block.sourceRange,
+      expectedSourceText,
+      itemIndex,
+    })
+  );
+}
+
+function editWysiwygTableCell(
+  block: WysiwygMarkdownTableBlock,
+  rowIndex: number,
+  cellIndex: number,
+  replacementText: string,
+  body: string,
+  documentId: string,
+  revision: number,
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+): void {
+  if ((block.rows[rowIndex]?.[cellIndex] ?? "") === replacementText) return;
+  const expectedSourceText = body.slice(block.sourceRange.start, block.sourceRange.end);
+  applyGuardedWysiwygPatch(body, documentId, revision, callbacks, () =>
+    applyWysiwygMarkdownTableCellEdit({
+      body,
+      sourceRange: block.sourceRange,
+      expectedSourceText,
+      rowIndex,
+      cellIndex,
+      replacementText,
+    })
+  );
+}
+
+function createEditableWysiwygBlockProps(
+  block: WysiwygMarkdownHeadingBlock | WysiwygMarkdownParagraphBlock,
+  body: string,
+  documentId: string,
+  revision: number,
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+): Record<string, unknown> {
+  return {
+    contentEditable: true,
+    suppressContentEditableWarning: true,
+    role: "textbox",
+    "aria-label": block.blockType === "heading" ? "제목 편집" : "문단 편집",
+    onBlur(event: React.FocusEvent<HTMLElement>) {
+      const text = event.currentTarget.textContent ?? "";
+      const replacementSourceText = block.blockType === "heading"
+        ? `${"#".repeat(block.level)} ${text.trim()}`
+        : text;
+      const expectedSourceText = body.slice(block.sourceRange.start, block.sourceRange.end);
+      if (replacementSourceText === expectedSourceText) return;
+      applyGuardedWysiwygPatch(body, documentId, revision, callbacks, () =>
+        applyWysiwygMarkdownBlockTextEdit({
+          body,
+          sourceRange: block.sourceRange,
+          expectedSourceText,
+          replacementSourceText,
+        })
+      );
+    },
+  };
+}
+
+function applyGuardedWysiwygPatch(
+  body: string,
+  documentId: string,
+  revision: number,
+  callbacks: DesktopDocumentAuthoringWorkbenchCallbacks,
+  apply: () => ReturnType<typeof applyWysiwygMarkdownBlockTextEdit>,
+): void {
+  const session = createWysiwygPlainTextSyncSession({ documentId, body, revision });
+  const result = applyWysiwygPatchToSyncSession(session, {
+    baseRevision: revision,
+    apply,
+  });
+  if (result.status === "Applied") {
+    callbacks.onBodyChange(result.session.body);
+    return;
+  }
+  callbacks.onOpenPlainTextEditor?.();
 }
 
 function saveStateLabel(state: DesktopDocumentAuthoringSnapshot["saveState"]): string {

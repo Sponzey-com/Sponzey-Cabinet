@@ -12,6 +12,7 @@ use cabinet_domain::canvas::{
 };
 use cabinet_domain::document::DocumentId;
 use cabinet_domain::workspace::WorkspaceId;
+use cabinet_ports::canvas_catalog::{CanvasCatalogEntry, CanvasCatalogError, CanvasCatalogPort};
 use cabinet_ports::canvas_recovery::{CanvasRecoveryRepository, CanvasRecoveryRepositoryError};
 use cabinet_ports::canvas_repository::{CanvasRecord, CanvasRepository, CanvasRepositoryError};
 use cabinet_ports::canvas_viewport_query::{
@@ -30,9 +31,66 @@ pub struct DurableCanvasRepository {
     root: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredCurrentCanvasRecord {
+    workspace_id: WorkspaceId,
+    record: CanvasRecord,
+}
+
+impl DiscoveredCurrentCanvasRecord {
+    pub fn workspace_id(&self) -> &WorkspaceId {
+        &self.workspace_id
+    }
+
+    pub fn record(&self) -> &CanvasRecord {
+        &self.record
+    }
+}
+
 impl DurableCanvasRepository {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
+    }
+
+    pub fn list_current_canvas_records(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<DiscoveredCurrentCanvasRecord>, CanvasRepositoryError> {
+        if limit == 0 {
+            return Err(CanvasRepositoryError::InvalidInput);
+        }
+        let root = self.root.join("canvases");
+        let mut workspace_paths = match sorted_directories(&root) {
+            Ok(paths) => paths,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err(CanvasRepositoryError::StorageUnavailable),
+        };
+        workspace_paths.sort();
+
+        let mut discovered = Vec::new();
+        for workspace_path in workspace_paths {
+            let workspace = decode_workspace_directory(&workspace_path)?;
+            let mut canvas_paths = sorted_directories(&workspace_path)
+                .map_err(|_| CanvasRepositoryError::StorageUnavailable)?;
+            canvas_paths.sort();
+            for canvas_path in canvas_paths {
+                if discovered.len() >= limit {
+                    return Err(CanvasRepositoryError::InvalidInput);
+                }
+                let canvas = decode_canvas_directory(&canvas_path)?;
+                let record = self
+                    .read_current(&workspace, &canvas)?
+                    .ok_or(CanvasRepositoryError::CorruptedCanvas)?;
+                if record.canvas().id() != &canvas {
+                    return Err(CanvasRepositoryError::CorruptedCanvas);
+                }
+                discovered.push(DiscoveredCurrentCanvasRecord {
+                    workspace_id: workspace.clone(),
+                    record,
+                });
+            }
+        }
+        Ok(discovered)
     }
 
     fn canvas_root(&self, workspace: &WorkspaceId, canvas: &CanvasId) -> PathBuf {
@@ -153,6 +211,101 @@ impl DurableCanvasRepository {
         let revision = decode_pointer(&text)?;
         read(&self.revision_path(workspace, canvas, revision)).map(Some)
     }
+}
+
+impl CanvasCatalogPort for DurableCanvasRepository {
+    fn list_canvas_entries(
+        &self,
+        workspace_id: &WorkspaceId,
+        limit: usize,
+        include_archived: bool,
+    ) -> Result<Vec<CanvasCatalogEntry>, CanvasCatalogError> {
+        if limit == 0 {
+            return Err(CanvasCatalogError::InvalidLimit);
+        }
+        let workspace_root = self.root.join("canvases").join(hex(workspace_id.as_str()));
+        let paths = match sorted_directories(&workspace_root) {
+            Ok(paths) => paths,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == ErrorKind::InvalidData => {
+                return Err(CanvasCatalogError::CorruptedCatalog);
+            }
+            Err(_) => return Err(CanvasCatalogError::StorageUnavailable),
+        };
+        let mut entries = Vec::new();
+        for path in paths {
+            let canvas_id =
+                decode_canvas_directory(&path).map_err(|_| CanvasCatalogError::CorruptedCatalog)?;
+            let record = self
+                .read_current(workspace_id, &canvas_id)
+                .map_err(map_canvas_catalog_error)?
+                .ok_or(CanvasCatalogError::CorruptedCatalog)?;
+            if !include_archived && record.canvas().state() == CanvasLifecycleState::Archived {
+                continue;
+            }
+            if entries.len() == limit {
+                return Err(CanvasCatalogError::LimitExceeded);
+            }
+            entries.push(CanvasCatalogEntry::new(
+                record.canvas().id().clone(),
+                record.title().clone(),
+                record.canvas().state(),
+                record.revision(),
+            ));
+        }
+        Ok(entries)
+    }
+}
+
+const fn map_canvas_catalog_error(error: CanvasRepositoryError) -> CanvasCatalogError {
+    match error {
+        CanvasRepositoryError::StorageUnavailable => CanvasCatalogError::StorageUnavailable,
+        CanvasRepositoryError::InvalidInput => CanvasCatalogError::InvalidLimit,
+        CanvasRepositoryError::CorruptedCanvas
+        | CanvasRepositoryError::UnsupportedSchema
+        | CanvasRepositoryError::AlreadyExists
+        | CanvasRepositoryError::VersionConflict => CanvasCatalogError::CorruptedCatalog,
+    }
+}
+
+fn sorted_directories(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "Canvas catalog contains a non-directory entry",
+            ));
+        }
+        paths.push(entry.path());
+    }
+    Ok(paths)
+}
+
+fn decode_workspace_directory(path: &Path) -> Result<WorkspaceId, CanvasRepositoryError> {
+    let encoded = encoded_directory_name(path)?;
+    let decoded = unhex(encoded)?;
+    if hex(&decoded) != encoded {
+        return Err(CanvasRepositoryError::CorruptedCanvas);
+    }
+    WorkspaceId::new(&decoded).map_err(|_| CanvasRepositoryError::CorruptedCanvas)
+}
+
+fn decode_canvas_directory(path: &Path) -> Result<CanvasId, CanvasRepositoryError> {
+    let encoded = encoded_directory_name(path)?;
+    let decoded = unhex(encoded)?;
+    if hex(&decoded) != encoded {
+        return Err(CanvasRepositoryError::CorruptedCanvas);
+    }
+    CanvasId::new(&decoded).map_err(|_| CanvasRepositoryError::CorruptedCanvas)
+}
+
+fn encoded_directory_name(path: &Path) -> Result<&str, CanvasRepositoryError> {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .ok_or(CanvasRepositoryError::CorruptedCanvas)
 }
 
 impl CanvasRepository for DurableCanvasRepository {

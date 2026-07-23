@@ -49,6 +49,10 @@ test("desktop workspace home facade calls local command once with explicit limit
         unfinishedItems: [],
         backupStatus: "Fresh" as const,
         healthStatus: "Healthy" as const,
+        documentCount: 10_000,
+        assetCount: 2_500,
+        canvasCount: 24,
+        summaryUnavailable: ["Assets"] as const,
       };
     },
   } as unknown as LocalDesktopCommandClient;
@@ -73,6 +77,12 @@ test("desktop workspace home facade calls local command once with explicit limit
   });
   assert.equal(model.displayState, "Ready");
   assert.equal(model.recentDocuments[0]?.documentId, "doc-1");
+  assert.deepEqual(model.workspaceSummary, {
+    documentCount: 10_000,
+    assetCount: 2_500,
+    canvasCount: 24,
+    unavailable: ["Assets"],
+  });
 });
 
 test("desktop workspace home facade maps client failure without leaking transport message", async () => {

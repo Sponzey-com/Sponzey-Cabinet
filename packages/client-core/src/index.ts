@@ -55,6 +55,7 @@ export type DocumentQueryName =
   | "get-document-version"
   | "preview-document-restore"
   | "search-documents"
+  | "search-assets"
   | "get-link-overview"
   | "list-document-assets";
 
@@ -109,6 +110,28 @@ export interface SearchDocumentsQuery {
   readonly workspaceId: string;
   readonly text: string;
   readonly limit: number;
+}
+
+export interface SearchAssetsQuery {
+  readonly queryName: "search-assets";
+  readonly workspaceId: string;
+  readonly text: string;
+  readonly limit: number;
+}
+
+export interface AssetSearchResultItem {
+  readonly assetId: string;
+  readonly fileName: string;
+  readonly mediaType: string;
+  readonly byteSize: number;
+  readonly score: number;
+}
+
+export interface AssetSearchResultsPage {
+  readonly queryName: "search-assets";
+  readonly workspaceId: string;
+  readonly text: string;
+  readonly results: readonly AssetSearchResultItem[];
 }
 
 export interface LinkOverviewQuery extends DocumentIdentity {
@@ -476,6 +499,10 @@ export type KnowledgeGraphEdgeKindView =
 export interface KnowledgeGraphNodeView {
   readonly id: string;
   readonly kind: KnowledgeGraphNodeKindView;
+  readonly label?: string;
+  readonly breadcrumbLabel?: string;
+  readonly availability?: "available" | "missing";
+  readonly canNavigate?: boolean;
 }
 
 export interface KnowledgeGraphEdgeView {
@@ -712,6 +739,7 @@ export const PHASE009_LOCAL_DESKTOP_COMMAND_NAMES = [
   "preview_document_restore",
   "restore_document_version",
   "search_documents",
+  "search_assets",
   "get_link_overview",
   "get_graph_projection",
   "list_document_assets",
@@ -762,6 +790,8 @@ export type LocalDesktopCommandErrorCode =
   | "GRAPH_PROJECTION_UNAVAILABLE"
   | "GRAPH_PROJECTION_CORRUPTED"
   | "ASSET_INVALID_INPUT"
+  | "ASSET_SEARCH_INVALID_INPUT"
+  | "ASSET_SEARCH_STORAGE_UNAVAILABLE"
   | "ASSET_DOCUMENT_NOT_FOUND"
   | "ASSET_METADATA_UNAVAILABLE"
   | "COMMAND_INVALID_TRANSITION";
@@ -842,7 +872,13 @@ export interface WorkspaceHomeResult {
   readonly unfinishedItems: readonly WorkspaceHomeUnfinishedItem[];
   readonly backupStatus: "NeverCreated" | "Fresh" | "Stale" | "Failed";
   readonly healthStatus: "Healthy" | "Degraded" | "ReadOnlyRecovery";
+  readonly documentCount: number;
+  readonly assetCount: number;
+  readonly canvasCount: number;
+  readonly summaryUnavailable: readonly WorkspaceHomeSummaryKind[];
 }
+
+export type WorkspaceHomeSummaryKind = "Documents" | "Assets" | "Canvases";
 
 export type DocumentNavigatorView =
   | "Tree"
@@ -864,6 +900,7 @@ export interface DocumentNavigatorItem {
   readonly documentId: string;
   readonly title: string;
   readonly path: string;
+  readonly snippet?: string;
   readonly collections: readonly string[];
   readonly tags: readonly string[];
   readonly favorite: boolean;
@@ -874,7 +911,11 @@ export interface DocumentNavigatorResult {
   readonly view: DocumentNavigatorView;
   readonly state: "Ready" | "EmptyResult" | "Degraded";
   readonly items: readonly DocumentNavigatorItem[];
+  readonly assetResults?: readonly AssetSearchResultItem[];
   readonly nextCursor?: string | null;
+  readonly searchMetrics?: {
+    readonly durationMs: number;
+  };
 }
 
 export interface SaveCurrentDocumentCommand extends DocumentIdentity {
@@ -957,6 +998,7 @@ export interface LocalDesktopCommandClient {
   previewDocumentRestore(query: RestorePreviewQuery): Promise<RestorePreviewResult>;
   restoreDocumentVersion(command: RestoreDocumentVersionCommand): Promise<RestoreDocumentVersionResult>;
   searchDocuments(query: SearchDocumentsQuery): Promise<SearchResultsPage>;
+  searchAssets(query: SearchAssetsQuery): Promise<AssetSearchResultsPage>;
   getLinkOverview(query: LinkOverviewQuery): Promise<LinkOverviewView>;
   getKnowledgeGraph(query: KnowledgeGraphQuery): Promise<KnowledgeGraphView>;
   getAssetMetadata(query: ListDocumentAssetsQuery): Promise<DocumentAssetsPage>;
@@ -1154,6 +1196,14 @@ export function createLocalDesktopCommandClient(
       );
     },
 
+    searchAssets(query) {
+      return callLocalDesktopCommand<AssetSearchResultsPage>(
+        transport,
+        "search_assets",
+        query,
+      );
+    },
+
     getLinkOverview(query) {
       return callLocalDesktopCommand<LinkOverviewView>(
         transport,
@@ -1289,6 +1339,19 @@ export function createSearchDocumentsQuery(
 ): SearchDocumentsQuery {
   return {
     queryName: "search-documents",
+    workspaceId,
+    text,
+    limit,
+  };
+}
+
+export function createSearchAssetsQuery(
+  workspaceId: string,
+  text: string,
+  limit: number,
+): SearchAssetsQuery {
+  return {
+    queryName: "search-assets",
     workspaceId,
     text,
     limit,

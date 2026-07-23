@@ -6,6 +6,8 @@ import type {
   LocalDesktopCommandEnvelope,
   LocalDesktopCommandResponse,
   LocalDesktopCommandTransport,
+  SearchDocumentsQuery,
+  SearchResultsPage,
 } from "@sponzey-cabinet/client-core";
 
 import type { TauriInvoke } from "./tauri_home_transport.ts";
@@ -14,6 +16,9 @@ export function createTauriDiscoveryTransport(invoke: TauriInvoke): LocalDesktop
   return async <TData>(
     envelope: LocalDesktopCommandEnvelope,
   ): Promise<LocalDesktopCommandResponse<TData>> => {
+    if (envelope.commandName === "search_documents" && isSearchDocumentsQuery(envelope.payload)) {
+      return invokeDocumentSearch(invoke, envelope) as Promise<LocalDesktopCommandResponse<TData>>;
+    }
     if (envelope.commandName === "list_document_assets" && isDocumentAssetsQuery(envelope.payload)) {
       return invokeDocumentAssets(invoke, envelope) as Promise<LocalDesktopCommandResponse<TData>>;
     }
@@ -44,6 +49,51 @@ export function createTauriDiscoveryTransport(invoke: TauriInvoke): LocalDesktop
       return bridgeFailure();
     }
   };
+}
+
+async function invokeDocumentSearch(
+  invoke: TauriInvoke,
+  envelope: LocalDesktopCommandEnvelope,
+): Promise<LocalDesktopCommandResponse<SearchResultsPage>> {
+  const query = envelope.payload;
+  if (!isSearchDocumentsQuery(query)) return bridgeFailure();
+  try {
+    const response = await invoke("search_desktop_documents", {
+      request: {
+        workspace_id: query.workspaceId,
+        text: query.text,
+        limit: query.limit,
+      },
+    });
+    return isSearchDocumentsResponse(response) ? response : bridgeFailure();
+  } catch {
+    return bridgeFailure();
+  }
+}
+
+function isSearchDocumentsQuery(value: Record<string, unknown>): value is SearchDocumentsQuery & Record<string, unknown> {
+  return value.queryName === "search-documents"
+    && isNonEmptyString(value.workspaceId)
+    && isNonEmptyString(value.text)
+    && isBoundedInteger(value.limit, 1, 100);
+}
+
+function isSearchDocumentsResponse(value: unknown): value is LocalDesktopCommandResponse<SearchResultsPage> {
+  if (!isRecord(value) || typeof value.ok !== "boolean") return false;
+  if (!value.ok) return typeof value.errorCode === "string" && typeof value.retryable === "boolean";
+  const data = value.data;
+  return isRecord(data)
+    && data.queryName === "search-documents"
+    && isNonEmptyString(data.workspaceId)
+    && isNonEmptyString(data.text)
+    && Array.isArray(data.results)
+    && data.results.every((result) => isRecord(result)
+      && result.workspaceId === data.workspaceId
+      && isNonEmptyString(result.documentId)
+      && isNonEmptyString(result.title)
+      && isNonEmptyString(result.path)
+      && isNonEmptyString(result.snippet)
+      && isNonNegativeInteger(result.score));
 }
 
 async function invokeDocumentAssets(
@@ -135,7 +185,11 @@ function isGraphNode(value: unknown): boolean {
   return (
     isRecord(value) &&
     isNonEmptyString(value.id) &&
-    ["document", "unresolved_link", "attachment", "external_link"].includes(String(value.kind))
+    ["document", "unresolved_link", "attachment", "external_link"].includes(String(value.kind)) &&
+    isNonEmptyString(value.label) &&
+    typeof value.breadcrumbLabel === "string" &&
+    ["available", "missing"].includes(String(value.availability)) &&
+    typeof value.canNavigate === "boolean"
   );
 }
 

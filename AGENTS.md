@@ -21,6 +21,13 @@
 - 멀티 사용자, self-host, SaaS, 실시간 협업, 조직/RBAC UI, SSO/SCIM, 과금과 관리자 콘솔을 사용자의 명시적 요구 없이 개발 계획, task, release gate 또는 기본 UI에 포함하지 마라.
 - 현재 범위를 제한하더라도 공통 domain/usecase/port를 macOS 전용으로 오염시키지 말고 차후 플랫폼 adapter가 같은 계약을 구현할 수 있게 유지하라.
 - 플랫폼별 차이는 어댑터 계층에서 처리하고 도메인/유스케이스에 누출하지 마라.
+- Home, Document, Graph, Canvas, Assets, Backup route는 공통 workspace shell 계약을 공유하라.
+- 좌측 하단 문서 바로가기는 route별 임시 검색 결과, 선택 node, 선택 asset, 현재 route context로 재계산하지 말고 root-owned recent document shortcuts를 사용하라.
+- Document 메뉴는 마지막 작업 문서를 우선 재개해야 하며, 명시적 검색 action 없이 Search route로 이동하게 만들지 마라.
+- 현재 문서 편집기는 WYSIWYG/Live Preview 기본 편집 화면과 CodeMirror 기반 `원문 편집` modal을 구현 범위로 취급하라.
+- WYSIWYG는 별도 저장 모델이 아니라 Markdown source의 presentation adapter다. 저장 데이터의 canonical form은 항상 Markdown source로 유지하라.
+- WYSIWYG 구현은 editor presentation adapter, React UI boundary, CodeMirror source modal 경계에 둬라. Domain/usecase/Rust/Tauri 저장 계층이 WYSIWYG UI 타입이나 렌더링 규칙을 알게 하지 마라.
+- Unsupported Markdown block, link/asset reference, code block, blockquote/callout은 data loss 없이 안전한 표시와 `원문에서 편집` fallback을 제공하라.
 
 ## 2. Architecture Rules
 
@@ -515,6 +522,8 @@ TDD 사이클:
 - 문서 첨부가 asset 원본, metadata, document association을 분리하고 실패 시 고아 참조를 남기지 않는지 확인하라.
 - 첨부 연결 해제가 공유 asset 원본이나 다른 참조를 삭제하지 않는지 확인하라.
 - 일반 UI와 로그에 document/version/asset 내부 ID, snapshot path, Git 용어, 원본 파일 경로가 노출되지 않는지 확인하라.
+- route 전환 후에도 좌측 하단 문서 바로가기 목록이 동일한 root-owned recent document shortcuts를 유지하는지 확인하라.
+- Document 메뉴가 마지막 작업 문서를 재개하고 검색 화면으로 자동 점프하지 않는지 확인하라.
 - 검색/조회 경로가 p95 300ms 목표를 만족하도록 index, projection, cache, pagination을 사용하는지 확인하라.
 - 조회 경로가 본문 전체 스캔, version history 전체 스캔, 권한 후처리 전체 스캔에 의존하지 않는지 확인하라.
 
@@ -553,6 +562,9 @@ TDD 사이클:
 - 첨부 실패 후 고아 document association이나 완료된 것으로 보이는 metadata를 남기지 마라.
 - 문서 diff에서 첨부 bytes의 binary diff를 기본 동작으로 수행하지 마라.
 - 일반 사용자 UI에 내부 version ID, document ID, snapshot path, Git commit/branch/repository를 표시하지 마라.
+- 일반 사용자 UI에 문서 파일명이나 내부 저장 경로를 문서 제목 대신 표시하지 마라.
+- route별 컴포넌트가 좌측 하단 문서 바로가기 목록을 검색 결과나 현재 route context로 대체하지 마라.
+- Document 메뉴를 Search route의 별칭으로 구현하지 마라.
 - 검색/조회 성능 문제를 UI loading spinner만으로 숨기지 마라.
 - 권한 필터링을 전체 결과 조회 후 애플리케이션 메모리에서만 처리하지 마라.
 
@@ -582,6 +594,8 @@ TDD 사이클:
 - 프로젝트 지침과 충돌하는 요구가 있으면 구현 전에 문제를 명확히 제기하라.
 - 플랫폼 기능을 추가할 때 공통 유스케이스, 플랫폼 어댑터, capability matrix, smoke test를 함께 갱신하라.
 - 한 플랫폼의 제약 때문에 도메인 규칙을 바꾸지 말고 adapter 또는 policy로 격리하라.
+- route navigation 또는 workspace shell을 변경할 때 Home, Search, Document, Graph, Canvas, Assets, Backup 전체 route regression test를 함께 갱신하라.
+- 사용자-facing label을 변경할 때 Home, 문서 목록, 검색 결과, Graph, Canvas, Asset 연결 문서 표시가 같은 제목 파생 규칙을 사용하는지 검증하라.
 
 ## 13. Example Decision Rules
 

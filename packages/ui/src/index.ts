@@ -63,6 +63,8 @@ import type {
   LocalAiToolDescriptorView,
   LocalAiToolOperationView,
   WorkspaceHomeResult,
+  WorkspaceHomeSummaryKind,
+  AssetSearchResultItem,
   DocumentNavigatorItem,
   DocumentNavigatorQuery,
   DocumentNavigatorResult,
@@ -278,6 +280,7 @@ export interface PersonalWorkspaceHomeModel {
   readonly firstRoute: "home";
   readonly displayState: "Loading" | "Ready" | "Empty" | "Degraded" | "Failed";
   readonly workspaceId?: string;
+  readonly workspaceSummary: PersonalWorkspaceInventorySummary;
   readonly recentDocuments: readonly PersonalWorkspaceHomeDocumentItem[];
   readonly favorites: readonly PersonalWorkspaceHomeDocumentItem[];
   readonly tags: readonly PersonalWorkspaceHomeTagItem[];
@@ -288,6 +291,13 @@ export interface PersonalWorkspaceHomeModel {
   readonly commandActions: readonly WorkspaceHealthAction[];
   readonly health: WorkspaceHealthActionModel;
   readonly productLogEventNames: readonly ("workspace.home.ready" | "workspace.health.failed")[];
+}
+
+export interface PersonalWorkspaceInventorySummary {
+  readonly documentCount: number;
+  readonly assetCount: number;
+  readonly canvasCount: number;
+  readonly unavailable: readonly WorkspaceHomeSummaryKind[];
 }
 
 export interface PersonalWorkspaceHomeDocumentItem {
@@ -344,6 +354,12 @@ export function createPersonalWorkspaceHomeModel(
     productScope: input.profile.productScope,
     runtime: input.profile.runtime,
     firstRoute: "home",
+    workspaceSummary: {
+      documentCount: 0,
+      assetCount: 0,
+      canvasCount: 0,
+      unavailable: [],
+    },
     displayState:
       input.healthState === "Loading"
         ? "Loading"
@@ -454,6 +470,12 @@ export function createPersonalWorkspaceHomeModelFromResult(
   return {
     ...model,
     workspaceId: result.workspaceId,
+    workspaceSummary: {
+      documentCount: normalizeWorkspaceCount(result.documentCount),
+      assetCount: normalizeWorkspaceCount(result.assetCount),
+      canvasCount: normalizeWorkspaceCount(result.canvasCount),
+      unavailable: Object.freeze([...(result.summaryUnavailable ?? [])]),
+    },
     displayState: result.state,
     recentDocuments: result.recentDocuments.map((item) => ({
       ...item,
@@ -476,6 +498,10 @@ export function createPersonalWorkspaceHomeModelFromResult(
       actionId: "open-document" as const,
     })),
   };
+}
+
+function normalizeWorkspaceCount(value: number): number {
+  return Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
 export function createPersonalWorkspaceHomeFailedModel(
@@ -769,27 +795,15 @@ export interface DocumentReadingWorkspaceModel {
   readonly querySeparation: DocumentReadQuerySeparationSummary;
 }
 
-export type DocumentEditorViewMode = "source" | "preview" | "split";
+export type DocumentAuthoringEditorSurface = "wysiwyg";
 
-export const DocumentEditorViewModeEvent = Object.freeze({
-  ShowSource: "ShowSource",
-  ShowPreview: "ShowPreview",
-  ShowSplit: "ShowSplit",
-});
-
-export type DocumentEditorViewModeEventValue =
-  (typeof DocumentEditorViewModeEvent)[keyof typeof DocumentEditorViewModeEvent];
-
-export interface DocumentEditorViewModeTransition {
-  readonly mode: DocumentEditorViewMode;
-}
+export type DocumentAuthoringSourceEntry = "plain-text-modal";
 
 export interface DocumentAuthoringWorkspaceModel {
   readonly mode: "document-authoring-workspace";
-  readonly viewMode: DocumentEditorViewMode;
-  readonly availableModes: readonly DocumentEditorViewMode[];
+  readonly editorSurface: DocumentAuthoringEditorSurface;
+  readonly sourceEntry: DocumentAuthoringSourceEntry;
   readonly current: CurrentDocumentViewModel;
-  readonly preview: MarkdownPreviewModel;
   readonly history: HistoryPanelViewModel;
   readonly querySeparation: DocumentReadQuerySeparationSummary;
 }
@@ -1005,22 +1019,6 @@ export function createDocumentReadingWorkspaceModel(
   };
 }
 
-export function transitionDocumentEditorViewMode(
-  current: DocumentEditorViewMode,
-  event: DocumentEditorViewModeEventValue,
-): DocumentEditorViewModeTransition {
-  if (event === DocumentEditorViewModeEvent.ShowSource) {
-    return { mode: "source" };
-  }
-  if (event === DocumentEditorViewModeEvent.ShowPreview) {
-    return { mode: "preview" };
-  }
-  if (event === DocumentEditorViewModeEvent.ShowSplit) {
-    return { mode: "split" };
-  }
-  return { mode: current };
-}
-
 export function transitionDocumentEditorState(
   current: DocumentEditorStateValue | DocumentEditorSnapshot,
   event: DocumentEditorTransitionEvent,
@@ -1107,18 +1105,12 @@ export function transitionDocumentEditorState(
 export function createDocumentAuthoringWorkspaceModel(
   current: CurrentDocumentView,
   history: DocumentHistoryPage,
-  options: { readonly viewMode?: DocumentEditorViewMode } = {},
 ): DocumentAuthoringWorkspaceModel {
   return {
     mode: "document-authoring-workspace",
-    viewMode: options.viewMode ?? "split",
-    availableModes: ["source", "preview", "split"],
+    editorSurface: "wysiwyg",
+    sourceEntry: "plain-text-modal",
     current: createCurrentDocumentViewModel(current),
-    preview: createMarkdownPreviewModel({
-      documentId: current.documentId,
-      versionId: current.versionId,
-      source: current.body,
-    }),
     history: createHistoryPanelViewModel(history),
     querySeparation: {
       currentReadQueryName: "get-current-document",
@@ -3945,7 +3937,11 @@ export interface DocumentNavigatorModel {
   readonly generation: number;
   readonly displayState: DocumentNavigatorDisplayState;
   readonly items: readonly DocumentNavigatorItem[];
+  readonly assetResults: readonly AssetSearchResultItem[];
   readonly nextCursor?: string | null;
+  readonly searchMetrics?: {
+    readonly durationMs: number;
+  };
   readonly error?: {
     readonly code: string;
     readonly retryable: boolean;
@@ -3971,6 +3967,8 @@ export function createDocumentNavigatorLoadingModel(
     generation: input.generation,
     displayState: "Loading",
     items: [],
+    assetResults: [],
+    searchMetrics: undefined,
   };
 }
 
@@ -4034,7 +4032,11 @@ export function applyDocumentNavigatorResult(
       collections: [...item.collections],
       tags: [...item.tags],
     })),
+    assetResults: result.assetResults?.map((asset) => ({ ...asset })) ?? [],
     nextCursor: result.nextCursor,
+    searchMetrics: result.searchMetrics
+      ? { durationMs: result.searchMetrics.durationMs }
+      : undefined,
     error: undefined,
   };
 }
@@ -4056,10 +4058,10 @@ export function transitionDocumentNavigatorModel(
   event: DocumentNavigatorModelEvent,
 ): DocumentNavigatorModel {
   if (event.type === "CloseRequested" && model.displayState !== "Closed") {
-    return { ...model, displayState: "Closed", items: [], error: undefined };
+    return { ...model, displayState: "Closed", items: [], assetResults: [], searchMetrics: undefined, error: undefined };
   }
   if (event.type === "OpenRequested" && model.displayState === "Closed") {
-    return { ...model, displayState: "Loading", generation: event.generation, error: undefined };
+    return { ...model, displayState: "Loading", generation: event.generation, assetResults: [], searchMetrics: undefined, error: undefined };
   }
   if (
     event.type === "ViewSelected" &&
@@ -4074,6 +4076,8 @@ export function transitionDocumentNavigatorModel(
       generation: event.generation,
       displayState: "Loading",
       items: [],
+      assetResults: [],
+      searchMetrics: undefined,
       error: undefined,
     };
   }
@@ -4088,6 +4092,8 @@ export function transitionDocumentNavigatorModel(
       generation: event.generation,
       displayState: "Filtering",
       items: [],
+      assetResults: [],
+      searchMetrics: undefined,
       error: undefined,
     };
   }
@@ -4101,6 +4107,8 @@ export function transitionDocumentNavigatorModel(
       generation: event.generation,
       displayState: model.filter ? "Filtering" : "Loading",
       items: [],
+      assetResults: [],
+      searchMetrics: undefined,
       error: undefined,
     };
   }
@@ -4112,6 +4120,7 @@ function navigatorInvalidTransition(model: DocumentNavigatorModel): DocumentNavi
     ...model,
     displayState: "Failed",
     items: [],
+    assetResults: [],
     error: {
       code: "DOCUMENT_NAVIGATOR_INVALID_TRANSITION",
       retryable: false,

@@ -9,7 +9,8 @@ use cabinet_ports::workspace_home::{
     WorkspaceHomeBackupStatus, WorkspaceHomeChangeProjection, WorkspaceHomeDocumentMutation,
     WorkspaceHomeDocumentMutationPort, WorkspaceHomeDocumentProjection, WorkspaceHomeHealthStatus,
     WorkspaceHomeProjection, WorkspaceHomeProjectionError, WorkspaceHomeProjectionLimits,
-    WorkspaceHomeProjectionPort, WorkspaceHomeTagProjection, WorkspaceHomeUnfinishedProjection,
+    WorkspaceHomeProjectionPort, WorkspaceHomeSummaryProjection, WorkspaceHomeTagProjection,
+    WorkspaceHomeUnfinishedProjection,
 };
 
 #[test]
@@ -65,7 +66,8 @@ fn upsert_deduplicates_moves_to_front_and_applies_independent_capacity() {
                 vec![unfinished("draft-1", "Review")],
                 WorkspaceHomeBackupStatus::Fresh,
                 WorkspaceHomeHealthStatus::Degraded,
-            ),
+            )
+            .with_summary(WorkspaceHomeSummaryProjection::new(10_000, 2_500, 24)),
         )
         .expect("seed");
 
@@ -92,6 +94,9 @@ fn upsert_deduplicates_moves_to_front_and_applies_independent_capacity() {
     assert_eq!(loaded.unfinished_items()[0].document_id(), "draft-1");
     assert_eq!(loaded.backup_status(), WorkspaceHomeBackupStatus::Fresh);
     assert_eq!(loaded.health_status(), WorkspaceHomeHealthStatus::Degraded);
+    assert_eq!(loaded.summary().document_count(), 10_000);
+    assert_eq!(loaded.summary().asset_count(), 2_500);
+    assert_eq!(loaded.summary().canvas_count(), 24);
 }
 
 #[test]

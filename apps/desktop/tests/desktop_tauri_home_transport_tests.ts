@@ -22,6 +22,10 @@ test("Tauri home transport maps client query to tagged snake case request", asyn
         unfinishedItems: [],
         backupStatus: "Fresh",
         healthStatus: "Healthy",
+        documentCount: 10_000,
+        assetCount: 2_500,
+        canvasCount: 24,
+        summaryUnavailable: [],
       },
       retryable: false,
     };
@@ -60,6 +64,40 @@ test("Tauri home transport maps client query to tagged snake case request", asyn
     },
   ]);
   assert.equal(response.ok, true);
+  if (response.ok) {
+    assert.equal(response.data.documentCount, 10_000);
+    assert.equal(response.data.assetCount, 2_500);
+    assert.equal(response.data.canvasCount, 24);
+    assert.deepEqual(response.data.summaryUnavailable, []);
+  }
+});
+
+test("Tauri home transport rejects missing and invalid workspace summary counts", async () => {
+  const base = {
+    workspaceId: "workspace-1",
+    state: "Ready",
+    recentDocuments: [],
+    favorites: [],
+    tags: [],
+    recentChanges: [],
+    unfinishedItems: [],
+    backupStatus: "Fresh",
+    healthStatus: "Healthy",
+  };
+  const invalidResults = [
+    base,
+    { ...base, documentCount: -1, assetCount: 0, canvasCount: 0, summaryUnavailable: [] },
+    { ...base, documentCount: 0, assetCount: 1.5, canvasCount: 0, summaryUnavailable: [] },
+    { ...base, documentCount: 0, assetCount: 0, canvasCount: "24", summaryUnavailable: [] },
+    { ...base, documentCount: 0, assetCount: 0, canvasCount: 0, summaryUnavailable: ["Unknown"] },
+    { ...base, documentCount: 0, assetCount: 0, canvasCount: 0, summaryUnavailable: ["Assets", "Assets"] },
+  ];
+
+  for (const data of invalidResults) {
+    const transport = createTauriWorkspaceHomeTransport(async () => ({ ok: true, data }));
+    const response = await transport(homeEnvelope());
+    assert.equal(response.ok, false);
+  }
 });
 
 test("Tauri home transport fails safely for throw, invalid response, and unsupported command", async () => {

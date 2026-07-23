@@ -72,7 +72,7 @@ impl BackupPackageEntrySummary {
 }
 
 impl BackupPackageSummary {
-    fn from_manifest(manifest: &BackupPackageManifest) -> Self {
+    pub(crate) fn from_manifest(manifest: &BackupPackageManifest) -> Self {
         let mut authoritative_record_count = 0_u64;
         let mut rebuildable_record_count = 0_u64;
         let mut byte_count = 0_u64;

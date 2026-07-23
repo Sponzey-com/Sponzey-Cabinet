@@ -11,6 +11,7 @@ cabinet-core = { path = "../cabinet-core" }
 cabinet-domain = { path = "../cabinet-domain" }
 cabinet-ports = { path = "../cabinet-ports" }
 cabinet-usecases = { path = "../cabinet-usecases" }
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

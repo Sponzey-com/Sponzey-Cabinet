@@ -40,10 +40,12 @@ fn local_opener_materializes_a_read_only_named_copy_before_launch() {
 
     let launched = opener_path(&root, &workspace, &asset, "design notes.txt");
     assert_eq!(fs::read(&launched).expect("copy"), bytes);
-    assert!(fs::metadata(&launched)
-        .expect("metadata")
-        .permissions()
-        .readonly());
+    assert!(
+        fs::metadata(&launched)
+            .expect("metadata")
+            .permissions()
+            .readonly()
+    );
     assert_eq!(
         observed.lock().expect("path").clone().expect("launched"),
         launched

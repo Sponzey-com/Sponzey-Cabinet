@@ -15,7 +15,7 @@ test("document empty state stays inside the shared document workspace", () => {
   assert.match(html, /data-document-empty-state="true"/);
   assert.match(html, />문서가 없습니다</);
   assert.match(html, /data-action="new-document"/);
-  assert.match(html, /data-action="navigate-search"/);
+  assert.match(html, /data-action="workspace-search-input"/);
   assert.doesNotMatch(html, /doc-[0-9a-f-]{8,}/i);
   assert.doesNotMatch(html, /notes\//i);
 });

@@ -1,7 +1,7 @@
 # Sponzey Cabinet 프로젝트 최종 목표
 
 작성일: 2026-06-22  
-최종 갱신일: 2026-07-16
+최종 갱신일: 2026-07-22
 프로젝트명: Sponzey Cabinet  
 문서 성격: 제품의 최종 목표와 사용자에게 제시할 기능 범위 정의. 실행 계획, 일정, 단계별 로드맵은 포함하지 않는다.
 
@@ -75,11 +75,14 @@ Sponzey Cabinet의 플랫폼 목표는 현재 검증 범위와 차후 목표를 
 
 ## 현재 구현 기준선
 
-Phase 013 UI 통합과 이후 문서 제목 일관성 보강까지 반영한 현재 제품 기준선은 `personal_local_macos_desktop`이다. 이 기준선은 프로젝트 전체 장기 목표의 완료가 아니라, 개인 사용자가 실제로 확인할 수 있는 로컬 데스크톱 제품 범위의 구현 기준선을 뜻한다. Phase 012 archived release evidence는 보존하고, Phase 013 이후 변경은 현재 source fingerprint에서 다시 검증한다.
+현재 제품 기준선은 `personal_local_macos_desktop`이다. 이 기준선은 프로젝트 전체 장기 목표의 완료가 아니라, 개인 사용자가 실제로 확인할 수 있는 로컬 데스크톱 제품 범위의 구현 기준선을 뜻한다. 이전 phase archive와 task checkbox는 참고 자료일 뿐이며, 새 릴리스 판정에서는 현재 source fingerprint에서 재실행한 테스트와 실제 앱 동작을 완료 증거로 사용한다. 현재 로컬 `.tasks`에는 활성 `.tasks/plan.md`가 없고 phase archive만 남아 있으므로, 새 개발 목표가 생기면 먼저 활성 plan을 새로 작성해야 한다.
 
-- React와 CodeMirror 기반 문서 작성 화면에서 새 문서 작성, 현재 문서 저장, `Cmd+S`, Markdown preview, 문서 첨부, 이력 조회, 버전 비교와 preview 기반 복원을 제공한다.
+- React 기반 WYSIWYG/Live Preview 문서 작성 화면에서 새 문서 작성, 현재 문서 저장, `Cmd+S`, 제목/문단/체크리스트/표 셀 편집, 안전한 링크/첨부 참조 표시, CodeMirror 기반 `원문 편집` modal, 문서 첨부, 이력 조회, 버전 비교와 preview 기반 복원을 제공한다. 저장 canonical form은 계속 Markdown source다.
 - 문서 제목은 별도 입력값이나 독립 metadata가 아니라 Markdown 본문의 첫 번째 물리적 줄에서 파생한다. 첫 줄의 Markdown heading marker를 제거해 표시하고, 유효한 문자가 없으면 `제목 없는 문서`를 사용하며, 사용자 UI와 신규 문서 생성 command에 별도 제목 입력을 두지 않는다.
 - 본문 저장과 버전 복원은 같은 제목 파생 규칙으로 current metadata를 갱신한다. 저장 성공은 durable readback과 projection 동기화 뒤에 확정하고, Home, 문서 목록, Graph, Canvas와 연결 문서 표시는 같은 current title을 사용한다.
+- Home, Document, Graph, Canvas, Assets, Backup은 같은 workspace shell을 공유한다. 좌측 하단 문서 바로가기는 route별 임시 결과나 현재 화면이 아니라 root에서 계산한 최근 문서 목록을 사용해야 하며, 메뉴 이동만으로 사이드바 문서 목록이 바뀌면 안 된다.
+- Document 메뉴는 독립 검색 화면이 아니라 사용자가 마지막으로 작업하던 문서로 돌아가는 기본 진입점이어야 한다. 마지막 문서가 없을 때만 문서 선택 또는 빈 상태를 표시한다.
+- 일반 사용자 UI에는 문서 파일명, 내부 document ID, version ID, asset ID, snapshot path, Git 용어를 기본 노출하지 않는다. 필요한 경우에도 사용자가 이해할 수 있는 제목, 변경 시각, 파일 종류, 크기, 상태, 복구 동작으로 표현한다.
 - 현재 문서 조회와 이력 조회를 별도 query path로 유지하고, 저장 성공은 native durable write 뒤의 version/readback과 앱 재시작 결과로 확인한다.
 - Wikilink와 Markdown link를 durable link index와 Graph projection에 반영하고, Graph 화면은 fixture나 최근 문서 추정 관계가 아니라 실제 projection의 node와 edge만 표시한다.
 - Canvas 생성, 조회, node/edge/geometry/viewport 수정, 이름 변경, 보관과 손상 복구를 durable revision store에 저장한다.
@@ -88,9 +91,9 @@ Phase 013 UI 통합과 이후 문서 제목 일관성 보강까지 반영한 현
 - Graph, Canvas, Asset, projection 손상과 중단 상태는 빈 화면이나 성공 상태로 숨기지 않고 안정적인 error code와 recovery action으로 전달한다.
 - 현재 문서, 이력, 검색, 링크, Graph, Canvas viewport, Asset metadata 조회는 표준 fixture의 release-mode 성능 검증에서 p95 300ms 목표를 충족한다.
 - Product Log, Field Debug Log, Development Log를 분리하고 문서 본문, 첨부 bytes, 절대 경로와 비밀값을 릴리스 증거 및 운영 로그에서 제외한다.
-- macOS packaged UI smoke는 Home, Document, Graph, Canvas, Assets, Backup/Restore와 recovery 흐름을 실제 `.app`에서 검증한다.
+- macOS packaged UI smoke는 Home, Document, Graph, Canvas, Assets, Backup/Restore와 recovery 흐름을 실제 `.app`에서 검증해야 한다. 최근 Penpot `20260721` UI fidelity archive인 `.tasks/phase004`에는 packaged UI initial/restart smoke, route UI regression, evidence contract와 selected native boundary test 통과 기록이 있다. 새 release gate에서는 같은 source fingerprint에서 필요한 검증 명령을 다시 실행해 완료를 확정한다.
 
-Phase 012 authoritative evidence는 `.tasks/phase012/phase012-release-gate-result.md`와 `.tasks/phase012/release/`에 보관한다. Phase 013 이후 변경은 현재 source fingerprint의 테스트 결과와 활성 phase plan이 존재할 때 그 `.tasks/plan.md`를 기준으로 재검증하며, 과거 archive marker를 현재 완료 증거로 재사용하지 않는다. Windows/Linux는 `deferred_future`이며 Web/iOS/Android, 서버 호스팅, SaaS, 멀티 사용자 기능은 현재 완료 범위가 아니다.
+현재 로컬 `.tasks`에는 이전 phase archive만 있고 활성 `.tasks/plan.md`는 없다. phase archive가 존재하더라도 새 source fingerprint의 테스트 결과와 사용자가 확인 가능한 앱 동작을 대체하지 않는다. Windows/Linux는 `deferred_future`이며 Web/iOS/Android, 서버 호스팅, SaaS, 멀티 사용자 기능은 현재 완료 범위가 아니다.
 
 최종 제품은 사용자가 다음 문장으로 이해할 수 있어야 한다.
 
@@ -207,8 +210,11 @@ Sponzey Cabinet은 AI agent, LLM, 자동화 도구, 업무 SaaS가 쉽게 읽고
 
 - 첫 실행 경험: 설치 후 앱을 열면 별도 서버 주소, DB 정보, tenant, organization, administrator 설정 없이 바로 개인 workspace를 만들 수 있어야 한다.
 - 홈 화면: 최근 문서, 즐겨찾기, 태그, 미완료 작업, 최근 변경, 빠른 검색, AI 질의 진입점을 한 화면에서 제공한다.
-- 문서 작성 화면: CodeMirror 기반 Markdown 편집을 제공하되, 일반 사용자는 Markdown source와 preview 사이를 자연스럽게 오갈 수 있어야 한다.
+- 문서 작성 화면: 기본 화면은 WYSIWYG/Live Preview 편집을 제공하고, Markdown source가 필요한 사용자는 `원문 편집` modal에서 CodeMirror 기반 plain text editor를 사용한다. 두 editor는 같은 canonical Markdown body를 공유해야 한다.
 - 제목 편집 경험: 사용자는 별도 제목 입력란을 사용하지 않고 문서 첫 줄을 편집한다. 저장 뒤 파생된 제목은 편집 화면, Home, 문서 탐색, 검색, Graph, Canvas, 첨부 연결 문서에서 일관되게 표시되어야 한다.
+- 좌측 사이드바 경험: route 전환은 좌측 하단 문서 목록의 의미를 바꾸지 않는다. 이 영역은 최근 문서 바로가기이며, Search route의 결과 목록, Graph의 중심 문서, Canvas의 선택 노드, Assets의 선택 첨부에 따라 바뀌면 안 된다.
+- Document 메뉴 경험: Home에서 문서를 선택해 편집한 뒤 다른 메뉴로 갔다가 Document를 누르면 마지막 작업 문서를 다시 보여준다. 사용자가 명시적으로 검색을 선택하거나 상단 검색을 실행할 때만 검색 결과 화면으로 이동한다.
+- 검색 경험: 상단 검색은 장식 버튼이 아니라 문서 검색 route를 여는 명시적 입력이어야 한다. 검색어 입력, 결과 목록, 결과에서 문서 열기, `Esc` 또는 뒤로 가기 시 이전 작업 문서 복귀가 일관되게 동작해야 한다.
 - Preview 경험: 표, 체크리스트, 코드 블록, 콜아웃, 다이어그램, 첨부 참조, wikilink가 읽기 좋은 형태로 보인다.
 - 탐색 경험: 좌측에는 문서 트리/컬렉션/태그, 중앙에는 문서 편집기, 우측에는 백링크/첨부/AI citation/문서 metadata를 배치할 수 있어야 한다.
 - 그래프 경험: 사용자는 Obsidian처럼 문서 관계를 볼 수 있어야 하며, AFFiNE처럼 자유 배치 canvas에서 문서와 첨부를 카드로 다룰 수 있어야 한다.
@@ -651,7 +657,10 @@ Web / Tauri desktop / mobile clients
 - 빠른 Markdown 기반 편집
 - 문서 첫 번째 줄을 제목으로 사용하는 단일 제목 규칙. Markdown heading marker는 표시 제목에서 제거하고 빈 첫 줄은 `제목 없는 문서`로 처리한다.
 - 별도 제목 입력 없이 본문 저장과 복원 결과를 기준으로 모든 화면의 문서 제목을 갱신한다.
-- WYSIWYG와 Markdown source 모드 전환
+- 현재 구현: React 기반 WYSIWYG/Live Preview 기본 편집 화면과 CodeMirror 기반 `원문 편집` modal을 제공한다.
+- WYSIWYG 구현 기준: 제목/문단, 체크리스트, 표 셀은 기본 화면에서 직접 수정한다. Wikilink, Markdown link, 첨부 참조는 안전한 chip으로 표시하고, code block, blockquote/callout, unsupported Markdown block은 원문 marker를 일반 화면에 노출하지 않은 채 `원문에서 편집` fallback을 제공한다.
+- 저장 기준: WYSIWYG는 별도 문서 모델이 아니며 canonical 저장 형식은 Markdown source다. WYSIWYG patch와 plain text source edit는 같은 body state에 수렴하고, stale patch는 body를 변경하지 않고 원문 편집 fallback으로 이어진다.
+- 구현 경계: WYSIWYG/Live Preview 기능은 editor presentation adapter, React UI boundary와 CodeMirror source modal 경계에서 처리하며 domain/usecase에는 UI 렌더링 규칙을 넣지 않는다.
 - Slash command 기반 블록 삽입
 - 코드 블록, 표, 콜아웃, 체크리스트, 수식, Mermaid/PlantUML/diagrams.net류 다이어그램
 - 문서 템플릿, 스니펫, 반복 가능한 섹션

@@ -31,6 +31,9 @@ test("core action manifest has unique complete contracts and explicit hidden fut
   assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "compare-selected-versions")?.durability, "readback");
   assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "cancel-background-document-diff")?.boundary, "native_command");
   assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "retry-background-document-diff")?.durability, "readback");
+  assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "submit-workspace-search")?.boundary, "route");
+  assert.equal(CORE_UI_ACTION_MANIFEST.find((entry) => entry.actionId === "workspace-search-input")?.boundary, "view_state");
+  assert.equal(CORE_UI_ACTION_MANIFEST.some((entry) => entry.actionId === "navigate-search"), false);
 });
 
 test("React action collector records callback and disabled state and flags missing action identity", () => {
@@ -65,11 +68,25 @@ test("core manifest classifies every document attachment action", async () => {
   assert.equal(byId.get("unlink-document-asset")?.boundary, "view_state");
   assert.equal(byId.get("confirm-document-asset-unlink")?.durability, "reopen");
   assert.equal(byId.get("preview-document-asset")?.durability, "readback");
+  assert.equal(byId.get("close-document-asset-library")?.boundary, "view_state");
+  assert.equal(byId.get("search-document-asset-library")?.boundary, "view_state");
+  assert.equal(byId.get("select-existing-document-asset")?.boundary, "view_state");
+  assert.equal(byId.get("retry-document-asset-library")?.boundary, "query");
+  assert.equal(byId.get("load-more-document-asset-library")?.durability, "readback");
+  assert.equal(byId.get("link-existing-document-asset")?.durability, "reopen");
+  assert.equal(byId.get("repair-document-asset-import")?.durability, "reopen");
   for (const actionId of [
     "select-document-inspector-links",
     "select-document-inspector-attachments",
     "select-document-inspector-history",
     "cancel-document-asset-unlink",
     "confirm-document-asset-unlink",
+    "close-document-asset-library",
+    "search-document-asset-library",
+    "select-existing-document-asset",
+    "retry-document-asset-library",
+    "load-more-document-asset-library",
+    "link-existing-document-asset",
+    "repair-document-asset-import",
   ]) assert.ok(byId.has(actionId), actionId);
 });

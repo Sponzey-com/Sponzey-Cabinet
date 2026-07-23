@@ -1,7 +1,7 @@
 # Sponzey Cabinet 단계별 목표와 개발 계획
 
 작성일: 2026-06-22  
-최종 갱신일: 2026-07-16
+최종 갱신일: 2026-07-22
 문서 성격: `PROJECT.md`의 최종 제품 목표를 단계적으로 구현하기 위한 개발 계획  
 기준 문서: `PROJECT.md`, `AGENTS.md`
 
@@ -9,7 +9,7 @@
 
 현재 활성 로드맵은 개인 PC에 설치하는 단일 사용자 로컬 지식관리 제품만 다룬다. 아래 6단계 구조 중 self-host, 멀티 사용자, SaaS, 엔터프라이즈에 해당하는 단계는 장기 확장 참고안이며 사용자의 명시적 요구 전까지 활성 개발 순서, task, release gate 또는 기본 UI 범위로 사용하지 않는다.
 
-Phase 001부터 Phase 012까지의 누적 개발은 초기 MVP 범위를 넘어 macOS 개인용 데스크톱 제품의 durable document, Graph, Canvas, Asset, backup/recovery 기준선을 완성했다. Phase 013은 공통 UI, 한국어 사용자 표현, 내부 ID 비노출, 실제 action 연결을 통합했고 후속 hardening은 문서 첫 줄을 제목의 단일 원천으로 확정했다. 다음 단계가 생성되더라도 사용자가 범위를 변경하기 전에는 이 로컬 제품의 사용성, 안정성, 데이터 소유권과 배포 품질만 확장해야 한다.
+누적 개발은 초기 MVP 범위를 넘어 macOS 개인용 데스크톱 제품의 durable document, Graph, Canvas, Asset, backup/recovery, 공통 workspace shell, 한국어 사용자 표현, 내부 ID 비노출, 실제 action 연결을 확장해 왔다. 현재 문서 제목은 Markdown 첫 줄을 단일 원천으로 사용하고, 좌측 하단 문서 바로가기는 route별 임시 데이터가 아니라 root에서 계산한 최근 문서 목록을 모든 route가 공유한다. Penpot `20260721` UI fidelity archive는 packaged UI smoke, restart readback, route regression, visual/accessibility evidence와 selected native runtime test 통과 기록을 포함한다. 다음 단계가 생성되더라도 사용자가 범위를 변경하기 전에는 이 로컬 제품의 사용성, 안정성, 데이터 소유권과 배포 품질만 확장해야 한다.
 
 모든 단계는 다음 기준을 따른다.
 
@@ -32,24 +32,28 @@ Phase 001부터 Phase 012까지의 누적 개발은 초기 MVP 범위를 넘어 
 
 | 단계 | 이름                             | 핵심 목표                                                  | 주요 산출물                                                                                                          |
 | -- | ------------------------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| 1  | 개인 로컬 Knowledge Base 제품 | 단일 사용자가 Markdown 문서를 작성하고 관계와 파일을 관리하며 Graph와 Canvas로 지식을 탐색한다. | 공통 core, macOS Tauri 앱, CodeMirror 작성, 첫 줄 기반 문서 제목, durable current/history, 검색/링크 projection, Graph, Canvas, Asset, backup/recovery. Phase 013 구현 기준선 완료, current fingerprint 재검증 진행 |
+| 1  | 개인 로컬 Knowledge Base 제품 | 단일 사용자가 Markdown 문서를 작성하고 관계와 파일을 관리하며 Graph와 Canvas로 지식을 탐색한다. | 공통 core, macOS Tauri 앱, CodeMirror source/split/preview 작성, 첫 줄 기반 문서 제목, durable current/history, 검색/링크 projection, Graph, Canvas, Asset, backup/recovery, route 전환에 흔들리지 않는 공통 workspace shell. Penpot `20260721` UI fidelity archive 검증 완료, release 직전 current fingerprint 재검증 필요 |
 | 2  | 개인 호스팅과 팀 협업 기반 | **중지된 차후 목표.** 사용자가 명시적으로 활성화한 뒤에만 계획한다. | 서버 API, RBAC, 댓글, 리뷰와 감사는 현재 구현 범위가 아니다. |
 | 3  | 협업 Graph/Canvas 확장 | **중지된 차후 목표.** 현재 개인용 Graph/Canvas와 실시간 협업을 혼동하지 않는다. | 실시간 공동 편집, 협업 Canvas, 모바일 클라이언트는 현재 구현 범위가 아니다. |
 | 4  | AI와 외부 연동 플랫폼 | 로컬 개인 제품 범위의 AI/연동은 별도 후속 계획으로만 구체화한다. 서버형 integration platform은 중지한다. | provider boundary와 확장성은 유지하되 원격 플랫폼 기능을 현재 완료로 주장하지 않는다. |
 | 5  | 플러그인과 업무 객체 플랫폼 | **중지된 차후 목표.** 사용자의 명시적 범위 변경이 필요하다. | plugin runtime, CRM과 custom object는 현재 구현 범위가 아니다. |
 | 6  | SaaS와 엔터프라이즈 운영 | **중지된 차후 목표.** 사용자의 명시적 범위 변경이 필요하다. | 멀티테넌트, 과금, SSO/SCIM, 관리자 콘솔과 엔터프라이즈 운영은 현재 구현 범위가 아니다. |
 
-## 현재 완료 상태
+## 현재 개발 상태
 
-- Phase 012 archive: `.tasks/phase012/`
-- 최종 gate: `.tasks/phase012/phase012-release-gate-result.md`
 - 검증 범위: macOS 개인용 로컬 데스크톱 앱
-- 요구사항 증거: 33개 requirement가 동일한 current source fingerprint에 연결됨
-- packaged workflow: Home, Document, Graph, Canvas, Assets, Backup/Restore, lifecycle와 recovery를 actual `.app`에서 검증함
-- 성능: current/history/search/link/Graph/Canvas/Asset metadata의 release-mode p95 300ms 기준을 충족함
+- 활성 계획: 현재 `.tasks/plan.md` 없음. 새 목표를 실행하려면 먼저 활성 plan을 작성해야 함
+- 로컬 task archive: 현재 `.tasks/phase001`, `.tasks/phase002`, `.tasks/phase003`, `.tasks/phase004`, `.tasks/phase_mvp`가 확인됨
+- 실행 스크립트: `scripts/run_desktop_app.sh`를 데스크톱 개발 앱 구동 entry로 유지함
+- 표준 JS 검증: `node --experimental-strip-types --test apps/desktop/tests/*.ts`
+- 표준 Rust 검증: `cargo test --workspace`
+- 최근 archive 검증: `.tasks/phase004/task040`부터 `task044`까지 packaged UI initial/restart smoke, evidence contract 51 tests, route UI regression 211 tests, selected native boundary/runtime 63 tests 통과
+- 현재 UI 기준: Home, Document, Graph, Canvas, Assets, Backup route가 공통 shell을 공유하고, 좌측 하단 문서 바로가기는 route 전환으로 바뀌지 않아야 함
+- 현재 문서 기준: 제목은 Markdown 첫 줄에서 파생하고, 내부 ID와 문서 파일명은 일반 UI에 노출하지 않아야 함
+- 현재 editor 기준: CodeMirror Markdown source 편집, split view, preview mode가 현재 구현 범위다. Obsidian Live Preview와 WYSIWYG형 inline block/widget 편집은 후속 editor milestone이며 현재 완료 기능으로 주장하지 않는다.
 - 유예 범위: Windows/Linux native certification, Web/iOS/Android 제품, self-host, SaaS, 멀티 사용자, 실시간 협업, 조직/RBAC UI
 
-이 완료 상태는 task 체크박스만으로 판단하지 않는다. Phase 012의 command summary, requirement evidence matrix, native platform matrix, packaged UI smoke, query performance, visual 및 security artifact를 함께 사용한다.
+완료 상태는 task 체크박스나 과거 phase 이름만으로 판단하지 않는다. 현재 source fingerprint에서 실행한 테스트, durable readback, 앱 재시작 확인, UI smoke, 성능과 보안 evidence를 함께 사용한다. 로컬에 존재하지 않는 archive 경로를 현재 완료 증거로 참조하지 않는다.
 
 ## 공통 개발 게이트
 
@@ -147,6 +151,8 @@ Phase 001부터 Phase 012까지의 누적 개발은 초기 MVP 범위를 넘어 
 - macOS Tauri 데스크톱 앱. Windows/Linux native 인증은 유예한다.
 - 로컬 워크스페이스 생성
 - Markdown/MDX 문서 생성, 읽기, 수정, 삭제
+- 현재 구현 범위의 CodeMirror Markdown source 편집, split view와 preview mode
+- 후속 editor milestone인 Obsidian Live Preview 유사 inline preview. 저장 데이터는 Markdown source를 canonical form으로 유지하고, 구현은 CodeMirror presentation adapter의 decoration/widget/plugin 경계에 둔다.
 - Markdown 첫 번째 물리적 줄에서 파생되는 문서 제목. 별도 제목 입력과 독립 title mutation은 기본 사용자 흐름에서 제외한다.
 - 제목에서 파생되는 slug와 별도 관리되는 owner, tags, status, createdAt, updatedAt 메타데이터
 - Markdown link와 Wikilink 파싱
@@ -381,6 +387,9 @@ RecoveryRequired -> Applying | Failed
 - 신규 생성, 현재 문서 저장과 버전 복원이 모두 첫 줄 제목 규칙을 사용한다.
 - 제목을 바꾼 뒤 durable readback과 projection 처리가 완료되면 Home, Navigator, Search, Graph, Canvas와 Asset 연결 문서 표시에 이전 제목이나 raw ID가 남지 않는다.
 - 별도 문서 제목 입력 control과 create command의 독립 title 필드가 존재하지 않는다.
+- 좌측 하단 문서 바로가기는 Home, Search, Document, Graph, Canvas, Assets, Backup route 전환으로 변경되지 않고 root-owned recent document shortcuts를 사용한다.
+- Document 메뉴는 마지막 작업 문서를 우선 재개하며, 명시적 검색 action 없이 검색 화면으로 점프하지 않는다.
+- 문서 목록, 카드, Graph/Canvas node label, Asset 연결 문서 표시에는 문서 파일명과 내부 document ID가 기본 노출되지 않는다.
 - 단일 사용자가 로컬에서 문서를 생성, 수정, 삭제, 검색할 수 있다.
 - macOS 데스크톱 앱과 개발용 Web preview가 같은 core/client contract를 사용한다. Windows/Linux 인증은 `deferred_future`로 유지한다.
 - 앱 설치 1회 후 추가 수동 설정 없이 기본 workspace를 만들고 사용할 수 있다.

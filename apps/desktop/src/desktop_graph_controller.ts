@@ -10,6 +10,16 @@ import type {
 } from "./tauri_projection_transport.ts";
 import type { DesktopGlobalGraphClient, DesktopGlobalGraphView } from "./tauri_global_graph_transport.ts";
 
+const GLOBAL_GRAPH_PAGE_POLICY = Object.freeze({
+  projectionLimit: 2,
+  nodeLimit: 1_000,
+  edgeLimit: 2_000,
+  sessionNodeLimit: 10_000,
+  sessionEdgeLimit: 20_000,
+});
+
+export const HOME_GRAPH_PROJECTION_LIMIT = 1_000;
+
 export type DesktopGraphSurfaceState = "Idle" | "Loading" | "Ready" | "Empty" | "Stale" | "Repairing" | "Failed";
 
 export interface DesktopGraphQueryState {
@@ -57,7 +67,16 @@ export function requestDesktopGraphLoad(
   snapshot: DesktopGraphSurfaceSnapshot,
   patch: Partial<DesktopGraphQueryState>,
 ): DesktopGraphSurfaceSnapshot {
-  const query = Object.freeze({ ...snapshot.query, ...patch });
+  const nextQuery = { ...snapshot.query, ...patch };
+  const resetsGlobalPage = nextQuery.scope === "global" && (
+    snapshot.query.scope !== "global"
+    || patch.includeUnresolved !== undefined && patch.includeUnresolved !== snapshot.query.includeUnresolved
+    || patch.includeAssets !== undefined && patch.includeAssets !== snapshot.query.includeAssets
+  );
+  const query = Object.freeze({
+    ...nextQuery,
+    ...(resetsGlobalPage ? { globalCursor: undefined } : {}),
+  });
   if (query.scope !== "global" && !query.centerDocumentId?.trim()) {
     return Object.freeze({
       ...snapshot,
@@ -75,6 +94,8 @@ export function requestDesktopGraphLoad(
     state: "Loading",
     generation: snapshot.generation + 1,
     query,
+    graph: resetsGlobalPage ? undefined : snapshot.graph,
+    selectedNodeId: resetsGlobalPage ? undefined : snapshot.selectedNodeId,
     errorCode: undefined,
     retryable: undefined,
   });
@@ -101,21 +122,87 @@ export async function loadDesktopKnowledgeGraph(
   }
 }
 
-export async function loadDesktopGlobalKnowledgeGraph(client: DesktopGlobalGraphClient, loading: DesktopGraphSurfaceSnapshot): Promise<DesktopGraphSurfaceSnapshot> {
+export async function loadDesktopGlobalKnowledgeGraph(
+  client: DesktopGlobalGraphClient,
+  loading: DesktopGraphSurfaceSnapshot,
+  projectionLimit: number = GLOBAL_GRAPH_PAGE_POLICY.projectionLimit,
+): Promise<DesktopGraphSurfaceSnapshot> {
   if (loading.state !== "Loading" || loading.query.scope !== "global") return loading;
   try {
     const graph = await client.getGlobalGraph({
       workspaceId: loading.workspaceId,
       ...(loading.query.globalCursor ? { cursor: loading.query.globalCursor } : {}),
-      projectionLimit: 50,
-      nodeLimit: loading.query.nodeLimit,
-      edgeLimit: loading.query.edgeLimit,
+      includeUnresolved: loading.query.includeUnresolved,
+      includeAssets: loading.query.includeAssets,
+      projectionLimit,
+      nodeLimit: GLOBAL_GRAPH_PAGE_POLICY.nodeLimit,
+      edgeLimit: GLOBAL_GRAPH_PAGE_POLICY.edgeLimit,
     });
-    return applyDesktopGraphResult(loading, loading.generation, graph);
+    const isContinuation = loading.query.globalCursor !== undefined
+      && loading.query.globalCursor === loading.graph?.nextCursor;
+    const merged = mergeGlobalGraphPage(isContinuation ? loading.graph : undefined, graph);
+    if (typeof merged === "string") {
+      return Object.freeze({
+        ...loading,
+        state: "Failed",
+        errorCode: merged === "limit_exceeded"
+          ? "GLOBAL_GRAPH_SESSION_LIMIT_EXCEEDED"
+          : "GLOBAL_GRAPH_PAGE_CONFLICT",
+        retryable: false,
+      });
+    }
+    return applyDesktopGraphResult(loading, loading.generation, merged);
   } catch (error) {
     const mapped = safeProjectionError(error);
     return applyDesktopGraphFailure(loading, loading.generation, mapped.code, mapped.retryable);
   }
+}
+
+function mergeGlobalGraphPage(
+  current: DesktopGraphView | undefined,
+  page: DesktopGlobalGraphView,
+): DesktopGraphView | "conflict" | "limit_exceeded" {
+  const nodes = new Map(current?.nodes.map((node) => [node.id, node]) ?? []);
+  for (const node of page.nodes) {
+    const existing = nodes.get(node.id);
+    if (existing && !sameFlatRecord(existing, node)) return "conflict";
+    nodes.set(node.id, node);
+  }
+  const edges = new Map(current?.edges.map((edge) => [edge.id, edge]) ?? []);
+  for (const edge of page.edges) {
+    const existing = edges.get(edge.id);
+    if (existing && !sameFlatRecord(existing, edge)) return "conflict";
+    edges.set(edge.id, edge);
+  }
+  if (
+    nodes.size > GLOBAL_GRAPH_PAGE_POLICY.sessionNodeLimit
+    || edges.size > GLOBAL_GRAPH_PAGE_POLICY.sessionEdgeLimit
+  ) {
+    return "limit_exceeded";
+  }
+  const nodeIds = new Set(nodes.keys());
+  if ([...edges.values()].some((edge) => !nodeIds.has(edge.sourceId) || !nodeIds.has(edge.targetId))) {
+    return "conflict";
+  }
+  return Object.freeze({
+    status: current?.status === "degraded" || page.status === "degraded" ? "degraded" : "clean",
+    nodes: Object.freeze([...nodes.values()]),
+    edges: Object.freeze([...edges.values()]),
+    candidateCount: (current?.candidateCount ?? 0) + page.candidateCount,
+    nextCursor: page.nextCursor,
+  });
+}
+
+function sameFlatRecord(
+  left: object,
+  right: object,
+): boolean {
+  const leftRecord = left as Readonly<Record<string, unknown>>;
+  const rightRecord = right as Readonly<Record<string, unknown>>;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && leftRecord[key] === rightRecord[key]);
 }
 
 export async function loadDesktopKnowledgeGraphWithFreshness(

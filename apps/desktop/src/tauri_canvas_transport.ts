@@ -73,6 +73,7 @@ export type DesktopCanvasRequest =
   | ({ readonly kind: "remove_node"; readonly nodeId: string } & CanvasRevisionRequest)
   | ({ readonly kind: "remove_edge"; readonly edgeId: string } & CanvasRevisionRequest)
   | ({ readonly kind: "update_node_geometry"; readonly nodeId: string } & CanvasRevisionRequest & CanvasGeometryFields)
+  | ({ readonly kind: "update_text_card"; readonly nodeId: string; readonly text: string } & CanvasRevisionRequest)
   | ({ readonly kind: "update_viewport"; readonly centerX: number; readonly centerY: number; readonly zoomPercent: number } & CanvasRevisionRequest)
   | ({ readonly kind: "auto_arrange" } & CanvasRevisionRequest);
 

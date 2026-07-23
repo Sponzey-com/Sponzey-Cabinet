@@ -16,9 +16,16 @@ export interface DesktopBackupManifestSummary {
   readonly entries: readonly DesktopBackupManifestEntry[];
 }
 
+export interface DesktopBackupCatalogPage {
+  readonly records: readonly DesktopBackupManifestSummary[];
+  readonly nextCursor?: string;
+}
+
+export type DesktopBackupCatalogState = "Idle" | "Loading" | "Ready" | "Empty" | "Failed";
+
 export type DesktopBackupRecoveryState = "Idle" | "Creating" | "Ready" | "Previewing"
   | "AwaitingConfirmation" | "Applying" | "Completed" | "Cancelled" | "RolledBack"
-  | "Failed" | "CleanupRequired";
+  | "Failed" | "CleanupRequired" | "RecoveryRequired";
 
 export interface DesktopBackupRecoverySnapshot {
   readonly workspaceId: string;
@@ -32,6 +39,10 @@ export interface DesktopBackupRecoverySnapshot {
   readonly errorCode?: string;
   readonly retryable?: boolean;
   readonly recovery?: DesktopStartupRecoveryResult;
+  readonly catalogState: DesktopBackupCatalogState;
+  readonly catalogRecords: readonly DesktopBackupManifestSummary[];
+  readonly catalogNextCursor?: string;
+  readonly selectedCatalogPackageId?: string;
 }
 
 export interface DesktopBackupOperationProgress {
@@ -52,7 +63,7 @@ export interface DesktopBackupOperationStatus {
 }
 
 export type DesktopRestoreOperationState = "Staging" | "Applying" | "Reopening"
-  | "RollbackRequired" | "Completed" | "RolledBack" | "CleanupRequired"
+  | "RollbackRequired" | "RecoveryRequired" | "Completed" | "RolledBack" | "CleanupRequired"
   | "Cancelled" | "Failed";
 
 export interface DesktopRestoreOperationStatus {
@@ -69,6 +80,7 @@ export interface DesktopStartupRecoveryResult {
 }
 
 export interface DesktopBackupClient {
+  listBackups(input: { workspaceId: string; cursor?: string; limit: number }): Promise<DesktopBackupCatalogPage>;
   createBackup(input: { workspaceId: string; packageId: string }): Promise<DesktopBackupManifestSummary>;
   startBackupOperation(input: { workspaceId: string; operationId: string }): Promise<DesktopBackupOperationStatus>;
   getBackupOperationStatus(input: { workspaceId: string; operationId: string }): Promise<DesktopBackupOperationStatus>;
@@ -82,8 +94,9 @@ export interface DesktopBackupClient {
     errorCode?: string;
   }>;
   confirmRestore(input: { workspaceId: string; packageId: string; operationId: string; confirmed: true }): Promise<{
-    state: "Completed" | "RolledBack" | "CleanupRequired";
+    state: "Completed" | "RolledBack" | "CleanupRequired" | "RecoveryRequired";
     errorCode?: string;
+    retryable?: boolean;
   }>;
   cancelRestore(input: { workspaceId: string; operationId: string }): Promise<{ state: "Cancelled" | "CleanupRequired"; errorCode?: string }>;
   recoverStartup(input: { workspaceId: string }): Promise<DesktopStartupRecoveryResult>;
@@ -203,7 +216,44 @@ export async function cancelDesktopBackupOperation(
 }
 
 export function createDesktopBackupRecoverySnapshot(workspaceId: string): DesktopBackupRecoverySnapshot {
-  return Object.freeze({ workspaceId, state: "Idle", generation: 0 });
+  return Object.freeze({ workspaceId, state: "Idle", generation: 0, catalogState: "Idle", catalogRecords: Object.freeze([]) });
+}
+
+export async function loadDesktopBackupCatalog(
+  client: DesktopBackupClient,
+  snapshot: DesktopBackupRecoverySnapshot,
+  input: { readonly cursor?: string; readonly limit: number },
+): Promise<DesktopBackupRecoverySnapshot> {
+  const pending = Object.freeze({ ...snapshot, generation: snapshot.generation + 1, catalogState: "Loading" as const });
+  try {
+    const page = await client.listBackups({ workspaceId: snapshot.workspaceId, ...input });
+    const records = input.cursor ? [...snapshot.catalogRecords, ...page.records] : [...page.records];
+    return Object.freeze({
+      ...pending,
+      catalogState: records.length === 0 ? "Empty" as const : "Ready" as const,
+      catalogRecords: Object.freeze(records),
+      catalogNextCursor: page.nextCursor,
+    });
+  } catch (error) {
+    const failure = failed(pending, error);
+    return Object.freeze({ ...failure, catalogState: "Failed" as const });
+  }
+}
+
+export function selectDesktopBackupCatalogPackage(
+  snapshot: DesktopBackupRecoverySnapshot,
+  packageId: string,
+): DesktopBackupRecoverySnapshot {
+  const manifest = snapshot.catalogRecords.find((record) => record.packageId === packageId);
+  if (!manifest || snapshot.catalogState !== "Ready") return snapshot;
+  return Object.freeze({
+    ...snapshot,
+    state: "Ready",
+    packageId,
+    manifest,
+    selectedCatalogPackageId: packageId,
+    errorCode: undefined,
+  });
 }
 
 export async function createDesktopBackup(
@@ -250,7 +300,7 @@ export async function confirmDesktopRestore(
   const pending = { ...snapshot, state: "Applying" as const, generation: snapshot.generation + 1, operationId, errorCode: undefined };
   try {
     const result = await client.confirmRestore({ workspaceId: snapshot.workspaceId, packageId: snapshot.packageId, operationId, confirmed: true });
-    return Object.freeze({ ...pending, state: result.state, errorCode: result.errorCode });
+    return Object.freeze({ ...pending, state: result.state, errorCode: result.errorCode, retryable: result.retryable });
   } catch (error) {
     return failed(pending, error);
   }

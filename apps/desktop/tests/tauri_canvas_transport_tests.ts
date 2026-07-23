@@ -133,3 +133,42 @@ test("Canvas transport sends recovery operation identity and rejects mismatched 
     (error: unknown) => error instanceof DesktopCanvasTransportError && error.code === "COMMAND_BRIDGE_FAILED",
   );
 });
+
+test("Canvas transport sends a revisioned text card edit without changing the payload shape", async () => {
+  let invoked: unknown;
+  const client = createTauriCanvasTransport(async (command, args) => {
+    invoked = { command, args };
+    return {
+      ok: true,
+      data: { ...canvasData, revision: 4, nodes: [{ ...canvasData.nodes[0], targetId: "Edited", displayLabel: "Edited" }] },
+      retryable: false,
+      recoveryRequired: false,
+      operationId: "edit-1",
+    };
+  });
+
+  const result = await client.execute({
+    kind: "update_text_card",
+    workspaceId: "workspace-1",
+    canvasId: "canvas-1",
+    expectedRevision: 3,
+    operationId: "edit-1",
+    nodeId: "note-1",
+    text: "Edited",
+  });
+
+  assert.equal(result.revision, 4);
+  assert.equal(result.nodes[0]?.displayLabel, "Edited");
+  assert.deepEqual(invoked, {
+    command: "execute_desktop_canvas",
+    args: { request: {
+      kind: "update_text_card",
+      workspaceId: "workspace-1",
+      canvasId: "canvas-1",
+      expectedRevision: 3,
+      operationId: "edit-1",
+      nodeId: "note-1",
+      text: "Edited",
+    } },
+  });
+});

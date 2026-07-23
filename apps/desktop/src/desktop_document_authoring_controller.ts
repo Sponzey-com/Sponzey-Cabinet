@@ -71,6 +71,7 @@ export class DesktopDocumentAuthoringController {
   #retryable?: boolean;
   #repairRequired?: boolean;
   #saveOperation?: { readonly revision: number; readonly operationId: string };
+  #openGeneration = 0;
 
   constructor(options: DesktopDocumentAuthoringControllerOptions) {
     this.#client = options.client;
@@ -83,7 +84,9 @@ export class DesktopDocumentAuthoringController {
   }
 
   async open(query: CurrentDocumentQuery): Promise<DesktopDocumentAuthoringSnapshot> {
+    const requestGeneration = ++this.#openGeneration;
     const current = await this.#client.getCurrentDocument(query);
+    if (requestGeneration !== this.#openGeneration) return this.snapshot();
     this.#workspaceId = current.workspaceId;
     this.#title = current.title;
     this.#path = current.path;

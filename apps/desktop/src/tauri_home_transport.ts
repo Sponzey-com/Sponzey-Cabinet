@@ -100,8 +100,22 @@ function isWorkspaceHomeResult(value: unknown): value is WorkspaceHomeResult {
     Array.isArray(value.recentChanges) &&
     Array.isArray(value.unfinishedItems) &&
     typeof value.backupStatus === "string" &&
-    typeof value.healthStatus === "string"
+    typeof value.healthStatus === "string" &&
+    isNonNegativeInteger(value.documentCount) &&
+    isNonNegativeInteger(value.assetCount) &&
+    isNonNegativeInteger(value.canvasCount) &&
+    isSummaryUnavailable(value.summaryUnavailable)
   );
+}
+
+function isSummaryUnavailable(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const allowed = new Set(["Documents", "Assets", "Canvases"]);
+  return value.every((kind) => typeof kind === "string" && allowed.has(kind)) && new Set(value).size === value.length;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

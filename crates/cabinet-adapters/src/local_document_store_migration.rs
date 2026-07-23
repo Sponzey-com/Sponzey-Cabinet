@@ -21,6 +21,7 @@ pub const AUTHORITATIVE_DOCUMENT_MIGRATION_MARKER: &str = "document-store-migrat
 
 const STAGED_VERSIONS: &str = "versions";
 const STAGED_POINTERS: &str = "pointers";
+const COMPLETED_MARKER_CONTENT: &str = "schema=1\nstate=completed\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalDocumentStoreMigrationOutcome {
@@ -63,6 +64,10 @@ impl LocalDocumentStoreMigration {
     pub fn execute(
         &self,
     ) -> Result<LocalDocumentStoreMigrationOutcome, LocalDocumentStoreMigrationError> {
+        if self.has_completed_marker()? {
+            self.validate_authoritative_roots()?;
+            return Ok(LocalDocumentStoreMigrationOutcome::AlreadyMigrated);
+        }
         let legacy_versions = self.app_data_root.join(LEGACY_DOCUMENT_VERSION_ROOT);
         let legacy_pointers = self.app_data_root.join(LEGACY_DOCUMENT_POINTER_ROOT);
         if !legacy_versions.exists() && !legacy_pointers.exists() {
@@ -96,6 +101,33 @@ impl LocalDocumentStoreMigration {
         result
     }
 
+    fn has_completed_marker(&self) -> Result<bool, LocalDocumentStoreMigrationError> {
+        let marker = self
+            .app_data_root
+            .join(AUTHORITATIVE_DOCUMENT_MIGRATION_MARKER);
+        let metadata = match fs::symlink_metadata(&marker) {
+            Ok(value) => value,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(LocalDocumentStoreMigrationError::StorageUnavailable),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(LocalDocumentStoreMigrationError::CorruptedLegacy);
+        }
+        let content = fs::read_to_string(marker)
+            .map_err(|_| LocalDocumentStoreMigrationError::StorageUnavailable)?;
+        if content != COMPLETED_MARKER_CONTENT {
+            return Err(LocalDocumentStoreMigrationError::CorruptedLegacy);
+        }
+        Ok(true)
+    }
+
+    fn validate_authoritative_roots(&self) -> Result<(), LocalDocumentStoreMigrationError> {
+        for root in [LOCAL_DOCUMENT_VERSION_ROOT, LOCAL_DOCUMENT_POINTER_ROOT] {
+            require_plain_directory(&self.app_data_root.join(root))?;
+        }
+        Ok(())
+    }
+
     fn initialize_authoritative_roots(&self) -> Result<(), LocalDocumentStoreMigrationError> {
         for root in [LOCAL_DOCUMENT_VERSION_ROOT, LOCAL_DOCUMENT_POINTER_ROOT] {
             fs::create_dir_all(self.app_data_root.join(root))
@@ -123,7 +155,7 @@ impl LocalDocumentStoreMigration {
             &self
                 .app_data_root
                 .join(AUTHORITATIVE_DOCUMENT_MIGRATION_MARKER),
-            "schema=1\nstate=completed\n",
+            COMPLETED_MARKER_CONTENT,
         )
         .map_err(|_| LocalDocumentStoreMigrationError::StorageUnavailable)?;
         let _ = fs::remove_dir_all(

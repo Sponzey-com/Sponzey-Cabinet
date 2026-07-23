@@ -3,7 +3,7 @@ export type DesktopRoute =
   | { readonly kind: "Search"; readonly query?: string; readonly scope?: string }
   | { readonly kind: "Document"; readonly documentId?: string }
   | { readonly kind: "Graph"; readonly centerDocumentId?: string; readonly scope: "Global" | "Local" }
-  | { readonly kind: "Canvas"; readonly canvasId: string }
+  | { readonly kind: "Canvas"; readonly canvasId?: string }
   | { readonly kind: "Assets"; readonly documentId?: string; readonly assetId?: string }
   | { readonly kind: "Backup" };
 
@@ -62,6 +62,26 @@ export function graphQueryScopeForRoute(
   route: Extract<DesktopRoute, { readonly kind: "Graph" }>,
 ): "global" | "local" {
   return route.scope === "Global" ? "global" : "local";
+}
+
+export function createDesktopGraphScopeIntent(
+  scope: "local" | "global",
+  workspaceId: string,
+  centerDocumentId?: string,
+): Readonly<{ route: DesktopRoute; selection: DesktopSelectionContext }> {
+  const workspace = workspaceId.trim();
+  if (!workspace) throw new Error("INVALID_ROUTE_SELECTION");
+  const center = centerDocumentId?.trim() || undefined;
+  return Object.freeze({
+    route: scope === "local"
+      ? Object.freeze({ kind: "Graph", scope: "Local", ...(center ? { centerDocumentId: center } : {}) })
+      : Object.freeze({ kind: "Graph", scope: "Global" }),
+    selection: Object.freeze({
+      workspaceId: workspace,
+      ...(center ? { documentId: center } : {}),
+      originRoute: "Graph",
+    }),
+  });
 }
 
 export type DesktopRouteEvent =

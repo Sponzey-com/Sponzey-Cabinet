@@ -2,7 +2,8 @@ use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::workspace_home::{
     WorkspaceHomeBackupStatus, WorkspaceHomeChangeProjection, WorkspaceHomeDocumentProjection,
     WorkspaceHomeHealthStatus, WorkspaceHomeProjection, WorkspaceHomeProjectionLimits,
-    WorkspaceHomeProjectionPort, WorkspaceHomeTagProjection, WorkspaceHomeUnfinishedProjection,
+    WorkspaceHomeProjectionPort, WorkspaceHomeSummaryProjection, WorkspaceHomeTagProjection,
+    WorkspaceHomeUnfinishedProjection,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +156,10 @@ impl GetWorkspaceHomeOutput {
 
     pub const fn health_status(&self) -> WorkspaceHomeHealthStatus {
         self.projection.health_status()
+    }
+
+    pub const fn summary(&self) -> WorkspaceHomeSummaryProjection {
+        self.projection.summary()
     }
 
     pub fn total_item_count(&self) -> usize {

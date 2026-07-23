@@ -2,9 +2,10 @@ use cabinet_domain::asset::AssetId;
 use cabinet_domain::document::DocumentBody;
 use cabinet_domain::link::SourceRange;
 use cabinet_ports::markdown_parser::{
-    MarkdownHeading, MarkdownParser, MarkdownParserError, ParsedAssetReference, ParsedMarkdown,
-    ParsedWikilink,
+    MarkdownHeading, MarkdownParser, MarkdownParserError, ParsedAssetReference, ParsedDocumentLink,
+    ParsedExternalLink, ParsedMarkdown, ParsedWikilink,
 };
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalMarkdownParser;
@@ -26,8 +27,95 @@ impl MarkdownParser for LocalMarkdownParser {
         let source = body.as_str();
         let headings = parse_headings(source)?;
         let (wikilinks, asset_references) = parse_inline_references(source)?;
-        Ok(ParsedMarkdown::new(headings, wikilinks, asset_references))
+        let external_links = parse_external_links(source)?;
+        let document_links = parse_document_links(source)?;
+        Ok(ParsedMarkdown::new(headings, wikilinks, asset_references)
+            .with_external_links(external_links)
+            .with_document_links(document_links))
     }
+}
+
+fn parse_external_links(source: &str) -> Result<Vec<ParsedExternalLink>, MarkdownParserError> {
+    let mut links = Vec::new();
+    let mut active: Option<(String, String, std::ops::Range<usize>)> = None;
+
+    for (event, range) in Parser::new(source).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Link { dest_url, .. }) if is_external_target(dest_url.as_ref()) => {
+                active = Some((dest_url.into_string(), String::new(), range));
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some((_, label, _)) = active.as_mut() {
+                    label.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some((target, label, range)) = active.take() {
+                    let source_range = SourceRange::new(range.start, range.end)
+                        .map_err(|_| MarkdownParserError::InvalidSourceRange)?;
+                    if let Ok(link) = ParsedExternalLink::new(&target, &label, source_range) {
+                        links.push(link);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(links)
+}
+
+fn is_external_target(target: &str) -> bool {
+    let target = target.to_ascii_lowercase();
+    target.starts_with("https://") || target.starts_with("http://") || target.starts_with("mailto:")
+}
+
+fn parse_document_links(source: &str) -> Result<Vec<ParsedDocumentLink>, MarkdownParserError> {
+    let mut links = Vec::new();
+    let mut active: Option<(String, String, std::ops::Range<usize>)> = None;
+
+    for (event, range) in Parser::new(source).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Link { dest_url, .. }) if is_relative_document_target(&dest_url) => {
+                active = Some((dest_url.into_string(), String::new(), range));
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some((_, label, _)) = active.as_mut() {
+                    label.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some((target, label, range)) = active.take() {
+                    let source_range = SourceRange::new(range.start, range.end)
+                        .map_err(|_| MarkdownParserError::InvalidSourceRange)?;
+                    if let Ok(link) = ParsedDocumentLink::new(&target, &label, source_range) {
+                        links.push(link);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(links)
+}
+
+fn is_relative_document_target(target: &str) -> bool {
+    let target = target.trim();
+    if target.is_empty()
+        || target.starts_with('/')
+        || target.contains('\\')
+        || target.contains('?')
+        || target.contains(':')
+        || target.chars().any(char::is_control)
+    {
+        return false;
+    }
+    target
+        .split_once('#')
+        .map_or(target, |(path, _)| path)
+        .to_ascii_lowercase()
+        .ends_with(".md")
 }
 
 fn parse_headings(source: &str) -> Result<Vec<MarkdownHeading>, MarkdownParserError> {

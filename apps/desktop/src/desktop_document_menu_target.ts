@@ -7,11 +7,14 @@ export function resolveDesktopDocumentMenuTarget(
   lastAuthoringDocumentId: string | undefined,
   recentDocumentIds: readonly string[],
 ): DesktopDocumentMenuTarget {
+  const currentDocumentIds = [...new Set(
+    recentDocumentIds.map(normalizeDocumentId).filter((documentId): documentId is string => documentId !== undefined),
+  )];
   const lastAuthoring = normalizeDocumentId(lastAuthoringDocumentId);
-  if (lastAuthoring) return { kind: "LastDocument", documentId: lastAuthoring };
-  const recentDocument = recentDocumentIds
-    .map(normalizeDocumentId)
-    .find((documentId) => documentId !== undefined);
+  if (lastAuthoring && currentDocumentIds.includes(lastAuthoring)) {
+    return { kind: "LastDocument", documentId: lastAuthoring };
+  }
+  const recentDocument = currentDocumentIds[0];
   return recentDocument
     ? { kind: "RecentDocument", documentId: recentDocument }
     : { kind: "EmptyWorkspace" };

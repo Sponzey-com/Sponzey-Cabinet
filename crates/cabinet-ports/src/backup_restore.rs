@@ -52,6 +52,12 @@ pub trait BackupRestoreStore {
         workspace_id: &WorkspaceId,
         operation_id: &BackupJobId,
     ) -> Result<BackupRestoreOperationSnapshot, BackupRestoreStoreError>;
+
+    fn mark_recovery_required(
+        &mut self,
+        workspace_id: &WorkspaceId,
+        operation_id: &BackupJobId,
+    ) -> Result<BackupRestoreOperationSnapshot, BackupRestoreStoreError>;
 }
 
 pub trait WorkspaceReopener {

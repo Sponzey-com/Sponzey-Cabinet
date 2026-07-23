@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod asset;
 pub mod asset_import_operation;
+pub mod attachment_operation;
 pub mod attachment_snapshot_mutation;
 pub mod audit;
 pub mod backup;

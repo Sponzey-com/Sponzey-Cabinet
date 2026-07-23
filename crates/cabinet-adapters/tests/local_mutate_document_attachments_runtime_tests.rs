@@ -98,7 +98,7 @@ fn local_unlink_preserves_other_attachment_and_document_body() {
 }
 
 #[test]
-fn stale_and_legacy_mutations_leave_durable_state_unchanged() {
+fn stale_mutation_leaves_durable_state_unchanged() {
     let stale = TempRoot::new("stale");
     seed_current(&stale, known(Vec::new()));
     let first = runtime(&stale)
@@ -111,23 +111,50 @@ fn stale_and_legacy_mutations_leave_durable_state_unchanged() {
         .expect_err("stale");
     assert_eq!(stale_error, MutateDocumentAttachmentsError::CommitConflict);
     assert_current_snapshot(&stale, &current, &[reference('a', "A")], 2);
+}
 
-    let legacy = TempRoot::new("legacy");
+#[test]
+fn legacy_current_uses_empty_durable_association_baseline_and_appends_new_version() {
+    let legacy = TempRoot::new("legacy-empty-baseline");
     seed_current(&legacy, AttachmentSnapshotState::legacy_unknown());
-    let legacy_error = runtime(&legacy)
+    let legacy_body = fs::read(version_body_path(&legacy, "version-1")).unwrap();
+
+    let linked = runtime(&legacy)
         .execute(link_input("operation-legacy", "version-1", 'a', "A"))
-        .expect_err("legacy baseline");
+        .expect("legacy baseline migration");
+
+    assert_eq!(linked.delta(), AttachmentSnapshotDelta::Linked);
+    assert_current_snapshot(&legacy, linked.version_id(), &[reference('a', "A")], 2);
+    assert_associations(&legacy, &[('a', "A")]);
     assert_eq!(
-        legacy_error,
-        MutateDocumentAttachmentsError::LegacyBaselineRequired
+        fs::read(version_body_path(&legacy, "version-1")).unwrap(),
+        legacy_body
     );
-    assert_eq!(history_count(&legacy), 1);
-    assert!(
-        current_record(&legacy)
-            .snapshot()
-            .attachment_state()
-            .is_legacy_unknown()
+    assert!(!version_attachments_path(&legacy, "version-1").exists());
+}
+
+#[test]
+fn legacy_current_preserves_existing_durable_associations_in_new_version() {
+    let legacy = TempRoot::new("legacy-existing-baseline");
+    seed_current(&legacy, AttachmentSnapshotState::legacy_unknown());
+    DurableAssetAssociationCatalog::new(legacy.path.clone())
+        .link(
+            &workspace(),
+            AssetAssociation::new(asset_id('a'), document(), "Existing").unwrap(),
+        )
+        .unwrap();
+
+    let linked = runtime(&legacy)
+        .execute(link_input("operation-legacy", "version-1", 'b', "New"))
+        .expect("preserved legacy baseline");
+
+    assert_current_snapshot(
+        &legacy,
+        linked.version_id(),
+        &[reference('a', "Existing"), reference('b', "New")],
+        2,
     );
+    assert_associations(&legacy, &[('a', "Existing"), ('b', "New")]);
 }
 
 #[test]
@@ -180,6 +207,44 @@ fn attachment_projection_failure_replays_primary_commit_and_resumes_association(
     assert_eq!(history_count(&temp), 2);
     assert_associations(&temp, &[('a', "A")]);
     assert_current_snapshot(&temp, repaired.version_id(), &[reference('a', "A")], 2);
+}
+
+#[test]
+fn startup_recovery_skips_stale_attachment_candidate_and_reapplies_current_unlink() {
+    let temp = TempRoot::new("startup-current-guard");
+    seed_current(&temp, known(Vec::new()));
+    let linked = runtime(&temp)
+        .execute(link_input("operation-link", "version-1", 'a', "A"))
+        .expect("link");
+    let unlinked = runtime(&temp)
+        .execute(unlink_input(
+            "operation-unlink",
+            linked.version_id().as_str(),
+            'a',
+        ))
+        .expect("unlink");
+    assert_associations(&temp, &[]);
+
+    DurableAssetAssociationCatalog::new(temp.path.clone())
+        .link(
+            &workspace(),
+            AssetAssociation::new(asset_id('a'), document(), "stale association").unwrap(),
+        )
+        .unwrap();
+    assert_associations(&temp, &[('a', "stale association")]);
+
+    let recovered = runtime(&temp).recover_committed(1000).expect("recover");
+    assert_eq!(recovered.recovered().len(), 1);
+    assert_eq!(recovered.skipped_stale_count(), 1);
+    assert_eq!(recovered.recovered()[0].version_id(), unlinked.version_id());
+    assert_associations(&temp, &[]);
+    assert_eq!(history_count(&temp), 3);
+
+    let repeated = runtime(&temp).recover_committed(1000).expect("repeat");
+    assert_eq!(repeated.recovered().len(), 1);
+    assert_eq!(repeated.skipped_stale_count(), 1);
+    assert_associations(&temp, &[]);
+    assert_eq!(history_count(&temp), 3);
 }
 
 #[test]
@@ -359,6 +424,21 @@ fn history_count(temp: &TempRoot) -> usize {
         .unwrap()
         .entries()
         .len()
+}
+
+fn version_body_path(temp: &TempRoot, version: &str) -> PathBuf {
+    temp.path
+        .join(LOCAL_DOCUMENT_VERSION_ROOT)
+        .join("workspace-1")
+        .join("documents")
+        .join("doc-1")
+        .join("snapshots")
+        .join(version)
+        .join("body.md")
+}
+
+fn version_attachments_path(temp: &TempRoot, version: &str) -> PathBuf {
+    version_body_path(temp, version).with_file_name("attachments.json")
 }
 
 fn projected_path(temp: &TempRoot) -> Option<String> {

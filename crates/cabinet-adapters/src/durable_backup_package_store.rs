@@ -7,6 +7,9 @@ use cabinet_domain::backup::{
     BackupDataClass, BackupDataOwnership, BackupJobId, BackupManifestEntry, BackupPackageManifest,
 };
 use cabinet_domain::workspace::WorkspaceId;
+use cabinet_ports::backup_catalog::{
+    BackupCatalogError, BackupCatalogPage, BackupCatalogPort, BackupCatalogRecord,
+};
 use cabinet_ports::backup_package::{
     BackupPackageStore, BackupPackageStoreError, BackupPackageValidation,
 };
@@ -293,6 +296,107 @@ impl BackupPackageStore for LocalBackupPackageStore {
                 .join(PAYLOAD_DIR),
             manifest,
         )
+    }
+}
+
+impl BackupCatalogPort for LocalBackupPackageStore {
+    fn list_backup_packages(
+        &self,
+        workspace_id: &WorkspaceId,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<BackupCatalogPage, BackupCatalogError> {
+        if limit == 0 || limit > 50 {
+            return Err(BackupCatalogError::InvalidLimit);
+        }
+        let offset = parse_catalog_cursor(cursor)?;
+        let root = self.packages_root(workspace_id);
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return if offset == 0 {
+                    Ok(BackupCatalogPage::new(vec![], None))
+                } else {
+                    Err(BackupCatalogError::InvalidCursor)
+                };
+            }
+            Err(_) => return Err(BackupCatalogError::StorageUnavailable),
+        };
+
+        let mut records = Vec::new();
+        let mut reader = self.clone();
+        for entry in entries {
+            let entry = entry.map_err(|_| BackupCatalogError::StorageUnavailable)?;
+            let encoded = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| BackupCatalogError::CorruptedCatalog)?;
+            if encoded.starts_with('.') {
+                continue;
+            }
+            let file_type = entry
+                .file_type()
+                .map_err(|_| BackupCatalogError::StorageUnavailable)?;
+            if file_type.is_symlink() || !file_type.is_dir() {
+                return Err(BackupCatalogError::CorruptedCatalog);
+            }
+            let decoded = decode_catalog_hex(&encoded)?;
+            if hex(&decoded) != encoded {
+                return Err(BackupCatalogError::CorruptedCatalog);
+            }
+            let package_id =
+                BackupJobId::new(&decoded).map_err(|_| BackupCatalogError::CorruptedCatalog)?;
+            let manifest = reader
+                .inspect_manifest(workspace_id, &package_id)
+                .map_err(map_catalog_manifest_error)?;
+            records.push(BackupCatalogRecord::new(package_id, manifest));
+        }
+        records.sort_by(|left, right| {
+            right
+                .manifest()
+                .created_at_epoch_ms()
+                .cmp(&left.manifest().created_at_epoch_ms())
+                .then_with(|| left.package_id().cmp(right.package_id()))
+        });
+        if offset > records.len() {
+            return Err(BackupCatalogError::InvalidCursor);
+        }
+        let end = offset.saturating_add(limit).min(records.len());
+        let page = records[offset..end].to_vec();
+        let next_cursor = (end < records.len()).then(|| end.to_string());
+        Ok(BackupCatalogPage::new(page, next_cursor))
+    }
+}
+
+fn parse_catalog_cursor(cursor: Option<&str>) -> Result<usize, BackupCatalogError> {
+    let Some(cursor) = cursor else { return Ok(0) };
+    let offset = cursor
+        .parse::<usize>()
+        .map_err(|_| BackupCatalogError::InvalidCursor)?;
+    if offset == 0 || offset.to_string() != cursor {
+        return Err(BackupCatalogError::InvalidCursor);
+    }
+    Ok(offset)
+}
+
+fn decode_catalog_hex(value: &str) -> Result<String, BackupCatalogError> {
+    if value.is_empty() || value.len() % 2 != 0 {
+        return Err(BackupCatalogError::CorruptedCatalog);
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
+        let pair = std::str::from_utf8(pair).map_err(|_| BackupCatalogError::CorruptedCatalog)?;
+        bytes.push(u8::from_str_radix(pair, 16).map_err(|_| BackupCatalogError::CorruptedCatalog)?);
+    }
+    String::from_utf8(bytes).map_err(|_| BackupCatalogError::CorruptedCatalog)
+}
+
+const fn map_catalog_manifest_error(error: BackupPackageStoreError) -> BackupCatalogError {
+    match error {
+        BackupPackageStoreError::StorageUnavailable => BackupCatalogError::StorageUnavailable,
+        BackupPackageStoreError::PackageNotFound
+        | BackupPackageStoreError::CorruptedPackage
+        | BackupPackageStoreError::Conflict => BackupCatalogError::CorruptedCatalog,
     }
 }
 

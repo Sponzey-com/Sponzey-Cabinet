@@ -21,6 +21,66 @@ pub enum WorkspaceHomeHealthStatus {
     ReadOnlyRecovery,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkspaceHomeSummaryProjection {
+    document_count: u32,
+    asset_count: u32,
+    canvas_count: u32,
+    unavailable_mask: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceHomeSummaryKind {
+    Documents,
+    Assets,
+    Canvases,
+}
+
+impl WorkspaceHomeSummaryProjection {
+    pub const fn new(document_count: u32, asset_count: u32, canvas_count: u32) -> Self {
+        Self {
+            document_count,
+            asset_count,
+            canvas_count,
+            unavailable_mask: 0,
+        }
+    }
+
+    pub const fn with_unavailable(mut self, kind: WorkspaceHomeSummaryKind) -> Self {
+        self.unavailable_mask |= match kind {
+            WorkspaceHomeSummaryKind::Documents => 1,
+            WorkspaceHomeSummaryKind::Assets => 2,
+            WorkspaceHomeSummaryKind::Canvases => 4,
+        };
+        self
+    }
+
+    pub const fn is_available(self, kind: WorkspaceHomeSummaryKind) -> bool {
+        let mask = match kind {
+            WorkspaceHomeSummaryKind::Documents => 1,
+            WorkspaceHomeSummaryKind::Assets => 2,
+            WorkspaceHomeSummaryKind::Canvases => 4,
+        };
+        self.unavailable_mask & mask == 0
+    }
+
+    pub const fn is_complete(self) -> bool {
+        self.unavailable_mask == 0
+    }
+
+    pub const fn document_count(self) -> u32 {
+        self.document_count
+    }
+
+    pub const fn asset_count(self) -> u32 {
+        self.asset_count
+    }
+
+    pub const fn canvas_count(self) -> u32 {
+        self.canvas_count
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkspaceHomeProjectionLimits {
     recent_documents: u16,
@@ -191,6 +251,7 @@ pub struct WorkspaceHomeProjection {
     unfinished_items: Vec<WorkspaceHomeUnfinishedProjection>,
     backup_status: WorkspaceHomeBackupStatus,
     health_status: WorkspaceHomeHealthStatus,
+    summary: WorkspaceHomeSummaryProjection,
 }
 
 impl WorkspaceHomeProjection {
@@ -212,7 +273,18 @@ impl WorkspaceHomeProjection {
             unfinished_items,
             backup_status,
             health_status,
+            summary: WorkspaceHomeSummaryProjection::default(),
         }
+    }
+
+    pub fn with_summary(mut self, summary: WorkspaceHomeSummaryProjection) -> Self {
+        self.summary = summary;
+        self
+    }
+
+    pub fn with_health_status(mut self, health_status: WorkspaceHomeHealthStatus) -> Self {
+        self.health_status = health_status;
+        self
     }
 
     pub fn empty(
@@ -258,12 +330,20 @@ impl WorkspaceHomeProjection {
         self.health_status
     }
 
+    pub const fn summary(&self) -> WorkspaceHomeSummaryProjection {
+        self.summary
+    }
+
     pub fn total_item_count(&self) -> usize {
-        self.recent_documents.len()
+        let bounded_item_count = self.recent_documents.len()
             + self.favorites.len()
             + self.tags.len()
             + self.recent_changes.len()
-            + self.unfinished_items.len()
+            + self.unfinished_items.len();
+        let summary_item_count = (self.summary.document_count() as usize)
+            .saturating_add(self.summary.asset_count() as usize)
+            .saturating_add(self.summary.canvas_count() as usize);
+        bounded_item_count.max(summary_item_count)
     }
 }
 

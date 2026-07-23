@@ -11,14 +11,17 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use cabinet_adapters::composite_graph_projection::CompositeGraphProjectionStore;
 use cabinet_adapters::durable_asset_association_catalog::DurableAssetAssociationCatalog;
 use cabinet_adapters::durable_asset_import_operation_repository::DurableAssetImportOperationRepository;
 use cabinet_adapters::durable_asset_metadata_catalog::DurableAssetMetadataCatalog;
 use cabinet_adapters::durable_backup_package_store::{
     LocalBackupPackagePolicy, LocalBackupPackageStore,
 };
+use cabinet_adapters::durable_canvas_graph_projection::DurableCanvasGraphRelationProjectionStore;
 use cabinet_adapters::durable_canvas_repository::DurableCanvasRepository;
 use cabinet_adapters::durable_document_link_catalog::DurableDocumentLinkCatalog;
+use cabinet_adapters::durable_last_canvas_selection::DurableLastCanvasSelection;
 use cabinet_adapters::durable_local_graph_projection::DurableLocalGraphProjectionStore;
 use cabinet_adapters::durable_local_link_index::DurableLocalLinkIndex;
 use cabinet_adapters::durable_local_search_index::DurableLocalSearchIndex;
@@ -30,6 +33,7 @@ use cabinet_adapters::local_asset_import_source::{
     LocalAssetImportSource, LocalAssetImportSourceConfig,
 };
 use cabinet_adapters::local_asset_preview_reader::LocalAssetPreviewReader;
+use cabinet_adapters::local_asset_search_index::LocalAssetSearchIndex;
 use cabinet_adapters::local_asset_staging_writer::LocalAssetStagingWriter;
 use cabinet_adapters::local_backup_restore_store::LocalBackupRestoreStore;
 use cabinet_adapters::local_backup_store::LocalBackupStore;
@@ -49,22 +53,27 @@ use cabinet_adapters::local_restore_projection_recovery_runtime::LocalRestorePro
 use cabinet_adapters::local_update_document_revision_runtime::LocalUpdateDocumentRevisionRuntime;
 use cabinet_adapters::local_version_store::LocalVersionStore;
 use cabinet_adapters::local_workspace_home_projection::LocalWorkspaceHomeProjectionStore;
+use cabinet_adapters::local_workspace_home_query::LocalWorkspaceHomeQueryStore;
 use cabinet_adapters::local_workspace_reopener::LocalWorkspaceReopener;
 use cabinet_adapters::process_local_document_diff_operation_registry::ProcessLocalDocumentDiffOperationRegistry;
-use cabinet_domain::asset::AssetImportHandle;
+use cabinet_domain::asset::{AssetId, AssetImportHandle};
 use cabinet_domain::asset_import_operation::{
     AssetImportOperation, AssetImportOperationId, AssetImportState,
 };
+use cabinet_domain::attachment_snapshot_mutation::AttachmentSnapshotDelta;
 use cabinet_domain::backup::{BackupDataClass, BackupJobId, BackupJobState, RestoreState};
 use cabinet_domain::canvas::{CanvasGeometryPolicy, CanvasNodeTarget};
 use cabinet_domain::document::{DocumentBodyPolicy, DocumentId, DocumentTitle};
 use cabinet_domain::document_diff_operation::DocumentDiffOperationState;
 use cabinet_domain::document_revision::DocumentOperationId;
-use cabinet_domain::graph::{GraphEdgeKind, GraphNodeKind, GraphProjectionStatus};
+use cabinet_domain::graph::{GraphEdgeKind, GraphNode, GraphNodeKind, GraphProjectionStatus};
 use cabinet_domain::projection_repair::{ProjectionRepairEvent, ProjectionRepairOperationId};
 use cabinet_domain::projection_work::ProjectionChangeKind;
 use cabinet_domain::version::VersionId;
 use cabinet_domain::workspace::WorkspaceId;
+use cabinet_platform::asset_search_command::{
+    AssetSearchCommandFailure, AssetSearchCommandRequest, execute_asset_search_command,
+};
 use cabinet_platform::document_authoring_command::{
     DocumentAuthoringCommandExecutor, DocumentAuthoringCommandFailure,
     DocumentAuthoringCommandRequest, DocumentAuthoringCommandResult,
@@ -88,10 +97,13 @@ use cabinet_ports::asset_import_operation_repository::AssetImportOperationReposi
 use cabinet_ports::asset_import_source::AssetImportSource;
 use cabinet_ports::asset_metadata_catalog::AssetMetadataCatalog;
 use cabinet_ports::backup_restore::BackupRestoreStore;
+use cabinet_ports::canvas_graph_projection::CanvasGraphRelationProjectionError;
 use cabinet_ports::current_document_version::CurrentDocumentVersionPointerPort;
 use cabinet_ports::document_repository::DocumentRepository;
+use cabinet_ports::document_title_reader::DocumentTitleReader;
 use cabinet_ports::imported_asset_document_link::ImportedAssetDocumentLinkPort;
 use cabinet_ports::projection_repair::ProjectionRepairRepository;
+use cabinet_ports::projection_work::ProjectionWorkRepository;
 use cabinet_ports::version_store::{HistoryPage, VersionStore, VersionStoreError};
 use cabinet_usecases::asset_external_open::{
     AssetExternalOpenProductEvent, AssetExternalOpenProductLogger, OpenAssetExternallyError,
@@ -123,6 +135,9 @@ use cabinet_usecases::authoritative_restore_preview::{
     PreviewAuthoritativeDocumentRestoreError, PreviewAuthoritativeDocumentRestoreInput,
     PreviewAuthoritativeDocumentRestoreUsecase,
 };
+use cabinet_usecases::backup_catalog::{
+    ListBackupCatalogError, ListBackupCatalogInput, ListBackupCatalogUsecase,
+};
 use cabinet_usecases::backup_package::{
     BackupPackageProductEvent, BackupPackageSummary, BackupPackageUsecaseLogger,
     CreateBackupPackageInput, CreateBackupPackageUsecase, PreviewBackupRestoreInput,
@@ -145,6 +160,14 @@ use cabinet_usecases::backup_restore::{
     GetBackupRestoreOperationInput, GetBackupRestoreOperationUsecase,
     StartBackupRestoreOperationInput, StartBackupRestoreOperationUsecase,
 };
+use cabinet_usecases::canvas_catalog::{
+    ResolveInitialCanvasInput, ResolveInitialCanvasUsecase, ResolvedCanvasSelectionSource,
+    SelectCanvasError, SelectCanvasInput, SelectCanvasUsecase,
+};
+use cabinet_usecases::canvas_graph_projection::{
+    CanvasGraphProjectionPolicy, ProjectCanvasGraphRelationsInput,
+    ProjectCanvasGraphRelationsUsecase,
+};
 use cabinet_usecases::canvas_lifecycle::{
     ArchiveCanvasInput, ArchiveCanvasUsecase, CanvasLifecycleProductEvent,
     CanvasLifecycleProductLogger, CanvasLifecycleUsecaseError, CreateCanvasRecordInput,
@@ -158,7 +181,8 @@ use cabinet_usecases::canvas_mutation::{
     CanvasNodeTargetInput, ConnectCanvasEdgeInput, ConnectCanvasEdgeUsecase,
     PreviewAutoArrangeCanvasUsecase, RemoveCanvasEdgeInput, RemoveCanvasEdgeUsecase,
     RemoveCanvasNodeInput, RemoveCanvasNodeUsecase, UpdateCanvasNodeGeometryInput,
-    UpdateCanvasNodeGeometryUsecase, UpdateCanvasViewportInput, UpdateCanvasViewportUsecase,
+    UpdateCanvasNodeGeometryUsecase, UpdateCanvasTextCardInput, UpdateCanvasTextCardUsecase,
+    UpdateCanvasViewportInput, UpdateCanvasViewportUsecase,
 };
 use cabinet_usecases::canvas_recovery::{
     CanvasRecoveryError, CanvasRecoveryEvent, CanvasRecoveryLogger, RecoverCanvasInput,
@@ -221,6 +245,9 @@ use cabinet_usecases::projection_work::EnqueueProjectionWorkUsecase;
 use cabinet_usecases::projection_worker::{
     ProjectionWorkerError, ProjectionWorkerPolicy, RunProjectionWorkerUsecase,
 };
+use cabinet_usecases::reconcile_current_projections::{
+    ReconcileCurrentProjectionsInput, ReconcileCurrentProjectionsUsecase,
+};
 use cabinet_usecases::reference_projection_fanout::ReindexReferenceDependentsUsecase;
 use cabinet_usecases::reindex_asset_graph_projection::{
     ReindexAssetGraphProjectionError, ReindexAssetGraphProjectionInput,
@@ -247,6 +274,9 @@ use cabinet_usecases::restore_target_asset_preflight::{
     RestoreTargetAssetPreflightError, RestoreTargetAssetPreflightInput,
     RestoreTargetAssetPreflightOutcome, RestoreTargetAssetPreflightUsecase,
 };
+use cabinet_usecases::search::{
+    SearchDocumentsError, SearchDocumentsInput, SearchDocumentsUsecase,
+};
 use cabinet_usecases::search_projection_writer::SearchProjectionWriter;
 use cabinet_usecases::update_document_revision::{
     UpdateDocumentRevisionError, UpdateDocumentRevisionInput,
@@ -259,29 +289,44 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct PackagedUiSmokeModeResponse {
     pub enabled: bool,
+    pub stage: Option<PackagedUiSmokeStage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PackagedUiSmokeStage {
+    Initial,
+    UpgradeVerification,
+    RestartVerification,
+    VisualEvidence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackagedUiSmokeMode {
-    enabled: bool,
+    stage: Option<PackagedUiSmokeStage>,
 }
 
 impl PackagedUiSmokeMode {
     pub const fn disabled() -> Self {
-        Self { enabled: false }
+        Self { stage: None }
     }
 
-    pub const fn enabled() -> Self {
-        Self { enabled: true }
+    pub const fn enabled(stage: PackagedUiSmokeStage) -> Self {
+        Self { stage: Some(stage) }
     }
 
     pub const fn is_enabled(self) -> bool {
-        self.enabled
+        self.stage.is_some()
+    }
+
+    pub const fn stage(self) -> Option<PackagedUiSmokeStage> {
+        self.stage
     }
 
     pub const fn public_response(self) -> PackagedUiSmokeModeResponse {
         PackagedUiSmokeModeResponse {
-            enabled: self.enabled,
+            enabled: self.is_enabled(),
+            stage: self.stage,
         }
     }
 }
@@ -329,13 +374,22 @@ impl PackagedUiSmokeCanvasFixture {
         Self { root: Some(root) }
     }
 
-    pub fn corrupt_default_current_pointer(&self) -> Result<(), &'static str> {
+    pub fn corrupt_current_pointer(&self) -> Result<(), &'static str> {
         let root = self.root.as_ref().ok_or("PACKAGED_UI_FIXTURE_DISABLED")?;
-        let path = root
+        let workspace = root
             .join("canvases")
-            .join(hex_fixture_identity("workspace-1"))
-            .join(hex_fixture_identity("default-canvas"))
-            .join("current.canvas");
+            .join(hex_fixture_identity("workspace-1"));
+        let mut canvases = fs::read_dir(workspace)
+            .map_err(|_| "PACKAGED_UI_CANVAS_FIXTURE_MISSING")?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        canvases.sort();
+        if canvases.len() != 1 {
+            return Err("PACKAGED_UI_CANVAS_FIXTURE_AMBIGUOUS");
+        }
+        let path = canvases[0].join("current.canvas");
         if !path.is_file() {
             return Err("PACKAGED_UI_CANVAS_FIXTURE_MISSING");
         }
@@ -357,10 +411,19 @@ fn hex_fixture_identity(value: &str) -> String {
 pub struct PackagedUiSmokeReport {
     pub home_ready: bool,
     pub graph_ready: bool,
+    pub graph_link_fixture_saved: bool,
+    pub graph_local_edge_verified: bool,
+    pub graph_global_edge_verified: bool,
+    pub graph_safe_labels_verified: bool,
     pub canvas_ready: bool,
+    pub canvas_text_edit_readback_verified: bool,
     pub assets_ready: bool,
     pub document_version_workflow_verified: bool,
     pub document_attachment_workflow_verified: bool,
+    pub attachment_import_completed: bool,
+    pub attachment_current_readback_verified: bool,
+    pub attachment_document_readback_verified: bool,
+    pub attachment_restart_readback_verified: bool,
     pub keyboard_document_workflow_verified: bool,
     pub sample_count: u32,
     pub p95_ms: u64,
@@ -372,12 +435,67 @@ pub struct PackagedUiSmokeReport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PackagedUiSmokeRestartReport {
+    pub attachment_restart_readback_verified: bool,
+    pub canvas_text_restart_readback_verified: bool,
+    pub error_count: u32,
+    pub failure_stage: Option<PackagedUiSmokeRestartFailureStage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PackagedUiSmokeRestartFailureStage {
+    Home,
+    Document,
+    AttachmentTab,
+    AttachmentList,
+    AttachmentListLoading,
+    AttachmentListEmpty,
+    AttachmentListFailed,
+    AttachmentListMissing,
+    AttachmentDetail,
+    CanvasOpen,
+    CanvasCatalogSelect,
+    CanvasTextReadback,
+}
+
+impl PackagedUiSmokeRestartFailureStage {
+    pub const fn error_code(self) -> &'static str {
+        match self {
+            Self::Home => "PHASE015_PACKAGED_UI_RESTART_HOME_FAILED",
+            Self::Document => "PHASE015_PACKAGED_UI_RESTART_DOCUMENT_FAILED",
+            Self::AttachmentTab => "PHASE015_PACKAGED_UI_RESTART_ATTACHMENT_TAB_FAILED",
+            Self::AttachmentList => "PHASE015_PACKAGED_UI_RESTART_ATTACHMENT_LIST_FAILED",
+            Self::AttachmentListLoading => "PHASE015_PACKAGED_UI_RESTART_ATTACHMENT_LIST_LOADING",
+            Self::AttachmentListEmpty => "PHASE015_PACKAGED_UI_RESTART_ATTACHMENT_LIST_EMPTY",
+            Self::AttachmentListFailed => {
+                "PHASE015_PACKAGED_UI_RESTART_ATTACHMENT_LIST_QUERY_FAILED"
+            }
+            Self::AttachmentListMissing => "PHASE015_PACKAGED_UI_RESTART_ATTACHMENT_PANEL_MISSING",
+            Self::AttachmentDetail => "PHASE015_PACKAGED_UI_RESTART_ATTACHMENT_DETAIL_FAILED",
+            Self::CanvasOpen => "PHASE017_PACKAGED_UI_RESTART_CANVAS_OPEN_FAILED",
+            Self::CanvasCatalogSelect => {
+                "PHASE017_PACKAGED_UI_RESTART_CANVAS_CATALOG_SELECT_FAILED"
+            }
+            Self::CanvasTextReadback => "PHASE017_PACKAGED_UI_RESTART_CANVAS_TEXT_READBACK_FAILED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PackagedUiSmokeFailureStage {
     Home,
     DocumentCreate,
     DocumentEdit,
     DocumentSave,
     DocumentReopen,
+    GraphTargetSave,
+    GraphSourceSave,
+    GraphProjection,
+    GraphLocalEdge,
+    GraphGlobalEdge,
+    GraphSafeLabels,
     DocumentHistoryTab,
     DocumentHistoryLoad,
     DocumentHistoryReadback,
@@ -404,10 +522,19 @@ pub enum PackagedUiSmokeFailureStage {
     GraphFitView,
     GraphNode,
     GraphDocumentRoute,
+    GraphAttachmentOpen,
+    GraphAttachmentLocalEdge,
+    GraphAttachmentLocalFilter,
+    GraphAttachmentLocalNode,
+    GraphAttachmentLocalIdentity,
+    GraphAttachmentLocalLabel,
+    GraphAttachmentGlobalEdge,
+    GraphAttachmentRoute,
     Canvas,
     CanvasOpen,
     CanvasCreate,
     CanvasNote,
+    CanvasTextEdit,
     CanvasPan,
     CanvasZoom,
     CanvasArrange,
@@ -420,9 +547,16 @@ pub enum PackagedUiSmokeFailureStage {
     CanvasArchive,
     CanvasArchiveReopen,
     CanvasRecovery,
+    CanvasRecoveryOpen,
+    CanvasRecoveryDetect,
+    CanvasRecoveryApply,
     Assets,
     AssetOpen,
     AssetImport,
+    AssetImportReadback,
+    AssetImportOperation,
+    AssetImportScope,
+    AssetImportPresentation,
     AssetDetail,
     AssetPreview,
     AssetUnlink,
@@ -443,6 +577,13 @@ pub enum PackagedUiSmokeFailureStage {
     RestorePreview,
     RestoreConfirm,
     RestoreReopen,
+    RestoreHome,
+    RestoreDocument,
+    RestoreSearch,
+    RestoreGraph,
+    RestoreCanvas,
+    RestoreAssets,
+    VisualEvidence,
     Measurement,
 }
 
@@ -454,6 +595,12 @@ impl PackagedUiSmokeFailureStage {
             Self::DocumentEdit => "PHASE012_PACKAGED_UI_DOCUMENT_EDIT_FAILED",
             Self::DocumentSave => "PHASE012_PACKAGED_UI_DOCUMENT_SAVE_FAILED",
             Self::DocumentReopen => "PHASE012_PACKAGED_UI_DOCUMENT_REOPEN_FAILED",
+            Self::GraphTargetSave => "PHASE015_PACKAGED_UI_GRAPH_TARGET_SAVE_FAILED",
+            Self::GraphSourceSave => "PHASE015_PACKAGED_UI_GRAPH_SOURCE_SAVE_FAILED",
+            Self::GraphProjection => "PHASE015_PACKAGED_UI_GRAPH_PROJECTION_FAILED",
+            Self::GraphLocalEdge => "PHASE015_PACKAGED_UI_GRAPH_LOCAL_EDGE_FAILED",
+            Self::GraphGlobalEdge => "PHASE015_PACKAGED_UI_GRAPH_GLOBAL_EDGE_FAILED",
+            Self::GraphSafeLabels => "PHASE015_PACKAGED_UI_GRAPH_SAFE_LABELS_FAILED",
             Self::DocumentHistoryTab => "PHASE012_PACKAGED_UI_DOCUMENT_HISTORY_TAB_FAILED",
             Self::DocumentHistoryLoad => "PHASE012_PACKAGED_UI_DOCUMENT_HISTORY_LOAD_FAILED",
             Self::DocumentHistoryReadback => {
@@ -492,10 +639,31 @@ impl PackagedUiSmokeFailureStage {
             Self::GraphFitView => "PHASE012_PACKAGED_UI_GRAPH_FIT_VIEW_FAILED",
             Self::GraphNode => "PHASE012_PACKAGED_UI_GRAPH_NODE_FAILED",
             Self::GraphDocumentRoute => "PHASE012_PACKAGED_UI_GRAPH_DOCUMENT_ROUTE_FAILED",
+            Self::GraphAttachmentOpen => "PHASE016_PACKAGED_UI_GRAPH_ATTACHMENT_OPEN_FAILED",
+            Self::GraphAttachmentLocalEdge => {
+                "PHASE016_PACKAGED_UI_GRAPH_ATTACHMENT_LOCAL_EDGE_FAILED"
+            }
+            Self::GraphAttachmentLocalFilter => {
+                "PHASE016_PACKAGED_UI_GRAPH_ATTACHMENT_LOCAL_FILTER_FAILED"
+            }
+            Self::GraphAttachmentLocalNode => {
+                "PHASE016_PACKAGED_UI_GRAPH_ATTACHMENT_LOCAL_NODE_MISSING"
+            }
+            Self::GraphAttachmentLocalIdentity => {
+                "PHASE016_PACKAGED_UI_GRAPH_ATTACHMENT_LOCAL_IDENTITY_MISMATCH"
+            }
+            Self::GraphAttachmentLocalLabel => {
+                "PHASE016_PACKAGED_UI_GRAPH_ATTACHMENT_LOCAL_LABEL_FAILED"
+            }
+            Self::GraphAttachmentGlobalEdge => {
+                "PHASE016_PACKAGED_UI_GRAPH_ATTACHMENT_GLOBAL_EDGE_FAILED"
+            }
+            Self::GraphAttachmentRoute => "PHASE016_PACKAGED_UI_GRAPH_ATTACHMENT_ROUTE_FAILED",
             Self::Canvas => "PHASE012_PACKAGED_UI_CANVAS_FAILED",
             Self::CanvasOpen => "PHASE012_PACKAGED_UI_CANVAS_OPEN_FAILED",
             Self::CanvasCreate => "PHASE012_PACKAGED_UI_CANVAS_CREATE_FAILED",
             Self::CanvasNote => "PHASE012_PACKAGED_UI_CANVAS_NOTE_FAILED",
+            Self::CanvasTextEdit => "PHASE017_PACKAGED_UI_CANVAS_TEXT_EDIT_FAILED",
             Self::CanvasPan => "PHASE012_PACKAGED_UI_CANVAS_PAN_FAILED",
             Self::CanvasZoom => "PHASE012_PACKAGED_UI_CANVAS_ZOOM_FAILED",
             Self::CanvasArrange => "PHASE012_PACKAGED_UI_CANVAS_ARRANGE_FAILED",
@@ -508,9 +676,18 @@ impl PackagedUiSmokeFailureStage {
             Self::CanvasArchive => "PHASE012_PACKAGED_UI_CANVAS_ARCHIVE_FAILED",
             Self::CanvasArchiveReopen => "PHASE012_PACKAGED_UI_CANVAS_ARCHIVE_REOPEN_FAILED",
             Self::CanvasRecovery => "PHASE012_PACKAGED_UI_CANVAS_RECOVERY_FAILED",
+            Self::CanvasRecoveryOpen => "PHASE017_PACKAGED_UI_CANVAS_RECOVERY_OPEN_FAILED",
+            Self::CanvasRecoveryDetect => "PHASE017_PACKAGED_UI_CANVAS_RECOVERY_DETECT_FAILED",
+            Self::CanvasRecoveryApply => "PHASE017_PACKAGED_UI_CANVAS_RECOVERY_APPLY_FAILED",
             Self::Assets => "PHASE012_PACKAGED_UI_ASSETS_FAILED",
             Self::AssetOpen => "PHASE012_PACKAGED_UI_ASSET_OPEN_FAILED",
             Self::AssetImport => "PHASE012_PACKAGED_UI_ASSET_IMPORT_FAILED",
+            Self::AssetImportReadback => "PHASE015_PACKAGED_UI_ASSET_IMPORT_READBACK_FAILED",
+            Self::AssetImportOperation => "PHASE015_PACKAGED_UI_ASSET_IMPORT_OPERATION_FAILED",
+            Self::AssetImportScope => "PHASE015_PACKAGED_UI_ASSET_IMPORT_SCOPE_FAILED",
+            Self::AssetImportPresentation => {
+                "PHASE015_PACKAGED_UI_ASSET_IMPORT_PRESENTATION_FAILED"
+            }
             Self::AssetDetail => "PHASE012_PACKAGED_UI_ASSET_DETAIL_FAILED",
             Self::AssetPreview => "PHASE012_PACKAGED_UI_ASSET_PREVIEW_FAILED",
             Self::AssetUnlink => "PHASE012_PACKAGED_UI_ASSET_UNLINK_FAILED",
@@ -531,6 +708,13 @@ impl PackagedUiSmokeFailureStage {
             Self::RestorePreview => "PHASE012_PACKAGED_UI_RESTORE_PREVIEW_FAILED",
             Self::RestoreConfirm => "PHASE012_PACKAGED_UI_RESTORE_CONFIRM_FAILED",
             Self::RestoreReopen => "PHASE012_PACKAGED_UI_RESTORE_REOPEN_FAILED",
+            Self::RestoreHome => "PHASE016_PACKAGED_UI_RESTORE_HOME_FAILED",
+            Self::RestoreDocument => "PHASE016_PACKAGED_UI_RESTORE_DOCUMENT_FAILED",
+            Self::RestoreSearch => "PHASE016_PACKAGED_UI_RESTORE_SEARCH_FAILED",
+            Self::RestoreGraph => "PHASE016_PACKAGED_UI_RESTORE_GRAPH_FAILED",
+            Self::RestoreCanvas => "PHASE016_PACKAGED_UI_RESTORE_CANVAS_FAILED",
+            Self::RestoreAssets => "PHASE016_PACKAGED_UI_RESTORE_ASSETS_FAILED",
+            Self::VisualEvidence => "PHASE016_PACKAGED_UI_VISUAL_EVIDENCE_FAILED",
             Self::Measurement => "PHASE012_PACKAGED_UI_MEASUREMENT_FAILED",
         }
     }
@@ -545,7 +729,18 @@ pub enum PackagedUiSmokeErrorCode {
     ActionCoverageIncomplete,
     DocumentVersionWorkflowMissing,
     DocumentAttachmentWorkflowMissing,
+    AttachmentImportEvidenceMissing,
+    AttachmentCurrentReadbackMissing,
+    AttachmentDocumentReadbackMissing,
+    AttachmentRestartReadbackMissing,
+    CanvasTextEditReadbackMissing,
+    CanvasTextRestartReadbackMissing,
+    GraphLinkFixtureEvidenceMissing,
+    GraphLocalEdgeEvidenceMissing,
+    GraphGlobalEdgeEvidenceMissing,
+    GraphSafeLabelsEvidenceMissing,
     KeyboardDocumentWorkflowMissing,
+    VisualEvidenceMissing,
 }
 
 impl PackagedUiSmokeErrorCode {
@@ -562,14 +757,55 @@ impl PackagedUiSmokeErrorCode {
             Self::DocumentAttachmentWorkflowMissing => {
                 "PHASE012_PACKAGED_UI_DOCUMENT_ATTACHMENT_WORKFLOW_MISSING"
             }
+            Self::AttachmentImportEvidenceMissing => {
+                "PHASE015_PACKAGED_UI_ATTACHMENT_IMPORT_EVIDENCE_MISSING"
+            }
+            Self::AttachmentCurrentReadbackMissing => {
+                "PHASE015_PACKAGED_UI_ATTACHMENT_CURRENT_READBACK_MISSING"
+            }
+            Self::AttachmentDocumentReadbackMissing => {
+                "PHASE015_PACKAGED_UI_ATTACHMENT_DOCUMENT_READBACK_MISSING"
+            }
+            Self::AttachmentRestartReadbackMissing => {
+                "PHASE015_PACKAGED_UI_ATTACHMENT_RESTART_READBACK_MISSING"
+            }
+            Self::CanvasTextEditReadbackMissing => {
+                "PHASE017_PACKAGED_UI_CANVAS_TEXT_EDIT_READBACK_MISSING"
+            }
+            Self::CanvasTextRestartReadbackMissing => {
+                "PHASE017_PACKAGED_UI_CANVAS_TEXT_RESTART_READBACK_MISSING"
+            }
+            Self::GraphLinkFixtureEvidenceMissing => {
+                "PHASE015_PACKAGED_UI_GRAPH_LINK_FIXTURE_EVIDENCE_MISSING"
+            }
+            Self::GraphLocalEdgeEvidenceMissing => {
+                "PHASE015_PACKAGED_UI_GRAPH_LOCAL_EDGE_EVIDENCE_MISSING"
+            }
+            Self::GraphGlobalEdgeEvidenceMissing => {
+                "PHASE015_PACKAGED_UI_GRAPH_GLOBAL_EDGE_EVIDENCE_MISSING"
+            }
+            Self::GraphSafeLabelsEvidenceMissing => {
+                "PHASE015_PACKAGED_UI_GRAPH_SAFE_LABELS_EVIDENCE_MISSING"
+            }
             Self::KeyboardDocumentWorkflowMissing => {
                 "PHASE012_PACKAGED_UI_KEYBOARD_DOCUMENT_WORKFLOW_MISSING"
             }
+            Self::VisualEvidenceMissing => "PHASE016_PACKAGED_UI_VISUAL_EVIDENCE_MISSING",
         }
     }
 }
 
 pub fn validate_packaged_ui_smoke_report(
+    report: PackagedUiSmokeReport,
+) -> Result<(), PackagedUiSmokeErrorCode> {
+    validate_packaged_ui_smoke_initial_report(report)?;
+    if !report.attachment_restart_readback_verified {
+        return Err(PackagedUiSmokeErrorCode::AttachmentRestartReadbackMissing);
+    }
+    Ok(())
+}
+
+pub fn validate_packaged_ui_smoke_initial_report(
     report: PackagedUiSmokeReport,
 ) -> Result<(), PackagedUiSmokeErrorCode> {
     if !report.home_ready || !report.graph_ready || !report.canvas_ready || !report.assets_ready {
@@ -581,8 +817,32 @@ pub fn validate_packaged_ui_smoke_report(
     if !report.document_attachment_workflow_verified {
         return Err(PackagedUiSmokeErrorCode::DocumentAttachmentWorkflowMissing);
     }
+    if !report.attachment_import_completed {
+        return Err(PackagedUiSmokeErrorCode::AttachmentImportEvidenceMissing);
+    }
+    if !report.attachment_current_readback_verified {
+        return Err(PackagedUiSmokeErrorCode::AttachmentCurrentReadbackMissing);
+    }
+    if !report.attachment_document_readback_verified {
+        return Err(PackagedUiSmokeErrorCode::AttachmentDocumentReadbackMissing);
+    }
     if !report.keyboard_document_workflow_verified {
         return Err(PackagedUiSmokeErrorCode::KeyboardDocumentWorkflowMissing);
+    }
+    if !report.graph_link_fixture_saved {
+        return Err(PackagedUiSmokeErrorCode::GraphLinkFixtureEvidenceMissing);
+    }
+    if !report.graph_local_edge_verified {
+        return Err(PackagedUiSmokeErrorCode::GraphLocalEdgeEvidenceMissing);
+    }
+    if !report.graph_global_edge_verified {
+        return Err(PackagedUiSmokeErrorCode::GraphGlobalEdgeEvidenceMissing);
+    }
+    if !report.graph_safe_labels_verified {
+        return Err(PackagedUiSmokeErrorCode::GraphSafeLabelsEvidenceMissing);
+    }
+    if !report.canvas_text_edit_readback_verified {
+        return Err(PackagedUiSmokeErrorCode::CanvasTextEditReadbackMissing);
     }
     if report.sample_count != 200 {
         return Err(PackagedUiSmokeErrorCode::SampleCountInvalid);
@@ -599,9 +859,170 @@ pub fn validate_packaged_ui_smoke_report(
     Ok(())
 }
 
+pub const fn validate_packaged_ui_smoke_restart_report(
+    report: PackagedUiSmokeRestartReport,
+) -> Result<(), PackagedUiSmokeErrorCode> {
+    if !report.attachment_restart_readback_verified {
+        return Err(PackagedUiSmokeErrorCode::AttachmentRestartReadbackMissing);
+    }
+    if !report.canvas_text_restart_readback_verified {
+        return Err(PackagedUiSmokeErrorCode::CanvasTextRestartReadbackMissing);
+    }
+    if report.error_count != 0 {
+        return Err(PackagedUiSmokeErrorCode::UiErrorReported);
+    }
+    Ok(())
+}
+
 pub struct DesktopProjectionRepairOperationRuntime {
     repository: Mutex<DurableProjectionRepairRepository>,
     ids: Mutex<DesktopRepairIdSource>,
+}
+
+const DESKTOP_CANVAS_GRAPH_STARTUP_RECOVERY_LIMIT: usize = 1_000;
+
+#[derive(Debug, Clone)]
+pub struct DesktopCanvasCatalogRuntime {
+    root: PathBuf,
+    max_limit: usize,
+}
+
+impl DesktopCanvasCatalogRuntime {
+    pub fn new(root: PathBuf, max_limit: usize) -> Result<Self, &'static str> {
+        if max_limit == 0 {
+            return Err("CANVAS_CATALOG_INVALID_LIMIT");
+        }
+        Ok(Self { root, max_limit })
+    }
+
+    pub fn query(
+        &self,
+        request: DesktopCanvasCatalogQueryRequestDto,
+    ) -> DesktopCanvasCatalogResponse {
+        if request.limit == 0 || request.limit > self.max_limit {
+            return DesktopCanvasCatalogResponse::failure("CANVAS_CATALOG_INVALID_LIMIT", false);
+        }
+        let catalog = DurableCanvasRepository::new(self.root.clone());
+        let selection = DurableLastCanvasSelection::new(self.root.clone());
+        match ResolveInitialCanvasUsecase::new().execute(
+            ResolveInitialCanvasInput::new(
+                &request.workspace_id,
+                request.limit,
+                request.include_archived,
+            ),
+            &catalog,
+            &selection,
+        ) {
+            Ok(output) => DesktopCanvasCatalogResponse {
+                ok: true,
+                data: Some(DesktopCanvasCatalogDataDto {
+                    entries: output
+                        .entries()
+                        .iter()
+                        .map(|entry| DesktopCanvasCatalogEntryDto {
+                            canvas_id: entry.canvas_id().as_str().to_string(),
+                            title: entry.title().as_str().to_string(),
+                            lifecycle: format!("{:?}", entry.lifecycle()).to_lowercase(),
+                            revision: entry.revision().value(),
+                        })
+                        .collect(),
+                    selected_canvas_id: output.selected_canvas_id().map(str::to_string),
+                    selection_source: match output.selection_source() {
+                        ResolvedCanvasSelectionSource::LastUsed => "last_used",
+                        ResolvedCanvasSelectionSource::Fallback => "fallback",
+                        ResolvedCanvasSelectionSource::Empty => "empty",
+                    }
+                    .to_string(),
+                }),
+                selected_canvas_id: output.selected_canvas_id().map(str::to_string),
+                error_code: None,
+                retryable: false,
+            },
+            Err(error) => DesktopCanvasCatalogResponse::failure(error.code(), error.retryable()),
+        }
+    }
+
+    pub fn select(
+        &self,
+        request: DesktopCanvasCatalogSelectRequestDto,
+    ) -> DesktopCanvasCatalogResponse {
+        let catalog = DurableCanvasRepository::new(self.root.clone());
+        let mut selection = DurableLastCanvasSelection::new(self.root.clone());
+        match SelectCanvasUsecase::new().execute(
+            SelectCanvasInput::new(&request.workspace_id, &request.canvas_id, self.max_limit),
+            &catalog,
+            &mut selection,
+        ) {
+            Ok(output) => DesktopCanvasCatalogResponse {
+                ok: true,
+                data: None,
+                selected_canvas_id: Some(output.selected_canvas_id().to_string()),
+                error_code: None,
+                retryable: false,
+            },
+            Err(error) => DesktopCanvasCatalogResponse::failure(
+                error.code(),
+                matches!(
+                    error,
+                    SelectCanvasError::CatalogUnavailable | SelectCanvasError::SelectionUnavailable
+                ),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCanvasCatalogQueryRequestDto {
+    pub workspace_id: String,
+    pub limit: usize,
+    pub include_archived: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCanvasCatalogSelectRequestDto {
+    pub workspace_id: String,
+    pub canvas_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCanvasCatalogEntryDto {
+    pub canvas_id: String,
+    pub title: String,
+    pub lifecycle: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCanvasCatalogDataDto {
+    pub entries: Vec<DesktopCanvasCatalogEntryDto>,
+    pub selected_canvas_id: Option<String>,
+    pub selection_source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCanvasCatalogResponse {
+    pub ok: bool,
+    pub data: Option<DesktopCanvasCatalogDataDto>,
+    pub selected_canvas_id: Option<String>,
+    pub error_code: Option<String>,
+    pub retryable: bool,
+}
+
+impl DesktopCanvasCatalogResponse {
+    fn failure(error_code: &str, retryable: bool) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            selected_canvas_id: None,
+            error_code: Some(error_code.to_string()),
+            retryable,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -610,6 +1031,7 @@ pub struct DesktopCanvasRuntime {
     policy: CanvasMutationPolicy,
     arrange_policy: CanvasAutoArrangePolicy,
     document_body_policy: DocumentBodyPolicy,
+    graph_policy: CanvasGraphProjectionPolicy,
     product_events: Arc<Mutex<Vec<DesktopCanvasProductEvent>>>,
 }
 
@@ -647,13 +1069,33 @@ impl DesktopCanvasRuntime {
             .map_err(|_| "CANVAS_INVALID_POLICY")?;
         let document_body_policy =
             DocumentBodyPolicy::new(4 * 1024 * 1024).map_err(|_| "CANVAS_INVALID_POLICY")?;
-        Ok(Self {
+        let graph_policy =
+            CanvasGraphProjectionPolicy::new(1000).map_err(|_| "CANVAS_INVALID_POLICY")?;
+        let runtime = Self {
             root,
             policy,
             arrange_policy,
             document_body_policy,
+            graph_policy,
             product_events: Arc::new(Mutex::new(Vec::new())),
-        })
+        };
+        runtime.recover_graph_relations()?;
+        Ok(runtime)
+    }
+
+    fn recover_graph_relations(&self) -> Result<(), &'static str> {
+        let repository = DurableCanvasRepository::new(self.root.clone());
+        let records = repository
+            .list_current_canvas_records(DESKTOP_CANVAS_GRAPH_STARTUP_RECOVERY_LIMIT)
+            .map_err(|_| "CANVAS_GRAPH_STARTUP_RECOVERY_FAILED")?;
+        for discovered in records {
+            self.project_graph_relations(
+                discovered.workspace_id().as_str(),
+                discovered.record().clone(),
+            )
+            .map_err(|_| "CANVAS_GRAPH_STARTUP_RECOVERY_FAILED")?;
+        }
+        Ok(())
     }
     pub fn product_events(&self) -> Vec<DesktopCanvasProductEvent> {
         self.product_events
@@ -692,6 +1134,12 @@ impl DesktopCanvasRuntime {
                 node_limit,
                 edge_limit,
             } => {
+                if let Err(error) = GetCanvasRecordUsecase::new().execute(
+                    GetCanvasRecordInput::new(&workspace_id, &canvas_id),
+                    &repository,
+                ) {
+                    return DesktopCanvasResponse::failure(CanvasRuntimeError::Lifecycle(error));
+                }
                 return match GetCanvasViewportUsecase::new().execute(
                     GetCanvasViewportInput::new(
                         &workspace_id,
@@ -991,6 +1439,27 @@ impl DesktopCanvasRuntime {
                 )
                 .map(|v| v.record().clone())
                 .map_err(CanvasRuntimeError::Mutation),
+            DesktopCanvasRequestDto::UpdateTextCard {
+                workspace_id,
+                canvas_id,
+                expected_revision,
+                node_id,
+                text,
+                ..
+            } => UpdateCanvasTextCardUsecase::new()
+                .execute(
+                    UpdateCanvasTextCardInput::new(
+                        &workspace_id,
+                        &canvas_id,
+                        expected_revision,
+                        &node_id,
+                        &text,
+                    ),
+                    &mut repository,
+                    &mut logger,
+                )
+                .map(|value| value.record().clone())
+                .map_err(CanvasRuntimeError::Mutation),
             DesktopCanvasRequestDto::UpdateViewport {
                 workspace_id,
                 canvas_id,
@@ -1032,6 +1501,15 @@ impl DesktopCanvasRuntime {
         };
         match result {
             Ok(record) => {
+                if write_canvas_id.is_some()
+                    && let Err(error) = self.project_graph_relations(&workspace_id, record.clone())
+                {
+                    let error = CanvasRuntimeError::GraphProjection(error);
+                    if let Some(canvas_id) = write_canvas_id.as_deref() {
+                        logger.write_failure(canvas_id, error.code());
+                    }
+                    return DesktopCanvasResponse::failure(error);
+                }
                 match self.resolve_target_presentations(&workspace_id, record.canvas().nodes()) {
                     Ok(presentations) => {
                         DesktopCanvasResponse::success(record, operation_id, &presentations)
@@ -1048,6 +1526,19 @@ impl DesktopCanvasRuntime {
                 DesktopCanvasResponse::failure(error)
             }
         }
+    }
+
+    fn project_graph_relations(
+        &self,
+        workspace_id: &str,
+        record: cabinet_ports::canvas_repository::CanvasRecord,
+    ) -> Result<(), CanvasGraphRelationProjectionError> {
+        ProjectCanvasGraphRelationsUsecase::new(self.graph_policy)
+            .execute(
+                ProjectCanvasGraphRelationsInput::new(workspace_id, record),
+                &mut DurableCanvasGraphRelationProjectionStore::new(self.root.clone()),
+            )
+            .map(|_| ())
     }
 
     fn resolve_target_presentations(
@@ -1189,6 +1680,14 @@ pub enum DesktopCanvasRequestDto {
         height: u32,
         operation_id: String,
     },
+    UpdateTextCard {
+        workspace_id: String,
+        canvas_id: String,
+        expected_revision: u64,
+        node_id: String,
+        text: String,
+        operation_id: String,
+    },
     UpdateViewport {
         workspace_id: String,
         canvas_id: String,
@@ -1222,6 +1721,7 @@ impl DesktopCanvasRequestDto {
             | Self::RemoveNode { workspace_id, .. }
             | Self::RemoveEdge { workspace_id, .. }
             | Self::UpdateNodeGeometry { workspace_id, .. }
+            | Self::UpdateTextCard { workspace_id, .. }
             | Self::UpdateViewport { workspace_id, .. }
             | Self::AutoArrange { workspace_id, .. } => workspace_id,
         }
@@ -1238,6 +1738,7 @@ impl DesktopCanvasRequestDto {
             | Self::RemoveNode { operation_id, .. }
             | Self::RemoveEdge { operation_id, .. }
             | Self::UpdateNodeGeometry { operation_id, .. }
+            | Self::UpdateTextCard { operation_id, .. }
             | Self::UpdateViewport { operation_id, .. }
             | Self::AutoArrange { operation_id, .. } => Some(operation_id),
             Self::Create { .. }
@@ -1250,6 +1751,7 @@ impl DesktopCanvasRequestDto {
     fn write_canvas_id(&self) -> Option<&str> {
         match self {
             Self::Create { canvas_id, .. }
+            | Self::Recover { canvas_id, .. }
             | Self::Rename { canvas_id, .. }
             | Self::Archive { canvas_id, .. }
             | Self::AddDocumentNode { canvas_id, .. }
@@ -1259,12 +1761,10 @@ impl DesktopCanvasRequestDto {
             | Self::RemoveNode { canvas_id, .. }
             | Self::RemoveEdge { canvas_id, .. }
             | Self::UpdateNodeGeometry { canvas_id, .. }
+            | Self::UpdateTextCard { canvas_id, .. }
             | Self::UpdateViewport { canvas_id, .. }
             | Self::AutoArrange { canvas_id, .. } => Some(canvas_id),
-            Self::Get { .. }
-            | Self::Recover { .. }
-            | Self::GetViewport { .. }
-            | Self::PreviewAutoArrange { .. } => None,
+            Self::Get { .. } | Self::GetViewport { .. } | Self::PreviewAutoArrange { .. } => None,
         }
     }
 }
@@ -1321,8 +1821,12 @@ impl DesktopCanvasResponse {
                     | CanvasRuntimeError::TargetPresentation(
                         ResolveCanvasTargetPresentationsError::StorageUnavailable
                     )
+                    | CanvasRuntimeError::GraphProjection(
+                        CanvasGraphRelationProjectionError::StorageUnavailable
+                    )
             ),
             recovery_required: matches!(error, CanvasRuntimeError::Recovery(_))
+                || matches!(error, CanvasRuntimeError::GraphProjection(_))
                 || matches!(
                     code,
                     "CANVAS_RECOVERY_REQUIRED" | "CANVAS_TARGET_RECOVERY_REQUIRED"
@@ -1587,6 +2091,7 @@ enum CanvasRuntimeError {
     Recovery(CanvasRecoveryError),
     Query(GetCanvasViewportError),
     TargetPresentation(ResolveCanvasTargetPresentationsError),
+    GraphProjection(CanvasGraphRelationProjectionError),
 }
 impl CanvasRuntimeError {
     fn code(self) -> &'static str {
@@ -1596,6 +2101,20 @@ impl CanvasRuntimeError {
             Self::Recovery(v) => v.code(),
             Self::Query(v) => v.code(),
             Self::TargetPresentation(v) => v.code(),
+            Self::GraphProjection(error) => match error {
+                CanvasGraphRelationProjectionError::InvalidInput => {
+                    "CANVAS_GRAPH_PROJECTION_INVALID"
+                }
+                CanvasGraphRelationProjectionError::RelationLimitExceeded => {
+                    "CANVAS_GRAPH_PROJECTION_LIMIT_EXCEEDED"
+                }
+                CanvasGraphRelationProjectionError::StorageUnavailable => {
+                    "CANVAS_GRAPH_PROJECTION_RECOVERY_REQUIRED"
+                }
+                CanvasGraphRelationProjectionError::CorruptedProjection => {
+                    "CANVAS_GRAPH_PROJECTION_CORRUPTED"
+                }
+            },
         }
     }
 }
@@ -1940,6 +2459,7 @@ struct DesktopProjectionState {
     versions: LocalVersionStore,
     documents: LocalDocumentRepository,
     pointer: LocalCurrentDocumentVersionPointer,
+    current_documents: LocalCurrentDocumentProjectionCatalog,
     catalog: DurableDocumentLinkCatalog,
     associations: DurableAssetAssociationCatalog,
     search: DurableLocalSearchIndex,
@@ -1988,6 +2508,9 @@ impl DesktopProjectionRuntime {
                     body_policy,
                 ),
                 pointer: LocalCurrentDocumentVersionPointer::new(app_data_root.join(pointer_root)),
+                current_documents: LocalCurrentDocumentProjectionCatalog::new(
+                    app_data_root.clone(),
+                ),
                 catalog: DurableDocumentLinkCatalog::new(app_data_root.clone()),
                 associations: DurableAssetAssociationCatalog::new(app_data_root.clone()),
                 search: DurableLocalSearchIndex::new(app_data_root.clone(), body_policy),
@@ -2007,6 +2530,7 @@ impl DesktopProjectionRuntime {
             versions,
             documents,
             pointer,
+            current_documents: _,
             catalog,
             associations,
             search,
@@ -2106,6 +2630,45 @@ impl DesktopProjectionRuntime {
             }
         }
     }
+
+    pub fn reconcile_current(
+        &self,
+        workspace_id: &str,
+        document_limit: usize,
+    ) -> DesktopProjectionReconcileResponse {
+        let Ok(mut state) = self.state.lock() else {
+            return DesktopProjectionReconcileResponse::failure(
+                "projection_reconcile.runtime_unavailable",
+                true,
+            );
+        };
+        let DesktopProjectionState {
+            current_documents,
+            pointer,
+            work,
+            ..
+        } = &mut *state;
+        match ReconcileCurrentProjectionsUsecase::new().execute(
+            ReconcileCurrentProjectionsInput::new(workspace_id, document_limit),
+            current_documents,
+            pointer,
+            work,
+        ) {
+            Ok(output) => DesktopProjectionReconcileResponse {
+                ok: true,
+                document_count: output.document_count(),
+                ready_document_count: output.ready_document_count(),
+                enqueued_count: output.enqueued_count(),
+                reset_count: output.reset_count(),
+                already_active_count: output.already_active_count(),
+                error_code: None,
+                retryable: false,
+            },
+            Err(error) => {
+                DesktopProjectionReconcileResponse::failure(error.code(), error.retryable())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2154,6 +2717,34 @@ pub struct DesktopProjectionReindexResponse {
     pub already_active_count: usize,
     pub error_code: Option<String>,
     pub retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopProjectionReconcileResponse {
+    pub ok: bool,
+    pub document_count: usize,
+    pub ready_document_count: usize,
+    pub enqueued_count: usize,
+    pub reset_count: usize,
+    pub already_active_count: usize,
+    pub error_code: Option<String>,
+    pub retryable: bool,
+}
+
+impl DesktopProjectionReconcileResponse {
+    fn failure(code: &'static str, retryable: bool) -> Self {
+        Self {
+            ok: false,
+            document_count: 0,
+            ready_document_count: 0,
+            enqueued_count: 0,
+            reset_count: 0,
+            already_active_count: 0,
+            error_code: Some(code.to_string()),
+            retryable,
+        }
+    }
 }
 impl DesktopProjectionReindexResponse {
     fn failure(code: &'static str, retryable: bool) -> Self {
@@ -5134,6 +5725,7 @@ pub struct DesktopAssetImportResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     pub retryable: bool,
+    pub repair_required: bool,
 }
 
 impl DesktopAssetImportResponse {
@@ -5145,6 +5737,7 @@ impl DesktopAssetImportResponse {
             state: Some("selected".to_string()),
             error_code: None,
             retryable: false,
+            repair_required: false,
         }
     }
 
@@ -5156,6 +5749,7 @@ impl DesktopAssetImportResponse {
             state: Some(asset_import_state_name(operation.state()).to_string()),
             error_code: None,
             retryable: false,
+            repair_required: false,
         }
     }
 
@@ -5167,6 +5761,7 @@ impl DesktopAssetImportResponse {
             state: Some("completed".to_string()),
             error_code: None,
             retryable: false,
+            repair_required: false,
         }
     }
 
@@ -5179,9 +5774,10 @@ impl DesktopAssetImportResponse {
             ok: true,
             operation_id: Some(operation_id.to_string()),
             asset_id: Some(asset_id.to_string()),
-            state: Some("completed".to_string()),
+            state: Some("recovery_required".to_string()),
             error_code: Some(error.code().to_string()),
             retryable: error.retryable(),
+            repair_required: true,
         }
     }
 
@@ -5193,9 +5789,10 @@ impl DesktopAssetImportResponse {
             ok: true,
             operation_id: Some(operation.operation_id().as_str().to_string()),
             asset_id: None,
-            state: Some(asset_import_state_name(operation.state()).to_string()),
+            state: Some("recovery_required".to_string()),
             error_code: Some(error.code().to_string()),
             retryable: error.retryable(),
+            repair_required: true,
         }
     }
 
@@ -5207,6 +5804,7 @@ impl DesktopAssetImportResponse {
             state: Some("failed".to_string()),
             error_code: Some(error_code.to_string()),
             retryable,
+            repair_required: false,
         }
     }
 }
@@ -5462,6 +6060,250 @@ pub struct DesktopDocumentNavigatorItemDto {
     pub favorite: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct DesktopDocumentSearchRuntime {
+    search_index: DurableLocalSearchIndex,
+}
+
+impl DesktopDocumentSearchRuntime {
+    pub fn new(root: PathBuf, body_policy: DocumentBodyPolicy) -> Self {
+        Self {
+            search_index: DurableLocalSearchIndex::new(root, body_policy),
+        }
+    }
+
+    pub fn execute(
+        &self,
+        request: DesktopDocumentSearchRequestDto,
+    ) -> DesktopDocumentSearchCommandResponse {
+        let workspace_id = request.workspace_id.clone();
+        let text = request.text.clone();
+        match SearchDocumentsUsecase::new().execute(
+            SearchDocumentsInput::new(&workspace_id, &text, request.limit),
+            &self.search_index,
+        ) {
+            Ok(output) => {
+                DesktopDocumentSearchCommandResponse::success(workspace_id, text, output.page())
+            }
+            Err(error) => DesktopDocumentSearchCommandResponse::failure(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DesktopDocumentSearchRequestDto {
+    pub workspace_id: String,
+    pub text: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentSearchCommandResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<DesktopDocumentSearchDataDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    pub retryable: bool,
+}
+
+impl DesktopDocumentSearchCommandResponse {
+    fn success(
+        workspace_id: String,
+        text: String,
+        page: &cabinet_ports::search_index::SearchPage,
+    ) -> Self {
+        Self {
+            ok: true,
+            data: Some(DesktopDocumentSearchDataDto {
+                query_name: "search-documents".to_string(),
+                workspace_id: workspace_id.clone(),
+                text,
+                results: page
+                    .results()
+                    .iter()
+                    .map(|result| DesktopDocumentSearchResultDto {
+                        workspace_id: workspace_id.clone(),
+                        document_id: result.document_id().as_str().to_string(),
+                        title: result.title().as_str().to_string(),
+                        path: result.path().as_str().to_string(),
+                        snippet: result.snippet().to_string(),
+                        score: result.score(),
+                    })
+                    .collect(),
+            }),
+            error_code: None,
+            retryable: false,
+        }
+    }
+
+    fn failure(error: SearchDocumentsError) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error_code: Some(
+                match error {
+                    SearchDocumentsError::InvalidInput => "SEARCH_INVALID_INPUT",
+                    SearchDocumentsError::StorageUnavailable => "SEARCH_INDEX_UNAVAILABLE",
+                }
+                .to_string(),
+            ),
+            retryable: error == SearchDocumentsError::StorageUnavailable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentSearchDataDto {
+    pub query_name: String,
+    pub workspace_id: String,
+    pub text: String,
+    pub results: Vec<DesktopDocumentSearchResultDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDocumentSearchResultDto {
+    pub workspace_id: String,
+    pub document_id: String,
+    pub title: String,
+    pub path: String,
+    pub snippet: String,
+    pub score: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DesktopAssetSearchRuntime {
+    metadata: DurableAssetMetadataCatalog,
+}
+
+impl DesktopAssetSearchRuntime {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            metadata: DurableAssetMetadataCatalog::new(root),
+        }
+    }
+
+    pub fn execute(&self, request: DesktopAssetSearchRequestDto) -> DesktopAssetSearchResponse {
+        let workspace_id = request.workspace_id.clone();
+        let workspace = match WorkspaceId::new(&workspace_id) {
+            Ok(value) => value,
+            Err(_) => {
+                return DesktopAssetSearchResponse::failure(AssetSearchCommandFailure {
+                    error_code: "ASSET_SEARCH_INVALID_INPUT",
+                    retryable: false,
+                    product_log_event_name: None,
+                });
+            }
+        };
+        let mut cursor = None;
+        let mut index = LocalAssetSearchIndex::default();
+        loop {
+            let page = match self.metadata.list(&workspace, cursor.as_deref(), 100) {
+                Ok(page) => page,
+                Err(_) => {
+                    return DesktopAssetSearchResponse::failure(AssetSearchCommandFailure {
+                        error_code: "ASSET_SEARCH_STORAGE_UNAVAILABLE",
+                        retryable: true,
+                        product_log_event_name: None,
+                    });
+                }
+            };
+            for record in page.records() {
+                index.upsert_asset(&workspace, record.clone());
+            }
+            cursor = page.next_cursor().map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        match execute_asset_search_command(
+            AssetSearchCommandRequest {
+                workspace_id,
+                text: request.text,
+                limit: request.limit as u16,
+            },
+            &index,
+        ) {
+            Ok(output) => DesktopAssetSearchResponse::success(output),
+            Err(error) => DesktopAssetSearchResponse::failure(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DesktopAssetSearchRequestDto {
+    pub workspace_id: String,
+    pub text: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopAssetSearchResponse {
+    pub ok: bool,
+    pub data: Option<DesktopAssetSearchDataDto>,
+    pub error_code: Option<String>,
+    pub retryable: bool,
+}
+
+impl DesktopAssetSearchResponse {
+    fn success(output: cabinet_platform::asset_search_command::AssetSearchCommandResult) -> Self {
+        Self {
+            ok: true,
+            data: Some(DesktopAssetSearchDataDto {
+                query_name: "search-assets".to_string(),
+                workspace_id: output.workspace_id,
+                text: output.text,
+                results: output
+                    .results
+                    .into_iter()
+                    .map(|result| DesktopAssetSearchResultDto {
+                        asset_id: result.asset_id,
+                        file_name: result.file_name,
+                        media_type: result.media_type,
+                        byte_size: result.byte_size,
+                        score: result.score,
+                    })
+                    .collect(),
+            }),
+            error_code: None,
+            retryable: false,
+        }
+    }
+
+    fn failure(error: AssetSearchCommandFailure) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error_code: Some(error.error_code.to_string()),
+            retryable: error.retryable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopAssetSearchDataDto {
+    pub query_name: String,
+    pub workspace_id: String,
+    pub text: String,
+    pub results: Vec<DesktopAssetSearchResultDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopAssetSearchResultDto {
+    pub asset_id: String,
+    pub file_name: String,
+    pub media_type: String,
+    pub byte_size: u64,
+    pub score: u32,
+}
+
 fn parse_navigator_view(value: &str) -> Option<DocumentNavigatorCommandView> {
     match value {
         "Tree" => Some(DocumentNavigatorCommandView::Tree),
@@ -5484,6 +6326,7 @@ const fn navigator_view_name(view: DocumentNavigatorCommandView) -> &'static str
 }
 
 pub struct DesktopDocumentAttachmentMutationRuntime {
+    app_data_root: PathBuf,
     runtime: Mutex<LocalMutateDocumentAttachmentsRuntime>,
     metadata: DurableAssetMetadataCatalog,
 }
@@ -5492,11 +6335,23 @@ impl DesktopDocumentAttachmentMutationRuntime {
     pub fn new(app_data_root: PathBuf, max_body_bytes: usize) -> Result<Self, &'static str> {
         let body_policy = DocumentBodyPolicy::new(max_body_bytes)
             .map_err(|_| "DOCUMENT_ATTACHMENT_INVALID_BODY_POLICY")?;
+        let mut runtime =
+            LocalMutateDocumentAttachmentsRuntime::new(app_data_root.clone(), body_policy);
+        let recovered = runtime
+            .recover_committed(1000)
+            .map_err(|_| "DOCUMENT_ATTACHMENT_STARTUP_RECOVERY_FAILED")?;
+        for candidate in recovered.recovered() {
+            request_authoritative_asset_graph_reindex(
+                &app_data_root,
+                candidate.workspace_id().as_str(),
+                candidate.document_id().as_str(),
+                candidate.change_kind(),
+            )
+            .map_err(|_| "DOCUMENT_ATTACHMENT_STARTUP_RECOVERY_FAILED")?;
+        }
         Ok(Self {
-            runtime: Mutex::new(LocalMutateDocumentAttachmentsRuntime::new(
-                app_data_root.clone(),
-                body_policy,
-            )),
+            app_data_root: app_data_root.clone(),
+            runtime: Mutex::new(runtime),
             metadata: DurableAssetMetadataCatalog::new(app_data_root),
         })
     }
@@ -5505,7 +6360,7 @@ impl DesktopDocumentAttachmentMutationRuntime {
         &self,
         request: DesktopDocumentAttachmentMutationRequestDto,
     ) -> DesktopDocumentAttachmentMutationResponse {
-        let input = match request {
+        let (input, workspace_id, document_id) = match request {
             DesktopDocumentAttachmentMutationRequestDto::Link {
                 operation_id,
                 workspace_id,
@@ -5539,15 +6394,19 @@ impl DesktopDocumentAttachmentMutationRuntime {
                         );
                     }
                 }
-                MutateDocumentAttachmentsInput::link(
-                    &operation_id,
-                    &workspace_id,
-                    &document_id,
-                    &expected_current_version_token,
-                    &asset_id,
-                    &label,
-                    "local-user",
-                    "첨부 파일 연결",
+                (
+                    MutateDocumentAttachmentsInput::link(
+                        &operation_id,
+                        &workspace_id,
+                        &document_id,
+                        &expected_current_version_token,
+                        &asset_id,
+                        &label,
+                        "local-user",
+                        "첨부 파일 연결",
+                    ),
+                    workspace_id,
+                    document_id,
                 )
             }
             DesktopDocumentAttachmentMutationRequestDto::Unlink {
@@ -5556,14 +6415,18 @@ impl DesktopDocumentAttachmentMutationRuntime {
                 document_id,
                 expected_current_version_token,
                 asset_id,
-            } => MutateDocumentAttachmentsInput::unlink(
-                &operation_id,
-                &workspace_id,
-                &document_id,
-                &expected_current_version_token,
-                &asset_id,
-                "local-user",
-                "첨부 파일 해제",
+            } => (
+                MutateDocumentAttachmentsInput::unlink(
+                    &operation_id,
+                    &workspace_id,
+                    &document_id,
+                    &expected_current_version_token,
+                    &asset_id,
+                    "local-user",
+                    "첨부 파일 해제",
+                ),
+                workspace_id,
+                document_id,
             ),
         };
         let mut runtime = match self.runtime.lock() {
@@ -5577,20 +6440,45 @@ impl DesktopDocumentAttachmentMutationRuntime {
             }
         };
         match runtime.execute(input) {
-            Ok(output) => DesktopDocumentAttachmentMutationResponse::success(
-                match output.kind() {
+            Ok(output) => {
+                let delta = output.delta();
+                let change_kind = match delta {
+                    AttachmentSnapshotDelta::Unlinked => ProjectionChangeKind::AssetDetached,
+                    AttachmentSnapshotDelta::Linked
+                    | AttachmentSnapshotDelta::Relabeled
+                    | AttachmentSnapshotDelta::Unchanged => ProjectionChangeKind::AssetAttached,
+                };
+                if request_authoritative_asset_graph_reindex(
+                    &self.app_data_root,
+                    &workspace_id,
+                    &document_id,
+                    change_kind,
+                )
+                .is_err()
+                {
+                    return DesktopDocumentAttachmentMutationResponse::failure(
+                        "DOCUMENT_ATTACHMENT_RECOVERY_REQUIRED",
+                        true,
+                        true,
+                    );
+                }
+                let outcome_name = match output.kind() {
                     MutateDocumentAttachmentsOutcomeKind::Fresh => "fresh",
                     MutateDocumentAttachmentsOutcomeKind::Replayed => "replayed",
                     MutateDocumentAttachmentsOutcomeKind::NoChange => "no_change",
-                },
-                match output.delta() {
-                    cabinet_domain::attachment_snapshot_mutation::AttachmentSnapshotDelta::Linked => "linked",
-                    cabinet_domain::attachment_snapshot_mutation::AttachmentSnapshotDelta::Relabeled => "relabeled",
-                    cabinet_domain::attachment_snapshot_mutation::AttachmentSnapshotDelta::Unlinked => "unlinked",
-                    cabinet_domain::attachment_snapshot_mutation::AttachmentSnapshotDelta::Unchanged => "unchanged",
-                },
-                output.revision_number().value(),
-            ),
+                };
+                let delta_name = match delta {
+                    AttachmentSnapshotDelta::Linked => "linked",
+                    AttachmentSnapshotDelta::Relabeled => "relabeled",
+                    AttachmentSnapshotDelta::Unlinked => "unlinked",
+                    AttachmentSnapshotDelta::Unchanged => "unchanged",
+                };
+                DesktopDocumentAttachmentMutationResponse::success(
+                    outcome_name,
+                    delta_name,
+                    output.revision_number().value(),
+                )
+            }
             Err(error) => map_document_attachment_mutation_error(error),
         }
     }
@@ -5830,7 +6718,36 @@ impl DesktopDocumentAssetsRuntime {
             &self.metadata,
             &DurableAssetAssociationCatalog::new(self.app_data_root.clone()),
         ) {
-            Ok(output) => DesktopAssetDetailResponse::success(output),
+            Ok(output) => {
+                let workspace_id = match WorkspaceId::new(&request.workspace_id) {
+                    Ok(value) => value,
+                    Err(_) => return DesktopAssetDetailResponse::invalid_title_request(),
+                };
+                let document_ids: Vec<DocumentId> = output
+                    .linked_documents()
+                    .iter()
+                    .map(|association| association.document_id().clone())
+                    .collect();
+                let linked_documents = match self
+                    .documents
+                    .get_current_titles(&workspace_id, &document_ids)
+                {
+                    Ok(lookups) => lookups
+                        .into_iter()
+                        .map(|lookup| DesktopAssetLinkedDocumentDto {
+                            document_id: lookup.document_id().as_str().to_string(),
+                            title: lookup.title().map(|title| title.as_str().to_string()),
+                            state: if lookup.title().is_some() {
+                                "available".to_string()
+                            } else {
+                                "missing".to_string()
+                            },
+                        })
+                        .collect(),
+                    Err(_) => return DesktopAssetDetailResponse::title_resolution_failure(),
+                };
+                DesktopAssetDetailResponse::success(output, linked_documents)
+            }
             Err(error) => DesktopAssetDetailResponse::failure(error),
         }
     }
@@ -6194,7 +7111,10 @@ impl DesktopAssetPreviewResponse {
     }
 }
 impl DesktopAssetDetailResponse {
-    fn success(output: cabinet_usecases::asset_lifecycle::GetAssetDetailOutput) -> Self {
+    fn success(
+        output: cabinet_usecases::asset_lifecycle::GetAssetDetailOutput,
+        linked_documents: Vec<DesktopAssetLinkedDocumentDto>,
+    ) -> Self {
         let record = output.record();
         Self {
             ok: true,
@@ -6212,6 +7132,7 @@ impl DesktopAssetDetailResponse {
                     .iter()
                     .map(|value| value.document_id().as_str().to_string())
                     .collect(),
+                linked_documents,
             }),
             error_code: None,
             retryable: false,
@@ -6223,6 +7144,24 @@ impl DesktopAssetDetailResponse {
             data: None,
             error_code: Some(error.code().to_string()),
             retryable: asset_lifecycle_retryable(error),
+        }
+    }
+
+    fn invalid_title_request() -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error_code: Some("asset_detail.invalid_input".to_string()),
+            retryable: false,
+        }
+    }
+
+    fn title_resolution_failure() -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error_code: Some("asset_detail.document_titles_unavailable".to_string()),
+            retryable: true,
         }
     }
 }
@@ -6239,6 +7178,16 @@ pub struct DesktopAssetDetailDto {
     pub extraction_status: String,
     pub reference_count: u64,
     pub linked_document_ids: Vec<String>,
+    pub linked_documents: Vec<DesktopAssetLinkedDocumentDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopAssetLinkedDocumentDto {
+    pub document_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -6404,19 +7353,253 @@ pub struct DesktopAssetMetadataDto {
     pub status: String,
 }
 
+type DesktopCompositeGraphProjectionStore = CompositeGraphProjectionStore<
+    DurableLocalGraphProjectionStore,
+    DurableCanvasGraphRelationProjectionStore,
+>;
+
+const DESKTOP_CANVAS_GRAPH_SOURCE_LIMIT: usize = 256;
+
+fn desktop_composite_graph_store(app_data_root: &Path) -> DesktopCompositeGraphProjectionStore {
+    CompositeGraphProjectionStore::new(
+        DurableLocalGraphProjectionStore::new(app_data_root.to_path_buf()),
+        DurableCanvasGraphRelationProjectionStore::new(app_data_root.to_path_buf()),
+        DESKTOP_CANVAS_GRAPH_SOURCE_LIMIT,
+    )
+    .expect("fixed desktop Canvas graph source policy must be valid")
+}
+
+const DESKTOP_GRAPH_PREFERENCE_SCHEMA_VERSION: u8 = 2;
+const DESKTOP_GRAPH_PREFERENCE_ROOT: &str = "ui-settings/graph";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopGraphCameraPreferenceDto {
+    pub center_x: f64,
+    pub center_y: f64,
+    pub zoom_percent: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopGraphPreferenceDto {
+    pub schema_version: u8,
+    pub depth: u8,
+    pub direction: String,
+    pub include_unresolved: bool,
+    pub include_assets: bool,
+    #[serde(default)]
+    pub include_external: bool,
+    pub camera: DesktopGraphCameraPreferenceDto,
+}
+
+impl Default for DesktopGraphPreferenceDto {
+    fn default() -> Self {
+        Self {
+            schema_version: DESKTOP_GRAPH_PREFERENCE_SCHEMA_VERSION,
+            depth: 1,
+            direction: "both".to_string(),
+            include_unresolved: true,
+            include_assets: true,
+            include_external: false,
+            camera: DesktopGraphCameraPreferenceDto {
+                center_x: 0.0,
+                center_y: 0.0,
+                zoom_percent: 100.0,
+            },
+        }
+    }
+}
+
+impl DesktopGraphPreferenceDto {
+    fn is_valid(&self) -> bool {
+        self.schema_version == DESKTOP_GRAPH_PREFERENCE_SCHEMA_VERSION
+            && matches!(self.depth, 1 | 2)
+            && matches!(self.direction.as_str(), "incoming" | "outgoing" | "both")
+            && self.camera.center_x.is_finite()
+            && self.camera.center_x.abs() <= 1_000_000.0
+            && self.camera.center_y.is_finite()
+            && self.camera.center_y.abs() <= 1_000_000.0
+            && self.camera.zoom_percent.is_finite()
+            && (25.0..=400.0).contains(&self.camera.zoom_percent)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopGraphPreferenceLoadRequestDto {
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopGraphPreferenceSaveRequestDto {
+    pub workspace_id: String,
+    pub preference: DesktopGraphPreferenceDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopGraphPreferenceLoadResponse {
+    pub ok: bool,
+    pub data: Option<DesktopGraphPreferenceDto>,
+    pub error_code: Option<String>,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopGraphPreferenceSaveDataDto {
+    pub saved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopGraphPreferenceSaveResponse {
+    pub ok: bool,
+    pub data: Option<DesktopGraphPreferenceSaveDataDto>,
+    pub error_code: Option<String>,
+    pub retryable: bool,
+}
+
+#[derive(Debug)]
+pub struct DesktopGraphPreferenceRuntime {
+    root: PathBuf,
+    write_lock: Mutex<()>,
+}
+
+impl DesktopGraphPreferenceRuntime {
+    pub fn new(app_data_root: PathBuf) -> Self {
+        Self {
+            root: app_data_root.join(DESKTOP_GRAPH_PREFERENCE_ROOT),
+            write_lock: Mutex::new(()),
+        }
+    }
+
+    pub fn load(
+        &self,
+        request: DesktopGraphPreferenceLoadRequestDto,
+    ) -> DesktopGraphPreferenceLoadResponse {
+        let Some(path) = self.preference_path(&request.workspace_id) else {
+            return graph_preference_load_failure("GRAPH_PREFERENCE_WORKSPACE_INVALID", false);
+        };
+        let preference = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<DesktopGraphPreferenceDto>(&bytes).ok())
+            .map(|mut preference| {
+                if preference.schema_version == 1 {
+                    preference.schema_version = DESKTOP_GRAPH_PREFERENCE_SCHEMA_VERSION;
+                    preference.include_external = false;
+                }
+                preference
+            })
+            .filter(DesktopGraphPreferenceDto::is_valid)
+            .unwrap_or_default();
+        DesktopGraphPreferenceLoadResponse {
+            ok: true,
+            data: Some(preference),
+            error_code: None,
+            retryable: false,
+        }
+    }
+
+    pub fn save(
+        &self,
+        request: DesktopGraphPreferenceSaveRequestDto,
+    ) -> DesktopGraphPreferenceSaveResponse {
+        let Some(path) = self.preference_path(&request.workspace_id) else {
+            return graph_preference_save_failure("GRAPH_PREFERENCE_WORKSPACE_INVALID", false);
+        };
+        if !request.preference.is_valid() {
+            return graph_preference_save_failure("GRAPH_PREFERENCE_INVALID", false);
+        }
+        let Ok(_guard) = self.write_lock.lock() else {
+            return graph_preference_save_failure("GRAPH_PREFERENCE_STORAGE_FAILED", true);
+        };
+        let Some(parent) = path.parent() else {
+            return graph_preference_save_failure("GRAPH_PREFERENCE_STORAGE_FAILED", false);
+        };
+        if fs::create_dir_all(parent).is_err() {
+            return graph_preference_save_failure("GRAPH_PREFERENCE_STORAGE_FAILED", true);
+        }
+        let temporary = path.with_extension("json.tmp");
+        let write_result = serde_json::to_vec(&request.preference)
+            .map_err(|_| ())
+            .and_then(|bytes| fs::write(&temporary, bytes).map_err(|_| ()))
+            .and_then(|_| fs::rename(&temporary, &path).map_err(|_| ()));
+        if write_result.is_err() {
+            let _ = fs::remove_file(temporary);
+            return graph_preference_save_failure("GRAPH_PREFERENCE_STORAGE_FAILED", true);
+        }
+        DesktopGraphPreferenceSaveResponse {
+            ok: true,
+            data: Some(DesktopGraphPreferenceSaveDataDto { saved: true }),
+            error_code: None,
+            retryable: false,
+        }
+    }
+
+    fn preference_path(&self, workspace_id: &str) -> Option<PathBuf> {
+        let trimmed = workspace_id.trim();
+        if trimmed.is_empty() || trimmed.len() > 128 {
+            return None;
+        }
+        let key = trimmed
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Some(self.root.join(format!("{key}.json")))
+    }
+}
+
+fn graph_preference_load_failure(
+    code: &str,
+    retryable: bool,
+) -> DesktopGraphPreferenceLoadResponse {
+    DesktopGraphPreferenceLoadResponse {
+        ok: false,
+        data: None,
+        error_code: Some(code.to_string()),
+        retryable,
+    }
+}
+
+fn graph_preference_save_failure(
+    code: &str,
+    retryable: bool,
+) -> DesktopGraphPreferenceSaveResponse {
+    DesktopGraphPreferenceSaveResponse {
+        ok: false,
+        data: None,
+        error_code: Some(code.to_string()),
+        retryable,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DesktopKnowledgeGraphRuntime {
-    projection_store: DurableLocalGraphProjectionStore,
+    projection_store: DesktopCompositeGraphProjectionStore,
+    documents: LocalDocumentRepository,
+    assets: DurableAssetMetadataCatalog,
 }
 
 #[derive(Debug, Clone)]
 pub struct DesktopGlobalKnowledgeGraphRuntime {
-    projection_store: DurableLocalGraphProjectionStore,
+    projection_store: DesktopCompositeGraphProjectionStore,
+    current_versions: LocalCurrentDocumentVersionPointer,
+    documents: LocalDocumentRepository,
+    assets: DurableAssetMetadataCatalog,
 }
 impl DesktopGlobalKnowledgeGraphRuntime {
     pub fn new(app_data_root: PathBuf) -> Self {
         Self {
-            projection_store: DurableLocalGraphProjectionStore::new(app_data_root),
+            projection_store: desktop_composite_graph_store(&app_data_root),
+            current_versions: LocalCurrentDocumentVersionPointer::new(
+                app_data_root.join(LOCAL_DOCUMENT_POINTER_ROOT),
+            ),
+            documents: LocalDocumentRepository::new(app_data_root.join("authoring-current")),
+            assets: DurableAssetMetadataCatalog::new(app_data_root),
         }
     }
     pub fn execute(
@@ -6427,13 +7610,21 @@ impl DesktopGlobalKnowledgeGraphRuntime {
             GetGlobalKnowledgeGraphInput::new(
                 &request.workspace_id,
                 request.cursor.as_deref(),
+                request.include_unresolved,
+                request.include_assets,
                 request.projection_limit,
                 request.node_limit,
                 request.edge_limit,
             ),
             &self.projection_store,
+            &self.current_versions,
         ) {
-            Ok(output) => DesktopGlobalKnowledgeGraphCommandResponse::success(output),
+            Ok(output) => DesktopGlobalKnowledgeGraphCommandResponse::success(
+                output,
+                &request.workspace_id,
+                &self.documents,
+                &self.assets,
+            ),
             Err(error) => DesktopGlobalKnowledgeGraphCommandResponse::failure(error),
         }
     }
@@ -6446,9 +7637,38 @@ fn request_asset_graph_reindex(
     change_kind: ProjectionChangeKind,
 ) -> Result<(), ReindexAssetGraphProjectionError> {
     let input = ReindexAssetGraphProjectionInput::new(workspace_id, document_id, change_kind)?;
-    ReindexAssetGraphProjectionUsecase::new().execute(
+    let usecase = ReindexAssetGraphProjectionUsecase::new();
+    let mut repository = DurableProjectionWorkRepository::new(app_data_root.to_path_buf());
+    match usecase.execute(
+        input.clone(),
+        &LocalCurrentDocumentVersionPointer::new(app_data_root.join(LOCAL_DOCUMENT_POINTER_ROOT)),
+        &mut repository,
+    ) {
+        Ok(_) => {}
+        Err(ReindexAssetGraphProjectionError::CurrentVersionNotFound) => {
+            usecase.execute(
+                input,
+                &LocalCurrentDocumentVersionPointer::new(
+                    app_data_root.join("authoring-current-version"),
+                ),
+                &mut repository,
+            )?;
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+fn request_authoritative_asset_graph_reindex(
+    app_data_root: &Path,
+    workspace_id: &str,
+    document_id: &str,
+    change_kind: ProjectionChangeKind,
+) -> Result<(), ReindexAssetGraphProjectionError> {
+    let input = ReindexAssetGraphProjectionInput::new(workspace_id, document_id, change_kind)?;
+    ReindexAssetGraphProjectionUsecase::new().ensure(
         input,
-        &LocalCurrentDocumentVersionPointer::new(app_data_root.join("authoring-current-version")),
+        &LocalCurrentDocumentVersionPointer::new(app_data_root.join(LOCAL_DOCUMENT_POINTER_ROOT)),
         &mut DurableProjectionWorkRepository::new(app_data_root.to_path_buf()),
     )?;
     Ok(())
@@ -6461,11 +7681,25 @@ fn ensure_asset_graph_reindex(
     change_kind: ProjectionChangeKind,
 ) -> Result<(), ReindexAssetGraphProjectionError> {
     let input = ReindexAssetGraphProjectionInput::new(workspace_id, document_id, change_kind)?;
-    ReindexAssetGraphProjectionUsecase::new().ensure(
-        input,
-        &LocalCurrentDocumentVersionPointer::new(app_data_root.join("authoring-current-version")),
-        &mut DurableProjectionWorkRepository::new(app_data_root.to_path_buf()),
-    )?;
+    let usecase = ReindexAssetGraphProjectionUsecase::new();
+    let mut repository = DurableProjectionWorkRepository::new(app_data_root.to_path_buf());
+    match usecase.ensure(
+        input.clone(),
+        &LocalCurrentDocumentVersionPointer::new(app_data_root.join(LOCAL_DOCUMENT_POINTER_ROOT)),
+        &mut repository,
+    ) {
+        Ok(_) => {}
+        Err(ReindexAssetGraphProjectionError::CurrentVersionNotFound) => {
+            usecase.ensure(
+                input,
+                &LocalCurrentDocumentVersionPointer::new(
+                    app_data_root.join("authoring-current-version"),
+                ),
+                &mut repository,
+            )?;
+        }
+        Err(error) => return Err(error),
+    }
     Ok(())
 }
 
@@ -6474,6 +7708,8 @@ fn ensure_asset_graph_reindex(
 pub struct DesktopGlobalKnowledgeGraphRequestDto {
     pub workspace_id: String,
     pub cursor: Option<String>,
+    pub include_unresolved: bool,
+    pub include_assets: bool,
     pub projection_limit: usize,
     pub node_limit: usize,
     pub edge_limit: usize,
@@ -6490,7 +7726,12 @@ pub struct DesktopGlobalKnowledgeGraphCommandResponse {
     pub retryable: bool,
 }
 impl DesktopGlobalKnowledgeGraphCommandResponse {
-    fn success(output: cabinet_usecases::global_graph::GetGlobalKnowledgeGraphOutput) -> Self {
+    fn success(
+        output: cabinet_usecases::global_graph::GetGlobalKnowledgeGraphOutput,
+        workspace_id: &str,
+        documents: &LocalDocumentRepository,
+        assets: &DurableAssetMetadataCatalog,
+    ) -> Self {
         Self {
             ok: true,
             data: Some(DesktopGlobalKnowledgeGraphDataDto {
@@ -6498,10 +7739,7 @@ impl DesktopGlobalKnowledgeGraphCommandResponse {
                 nodes: output
                     .nodes()
                     .iter()
-                    .map(|node| DesktopKnowledgeGraphNodeDto {
-                        id: node.id().into(),
-                        kind: graph_node_kind_name(node.kind()).into(),
-                    })
+                    .map(|node| graph_node_dto(node, workspace_id, documents, assets))
                     .collect(),
                 edges: output
                     .edges()
@@ -6552,7 +7790,9 @@ pub struct DesktopGlobalKnowledgeGraphDataDto {
 impl DesktopKnowledgeGraphRuntime {
     pub fn new(app_data_root: PathBuf) -> Self {
         Self {
-            projection_store: DurableLocalGraphProjectionStore::new(app_data_root),
+            projection_store: desktop_composite_graph_store(&app_data_root),
+            documents: LocalDocumentRepository::new(app_data_root.join("authoring-current")),
+            assets: DurableAssetMetadataCatalog::new(app_data_root),
         }
     }
 
@@ -6560,7 +7800,7 @@ impl DesktopKnowledgeGraphRuntime {
         &self,
         request: DesktopLocalCommandRequestDto,
     ) -> DesktopKnowledgeGraphCommandResponse {
-        let input =
+        let (input, workspace_id) =
             match map_core_local_desktop_command_request(to_platform_runtime_request(request)) {
                 Ok(LocalDesktopUsecaseInput::GetGraphProjection {
                     workspace_id,
@@ -6571,26 +7811,34 @@ impl DesktopKnowledgeGraphRuntime {
                     include_assets,
                     node_limit,
                     edge_limit,
-                }) => GetLocalKnowledgeGraphInput::new(
-                    &workspace_id,
-                    &document_id,
-                    depth,
-                    match direction.as_str() {
-                        "incoming" => LocalGraphDirection::Incoming,
-                        "outgoing" => LocalGraphDirection::Outgoing,
-                        "both" => LocalGraphDirection::Both,
-                        _ => return DesktopKnowledgeGraphCommandResponse::invalid_input(),
-                    },
-                    include_unresolved,
-                    include_assets,
-                    usize::from(node_limit),
-                    usize::from(edge_limit),
+                }) => (
+                    GetLocalKnowledgeGraphInput::new(
+                        &workspace_id,
+                        &document_id,
+                        depth,
+                        match direction.as_str() {
+                            "incoming" => LocalGraphDirection::Incoming,
+                            "outgoing" => LocalGraphDirection::Outgoing,
+                            "both" => LocalGraphDirection::Both,
+                            _ => return DesktopKnowledgeGraphCommandResponse::invalid_input(),
+                        },
+                        include_unresolved,
+                        include_assets,
+                        usize::from(node_limit),
+                        usize::from(edge_limit),
+                    ),
+                    workspace_id,
                 ),
                 _ => return DesktopKnowledgeGraphCommandResponse::invalid_input(),
             };
 
         match GetLocalKnowledgeGraphUsecase::new().execute(input, &self.projection_store) {
-            Ok(output) => DesktopKnowledgeGraphCommandResponse::success(output),
+            Ok(output) => DesktopKnowledgeGraphCommandResponse::success(
+                output,
+                &workspace_id,
+                &self.documents,
+                &self.assets,
+            ),
             Err(error) => DesktopKnowledgeGraphCommandResponse::failure(error),
         }
     }
@@ -6608,7 +7856,12 @@ pub struct DesktopKnowledgeGraphCommandResponse {
 }
 
 impl DesktopKnowledgeGraphCommandResponse {
-    fn success(output: cabinet_usecases::graph::GetLocalKnowledgeGraphOutput) -> Self {
+    fn success(
+        output: cabinet_usecases::graph::GetLocalKnowledgeGraphOutput,
+        workspace_id: &str,
+        documents: &LocalDocumentRepository,
+        assets: &DurableAssetMetadataCatalog,
+    ) -> Self {
         let graph = output.graph();
         let data = DesktopKnowledgeGraphDataDto {
             center_document_id: graph.center_document_id().as_str().to_string(),
@@ -6616,10 +7869,7 @@ impl DesktopKnowledgeGraphCommandResponse {
             nodes: graph
                 .nodes()
                 .iter()
-                .map(|node| DesktopKnowledgeGraphNodeDto {
-                    id: node.id().to_string(),
-                    kind: graph_node_kind_name(node.kind()).to_string(),
-                })
+                .map(|node| graph_node_dto(node, workspace_id, documents, assets))
                 .collect(),
             edges: graph
                 .edges()
@@ -6681,6 +7931,134 @@ pub struct DesktopKnowledgeGraphDataDto {
 pub struct DesktopKnowledgeGraphNodeDto {
     pub id: String,
     pub kind: String,
+    pub label: String,
+    pub breadcrumb_label: String,
+    pub availability: String,
+    pub can_navigate: bool,
+}
+
+fn graph_node_dto(
+    node: &GraphNode,
+    workspace_id: &str,
+    documents: &LocalDocumentRepository,
+    assets: &DurableAssetMetadataCatalog,
+) -> DesktopKnowledgeGraphNodeDto {
+    let kind = graph_node_kind_name(node.kind()).to_string();
+    let fallback = || DesktopKnowledgeGraphNodeDto {
+        id: node.id().to_string(),
+        label: graph_node_fallback_label(node.kind()).to_string(),
+        kind: kind.clone(),
+        breadcrumb_label: String::new(),
+        availability: "missing".to_string(),
+        can_navigate: false,
+    };
+    let Ok(workspace_id) = WorkspaceId::new(workspace_id) else {
+        return fallback();
+    };
+    match node.kind() {
+        GraphNodeKind::Document => {
+            let Ok(document_id) = DocumentId::new(node.id()) else {
+                return fallback();
+            };
+            let Ok(Some(record)) = documents.get_current_by_id(&workspace_id, &document_id) else {
+                return fallback();
+            };
+            DesktopKnowledgeGraphNodeDto {
+                id: node.id().to_string(),
+                kind,
+                label: DocumentTitle::from_markdown_body(record.body())
+                    .as_str()
+                    .to_string(),
+                breadcrumb_label: document_parent_breadcrumb(record.path().as_str()),
+                availability: "available".to_string(),
+                can_navigate: true,
+            }
+        }
+        GraphNodeKind::Attachment => {
+            let Ok(asset_id) = AssetId::from_sha256_hex(node.id()) else {
+                return fallback();
+            };
+            let Ok(Some(record)) = assets.get(&workspace_id, &asset_id) else {
+                return fallback();
+            };
+            DesktopKnowledgeGraphNodeDto {
+                id: node.id().to_string(),
+                kind,
+                label: record.metadata().file_name().as_str().to_string(),
+                breadcrumb_label: String::new(),
+                availability: "available".to_string(),
+                can_navigate: true,
+            }
+        }
+        GraphNodeKind::UnresolvedLink => DesktopKnowledgeGraphNodeDto {
+            id: node.id().to_string(),
+            kind,
+            label: bounded_safe_graph_label(node.id(), "미해결 링크"),
+            breadcrumb_label: String::new(),
+            availability: "missing".to_string(),
+            can_navigate: false,
+        },
+        GraphNodeKind::ExternalLink => DesktopKnowledgeGraphNodeDto {
+            id: node.id().to_string(),
+            kind,
+            label: safe_external_graph_label(node.id()),
+            breadcrumb_label: String::new(),
+            availability: "available".to_string(),
+            can_navigate: false,
+        },
+    }
+}
+
+fn bounded_safe_graph_label(value: &str, fallback: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let bounded = sanitized.trim().chars().take(120).collect::<String>();
+    if bounded.is_empty() {
+        fallback.to_string()
+    } else {
+        bounded
+    }
+}
+
+fn safe_external_graph_label(value: &str) -> String {
+    let authority = value
+        .split_once("://")
+        .map(|(_, remainder)| remainder)
+        .unwrap_or(value)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    let host = authority.split(':').next().unwrap_or_default();
+    bounded_safe_graph_label(host, "외부 링크")
+}
+
+fn graph_node_fallback_label(kind: GraphNodeKind) -> &'static str {
+    match kind {
+        GraphNodeKind::Document => "찾을 수 없는 문서",
+        GraphNodeKind::UnresolvedLink => "미해결 링크",
+        GraphNodeKind::Attachment => "첨부 파일",
+        GraphNodeKind::ExternalLink => "외부 링크",
+    }
+}
+
+fn document_parent_breadcrumb(path: &str) -> String {
+    let mut segments = path
+        .split('/')
+        .filter(|segment| !segment.trim().is_empty())
+        .collect::<Vec<_>>();
+    segments.pop();
+    segments.join(" / ")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -6884,6 +8262,14 @@ pub struct DesktopBackupRecoveryRequestDto {
     pub workspace_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopBackupCatalogRequestDto {
+    pub workspace_id: String,
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopBackupManifestEntryDto {
@@ -6900,6 +8286,19 @@ pub struct DesktopBackupManifestDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at_epoch_ms: Option<u64>,
     pub entries: Vec<DesktopBackupManifestEntryDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopBackupCatalogResponse {
+    pub ok: bool,
+    pub state: String,
+    pub records: Vec<DesktopBackupManifestDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -6953,6 +8352,9 @@ pub enum DesktopBackupProductEvent {
 pub struct DesktopBackupRecoveryRuntime {
     root: PathBuf,
     policy: LocalBackupPackagePolicy,
+    projection_body_max_bytes: usize,
+    projection_batch_limit: usize,
+    projection_max_attempts: u32,
     product_events: Arc<Mutex<Vec<DesktopBackupProductEvent>>>,
 }
 
@@ -6962,11 +8364,36 @@ impl DesktopBackupRecoveryRuntime {
         max_file_count: u64,
         max_total_bytes: u64,
     ) -> Result<Self, &'static str> {
+        Self::new_with_projection_policy(
+            root,
+            max_file_count,
+            max_total_bytes,
+            10 * 1024 * 1024,
+            64,
+            3,
+        )
+    }
+
+    pub fn new_with_projection_policy(
+        root: PathBuf,
+        max_file_count: u64,
+        max_total_bytes: u64,
+        projection_body_max_bytes: usize,
+        projection_batch_limit: usize,
+        projection_max_attempts: u32,
+    ) -> Result<Self, &'static str> {
         let policy = LocalBackupPackagePolicy::new(max_file_count, max_total_bytes)
             .map_err(|_| "BACKUP_INVALID_POLICY")?;
+        ProjectionWorkerPolicy::new(projection_batch_limit, projection_max_attempts)
+            .map_err(|_| "BACKUP_INVALID_PROJECTION_POLICY")?;
+        DocumentBodyPolicy::new(projection_body_max_bytes)
+            .map_err(|_| "BACKUP_INVALID_PROJECTION_POLICY")?;
         Ok(Self {
             root,
             policy,
+            projection_body_max_bytes,
+            projection_batch_limit,
+            projection_max_attempts,
             product_events: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -6976,6 +8403,42 @@ impl DesktopBackupRecoveryRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    pub fn list_catalog(
+        &self,
+        request: DesktopBackupCatalogRequestDto,
+    ) -> DesktopBackupCatalogResponse {
+        let catalog = LocalBackupPackageStore::new(self.root.clone(), self.policy);
+        match ListBackupCatalogUsecase::new().execute(
+            ListBackupCatalogInput::new(
+                &request.workspace_id,
+                request.cursor.as_deref(),
+                request.limit,
+            ),
+            &catalog,
+        ) {
+            Ok(output) => DesktopBackupCatalogResponse {
+                ok: true,
+                state: "Ready".to_string(),
+                records: output
+                    .records()
+                    .iter()
+                    .map(|record| to_backup_manifest(record.package_id(), record.summary()))
+                    .collect(),
+                next_cursor: output.next_cursor().map(str::to_string),
+                error_code: None,
+                retryable: false,
+            },
+            Err(error) => DesktopBackupCatalogResponse {
+                ok: false,
+                state: "Failed".to_string(),
+                records: vec![],
+                next_cursor: None,
+                error_code: Some(error.code().to_string()),
+                retryable: matches!(error, ListBackupCatalogError::CatalogUnavailable),
+            },
+        }
     }
 
     pub fn start_operation(
@@ -7144,6 +8607,7 @@ impl DesktopBackupRecoveryRuntime {
                 );
                 response.operation_id = Some(output.operation_id().to_string());
                 response.error_code = output.error_code().map(str::to_string);
+                response.retryable = output.state() == RestoreState::RecoveryRequired;
                 response
             }
             Err(error) => DesktopBackupRecoveryResponse::failure(
@@ -7201,30 +8665,111 @@ impl DesktopBackupRecoveryRuntime {
                 &catalog,
                 &mut repository,
             ) {
-                Ok(_) => self.logger().push(DesktopBackupProductEvent::Operation {
-                    event_name: "restore.projection_rebuild.requested".into(),
-                    state: "Pending".into(),
-                    error_code: None,
-                }),
-                Err(error) => {
-                    let workspace = WorkspaceId::new(&request.workspace_id);
-                    let operation = BackupJobId::new(&request.operation_id);
-                    let mut restores = LocalBackupRestoreStore::new(self.root.clone(), self.policy);
-                    if let (Ok(workspace), Ok(operation)) = (workspace, operation) {
-                        let _ = restores.mark_cleanup_required(&workspace, &operation);
-                    }
+                Ok(_) => {
                     self.logger().push(DesktopBackupProductEvent::Operation {
-                        event_name: "restore.projection_rebuild.failed".into(),
-                        state: "CleanupRequired".into(),
-                        error_code: Some(error.code().into()),
+                        event_name: "restore.projection_rebuild.requested".into(),
+                        state: "Pending".into(),
+                        error_code: None,
                     });
-                    response.state = "CleanupRequired".into();
-                    response.error_code = Some(error.code().into());
-                    response.retryable = true;
+                    if let Err(error_code) =
+                        self.process_restored_projections(&request.workspace_id)
+                    {
+                        self.mark_projection_rebuild_failed(
+                            &request.workspace_id,
+                            &request.operation_id,
+                            error_code,
+                            &mut response,
+                        );
+                    } else {
+                        self.logger().push(DesktopBackupProductEvent::Operation {
+                            event_name: "restore.projection_rebuild.completed".into(),
+                            state: "Completed".into(),
+                            error_code: None,
+                        });
+                    }
+                }
+                Err(error) => {
+                    self.mark_projection_rebuild_failed(
+                        &request.workspace_id,
+                        &request.operation_id,
+                        error.code(),
+                        &mut response,
+                    );
                 }
             }
         }
         response
+    }
+
+    fn process_restored_projections(&self, workspace_id: &str) -> Result<(), &'static str> {
+        let projection = DesktopProjectionRuntime::new(
+            self.root.clone(),
+            self.projection_body_max_bytes,
+            self.projection_batch_limit,
+            self.projection_max_attempts,
+        )
+        .map_err(|_| "RESTORE_PROJECTION_RUNTIME_INVALID")?;
+        for _ in 0..=self.projection_max_attempts {
+            let pending_count = DurableProjectionWorkRepository::new(self.root.clone())
+                .list_resumable(300_000)
+                .map_err(|_| "RESTORE_PROJECTION_REPOSITORY_UNAVAILABLE")?
+                .len();
+            let max_runs = pending_count
+                .div_ceil(self.projection_batch_limit)
+                .saturating_mul(self.projection_max_attempts as usize)
+                .saturating_add(1);
+            let mut drained = false;
+            for _ in 0..max_runs {
+                let processed = projection.run_once();
+                if !processed.ok {
+                    return Err("RESTORE_PROJECTION_PROCESSING_FAILED");
+                }
+                if processed.ready_count == 0
+                    && processed.retry_scheduled_count == 0
+                    && processed.failed_count == 0
+                {
+                    drained = true;
+                    break;
+                }
+            }
+            if !drained {
+                return Err("RESTORE_PROJECTION_PROCESSING_INCOMPLETE");
+            }
+            let reconciled = projection.reconcile_current(workspace_id, 100_000);
+            if !reconciled.ok {
+                return Err("RESTORE_PROJECTION_RECONCILE_FAILED");
+            }
+            if reconciled.ready_document_count == reconciled.document_count {
+                return Ok(());
+            }
+            if reconciled.enqueued_count == 0 && reconciled.reset_count == 0 {
+                return Err("RESTORE_PROJECTION_PROCESSING_FAILED");
+            }
+        }
+        Err("RESTORE_PROJECTION_PROCESSING_INCOMPLETE")
+    }
+
+    fn mark_projection_rebuild_failed(
+        &self,
+        workspace_id: &str,
+        operation_id: &str,
+        error_code: &'static str,
+        response: &mut DesktopBackupRecoveryResponse,
+    ) {
+        let workspace = WorkspaceId::new(workspace_id);
+        let operation = BackupJobId::new(operation_id);
+        let mut restores = LocalBackupRestoreStore::new(self.root.clone(), self.policy);
+        if let (Ok(workspace), Ok(operation)) = (workspace, operation) {
+            let _ = restores.mark_cleanup_required(&workspace, &operation);
+        }
+        self.logger().push(DesktopBackupProductEvent::Operation {
+            event_name: "restore.projection_rebuild.failed".into(),
+            state: "CleanupRequired".into(),
+            error_code: Some(error_code.into()),
+        });
+        response.state = "CleanupRequired".into();
+        response.error_code = Some(error_code.into());
+        response.retryable = true;
     }
 
     pub fn restore_operation_status(
@@ -7444,6 +8989,7 @@ const fn restore_state_name(state: RestoreState) -> &'static str {
         RestoreState::Reopening => "Reopening",
         RestoreState::CleanupRequired => "CleanupRequired",
         RestoreState::RollbackRequired => "RollbackRequired",
+        RestoreState::RecoveryRequired => "RecoveryRequired",
         RestoreState::Completed => "Completed",
         RestoreState::Failed => "Failed",
         RestoreState::Cancelled => "Cancelled",
@@ -7470,6 +9016,7 @@ fn restore_operation_response(
         DesktopBackupRecoveryResponse::success(restore_state_name(output.state()), None);
     response.operation_id = Some(output.operation_id().to_string());
     response.error_code = output.error_code().map(str::to_string);
+    response.retryable = output.state() == RestoreState::RecoveryRequired;
     response
 }
 
@@ -7515,13 +9062,13 @@ pub struct DesktopLocalCommandRuntimeResponse {
 
 #[derive(Debug, Clone)]
 pub struct DesktopWorkspaceHomeRuntime {
-    projection_store: LocalWorkspaceHomeProjectionStore,
+    projection_store: LocalWorkspaceHomeQueryStore,
 }
 
 impl DesktopWorkspaceHomeRuntime {
     pub fn new(projection_root: PathBuf) -> Self {
         Self {
-            projection_store: LocalWorkspaceHomeProjectionStore::new(projection_root),
+            projection_store: LocalWorkspaceHomeQueryStore::new(projection_root),
         }
     }
 
@@ -7588,6 +9135,10 @@ pub struct DesktopWorkspaceHomeDataDto {
     pub unfinished_items: Vec<DesktopWorkspaceHomeUnfinishedDto>,
     pub backup_status: String,
     pub health_status: String,
+    pub document_count: u32,
+    pub asset_count: u32,
+    pub canvas_count: u32,
+    pub summary_unavailable: Vec<String>,
 }
 
 impl From<WorkspaceHomeCommandResult> for DesktopWorkspaceHomeDataDto {
@@ -7644,6 +9195,14 @@ impl From<WorkspaceHomeCommandResult> for DesktopWorkspaceHomeDataDto {
                 .collect(),
             backup_status: result.backup_status.to_string(),
             health_status: result.health_status.to_string(),
+            document_count: result.document_count,
+            asset_count: result.asset_count,
+            canvas_count: result.canvas_count,
+            summary_unavailable: result
+                .summary_unavailable
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         }
     }
 }
@@ -7718,6 +9277,7 @@ const LOCAL_DESKTOP_COMMAND_NAMES: &[&str] = &[
     "preview_document_restore",
     "restore_document_version",
     "search_documents",
+    "search_assets",
     "get_link_overview",
     "get_graph_projection",
     "list_document_assets",
@@ -7923,6 +9483,7 @@ fn usecase_input_name(input: &LocalDesktopUsecaseInput) -> &'static str {
         LocalDesktopUsecaseInput::PreviewDocumentRestore { .. } => "PreviewDocumentRestore",
         LocalDesktopUsecaseInput::RestoreDocumentVersion { .. } => "RestoreDocumentVersion",
         LocalDesktopUsecaseInput::SearchDocuments { .. } => "SearchDocuments",
+        LocalDesktopUsecaseInput::SearchAssets { .. } => "SearchAssets",
         LocalDesktopUsecaseInput::GetLinkOverview { .. } => "GetLinkOverview",
         LocalDesktopUsecaseInput::GetGraphProjection { .. } => "GetGraphProjection",
         LocalDesktopUsecaseInput::ListDocumentAssets { .. } => "ListDocumentAssets",
@@ -7968,11 +9529,84 @@ pub fn create_desktop_package_smoke_report() -> DesktopPackageSmokeReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cabinet_domain::asset_import_operation::AssetImportEvent;
     use cabinet_domain::document::{DocumentBody, DocumentMetadata, DocumentPath, DocumentTitle};
     use cabinet_domain::version::CurrentDocumentSnapshot;
     use cabinet_ports::document_repository::{CurrentDocumentRecord, DocumentRepository};
     use cabinet_ports::graph_projection::GraphProjectionStore;
     use cabinet_ports::link_target_resolver::{DocumentLinkTargetResolver, LinkTargetResolution};
+
+    #[test]
+    fn asset_import_projection_warning_requires_recovery_without_exposing_details() {
+        let response = DesktopAssetImportResponse::completed_with_projection_warning(
+            "operation-1",
+            "asset-1",
+            ReindexAssetGraphProjectionError::RepositoryUnavailable,
+        );
+
+        assert!(response.ok);
+        assert_eq!(response.state.as_deref(), Some("recovery_required"));
+        assert!(response.repair_required);
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some("asset_graph_reindex.repository_unavailable")
+        );
+        assert!(response.retryable);
+        let json = serde_json::to_string(&response).expect("response json");
+        assert!(json.contains("\"repairRequired\":true"));
+        assert!(!json.contains("/private/"));
+        assert!(!json.contains("document body"));
+    }
+
+    #[test]
+    fn asset_import_status_projection_warning_requires_recovery() {
+        let workspace = WorkspaceId::new("workspace-1").expect("workspace");
+        let mut operation = AssetImportOperation::new(
+            AssetImportOperationId::new("operation-2").expect("operation"),
+            workspace,
+            DocumentId::new("document-1").expect("document"),
+            1,
+        )
+        .expect("operation");
+        operation.apply(AssetImportEvent::Begin, 1).expect("begin");
+        operation
+            .apply(AssetImportEvent::ValidationSucceeded, 1)
+            .expect("validation");
+        operation
+            .apply(AssetImportEvent::StagingSucceeded, 1)
+            .expect("staging");
+        operation
+            .apply(AssetImportEvent::HashingSucceeded, 1)
+            .expect("hashing");
+        operation
+            .apply(AssetImportEvent::ObjectPublished, 1)
+            .expect("object");
+        operation
+            .apply(AssetImportEvent::MetadataPersisted, 1)
+            .expect("metadata");
+        operation
+            .apply(AssetImportEvent::LinkSucceeded, 1)
+            .expect("association");
+
+        let response = DesktopAssetImportResponse::operation_with_projection_warning(
+            &operation,
+            ReindexAssetGraphProjectionError::CorruptedState,
+        );
+
+        assert!(response.ok);
+        assert_eq!(response.state.as_deref(), Some("recovery_required"));
+        assert!(response.repair_required);
+        assert!(!response.retryable);
+    }
+
+    #[test]
+    fn asset_import_terminal_responses_do_not_require_recovery_by_default() {
+        let completed = DesktopAssetImportResponse::completed("operation-3", "asset-3");
+        let failed = DesktopAssetImportResponse::failure("asset_import.invalid_input", false);
+
+        assert!(!completed.repair_required);
+        assert!(!failed.repair_required);
+    }
 
     #[test]
     fn document_change_sink_persists_rename_and_delete_catalog_lifecycle() {
@@ -8209,6 +9843,7 @@ mod tests {
                 "preview_document_restore",
                 "restore_document_version",
                 "search_documents",
+                "search_assets",
                 "get_link_overview",
                 "get_graph_projection",
                 "list_document_assets",
@@ -8379,6 +10014,14 @@ mod tests {
                 },
             },
             DesktopLocalCommandRequestDto {
+                command_name: "search_assets".to_string(),
+                payload: DesktopLocalCommandPayloadDto::Search {
+                    workspace_id: "workspace-1".to_string(),
+                    text: "needle".to_string(),
+                    limit: 10,
+                },
+            },
+            DesktopLocalCommandRequestDto {
                 command_name: "get_graph_projection".to_string(),
                 payload: DesktopLocalCommandPayloadDto::GraphProjection {
                     workspace_id: "workspace-1".to_string(),
@@ -8432,11 +10075,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(responses.iter().all(|response| response.accepted));
+        assert_eq!(responses[1].usecase_name, Some("SearchAssets".to_string()));
         assert_eq!(
-            responses[2].usecase_name,
+            responses[3].usecase_name,
             Some("AttachDocumentAsset".to_string())
         );
-        assert_eq!(responses[2].asset_byte_len, Some(42));
+        assert_eq!(responses[3].asset_byte_len, Some(42));
         assert!(!format!("{responses:?}").contains("/Users/example/private"));
         assert!(!format!("{responses:?}").contains("source.pdf"));
         assert!(!format!("{responses:?}").contains("backup.zip"));

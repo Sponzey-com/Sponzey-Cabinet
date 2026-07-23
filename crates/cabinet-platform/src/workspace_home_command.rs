@@ -1,5 +1,6 @@
 use cabinet_ports::workspace_home::{
     WorkspaceHomeBackupStatus, WorkspaceHomeHealthStatus, WorkspaceHomeProjectionPort,
+    WorkspaceHomeSummaryKind,
 };
 use cabinet_usecases::workspace_home::{
     GetWorkspaceHomeError, GetWorkspaceHomeInput, GetWorkspaceHomeOutput, GetWorkspaceHomeUsecase,
@@ -51,6 +52,10 @@ pub struct WorkspaceHomeCommandResult {
     pub unfinished_items: Vec<WorkspaceHomeCommandUnfinishedItem>,
     pub backup_status: &'static str,
     pub health_status: &'static str,
+    pub document_count: u32,
+    pub asset_count: u32,
+    pub canvas_count: u32,
+    pub summary_unavailable: Vec<&'static str>,
     pub product_log_event_name: Option<&'static str>,
 }
 
@@ -116,6 +121,7 @@ fn map_output(
         }
     };
 
+    let summary = output.summary();
     Ok(WorkspaceHomeCommandResult {
         workspace_id: output.workspace_id().to_string(),
         state,
@@ -163,6 +169,17 @@ fn map_output(
             .collect(),
         backup_status: map_backup_status(output.backup_status()),
         health_status: map_health_status(output.health_status()),
+        document_count: summary.document_count(),
+        asset_count: summary.asset_count(),
+        canvas_count: summary.canvas_count(),
+        summary_unavailable: [
+            (WorkspaceHomeSummaryKind::Documents, "Documents"),
+            (WorkspaceHomeSummaryKind::Assets, "Assets"),
+            (WorkspaceHomeSummaryKind::Canvases, "Canvases"),
+        ]
+        .into_iter()
+        .filter_map(|(kind, label)| (!summary.is_available(kind)).then_some(label))
+        .collect(),
         product_log_event_name: output.product_log_event_name(),
     })
 }

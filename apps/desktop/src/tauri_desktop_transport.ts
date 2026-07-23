@@ -14,8 +14,10 @@ export function createTauriDesktopTransport(invoke: TauriInvoke): LocalDesktopCo
   const diff = createTauriDocumentDiffTransport(invoke);
   return async (request) => {
     if (request.commandName === "local_workspace_home") return home(request);
-    if (request.commandName === "local_document_navigator") return navigator(request);
-    if (request.commandName === "get_graph_projection" || request.commandName === "list_document_assets") return discovery(request);
+    if (request.commandName === "local_document_navigator" || request.commandName === "search_assets") {
+      return navigator(request);
+    }
+    if (request.commandName === "search_documents" || request.commandName === "get_graph_projection" || request.commandName === "list_document_assets") return discovery(request);
     if (request.commandName === "compare_document_versions") return diff(request);
     if (
       request.commandName === "create_document" ||

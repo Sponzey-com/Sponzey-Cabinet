@@ -34,4 +34,11 @@ pub trait DocumentLinkTargetResolver {
         workspace_id: &WorkspaceId,
         target: &str,
     ) -> Result<LinkTargetResolution, LinkTargetResolverError>;
+
+    fn resolve_relative(
+        &self,
+        workspace_id: &WorkspaceId,
+        source_document_id: &DocumentId,
+        target: &str,
+    ) -> Result<LinkTargetResolution, LinkTargetResolverError>;
 }

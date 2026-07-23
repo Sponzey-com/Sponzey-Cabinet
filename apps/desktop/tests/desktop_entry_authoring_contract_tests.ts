@@ -17,6 +17,14 @@ test("desktop entry composes explicit authoring surface controller timer and gen
   assert.doesNotMatch(source, /notes\/\$\{documentId\}\.md/);
   assert.doesNotMatch(source, /createDocument\(\{[\s\S]{0,300}(versionId|snapshotRef|path):/);
   assert.match(source, /createDocument\([\s\S]*?authoringController\.open\([\s\S]*?setAuthoringSnapshot\(snapshot\)/);
+  assert.match(source, /createDocument\([\s\S]*?synchronizeDocumentKnowledgeSurfaces\([\s\S]*?workspace-1[\s\S]*?documentId[\s\S]*?\)/);
+  assert.match(source, /createDocument\([\s\S]*?runGraphQuery\(\{\s*scope:\s*"local",\s*centerDocumentId:\s*documentId\s*\}\)/);
+  assert.match(source, /const synchronizeDocumentKnowledgeSurfaces = useCallback/);
+  assert.match(source, /synchronizeDocumentKnowledgeSurfaces\([\s\S]*?workspaceId[\s\S]*?documentId[\s\S]*?\)/);
+  assert.match(source, /runAuthoringSave[\s\S]*?manualSave\(\)[\s\S]*?synchronizeDocumentKnowledgeSurfaces/);
+  assert.match(source, /restoreDocumentVersion[\s\S]*?synchronizeDocumentKnowledgeSurfaces/);
+  assert.match(source, /refreshVisibleKnowledgeSurfaces[\s\S]*?visible\.kind === "Home"[\s\S]*?HOME_GRAPH_PROJECTION_LIMIT/);
+  assert.match(source, /refreshVisibleKnowledgeSurfaces[\s\S]*?visible\.kind === "Document"[\s\S]*?centerDocumentId:\s*documentId/);
   assert.match(source, /setTimeout\([^,]+,\s*800\)/s);
   assert.match(source, /authoringGeneration/);
   assert.match(source, /createDesktopDocumentAuthoringWorkbenchElement/);
@@ -72,10 +80,33 @@ test("desktop entry composes explicit authoring surface controller timer and gen
   assert.match(source, /onInspectorTab:[\s\S]{0,220}transitionDocumentInspector/);
   assert.match(source, /onAssetUnlinkRequest:[\s\S]{0,420}type:\s*"RequestUnlink"/);
   assert.match(source, /return createDesktopDocumentAuthoringWorkbenchElement[\s\S]*onAssetOpen:\s*\(\)\s*=>\s*\{\s*void runAssetExternalOpen\(\);\s*\}/);
+  assert.match(source, /surface\s*===\s*"Authoring"[\s\S]{0,160}runGraphQuery\(\{\s*scope:\s*"local"\s*\}\)/);
+  assert.match(source, /surface\s*===\s*"Home"[\s\S]{0,260}runGraphQuery\([\s\S]{0,160}HOME_GRAPH_PROJECTION_LIMIT/);
+  assert.match(source, /return createDesktopWorkspaceHomeElement[\s\S]{0,900}knowledgeGraph:\s*graphSnapshot/);
+  assert.match(source, /onRetryKnowledgeGraph:[\s\S]{0,300}runGraphQuery\([\s\S]{0,180}HOME_GRAPH_PROJECTION_LIMIT/);
+  assert.match(source, /onLocalGraphNodeSelect:[\s\S]{0,180}selectDesktopGraphNode/);
+  assert.match(source, /onLocalGraphQuery:[\s\S]{0,160}runGraphQuery/);
+  assert.match(source, /onOpenLocalGraphAsset:[\s\S]{0,260}kind:\s*"Assets"/);
+  assert.match(source, /graphVisualSearch[\s\S]{0,120}setGraphVisualSearch/);
+  assert.match(source, /onGraph:[\s\S]{0,220}kind:\s*"Graph"[\s\S]{0,120}scope:\s*"Local"[\s\S]{0,120}centerDocumentId:\s*authoringSnapshot\.documentId/);
+  assert.match(source, /graph:\s*graphSnapshot/);
+  assert.match(source, /applyMarkdownFormattingCommand/);
+  assert.match(source, /onFormatCommand\(command\)\s*\{[\s\S]{0,280}authoringController\.changeContent\(/);
+  assert.match(source, /applyMarkdownFormattingCommand\([\s\S]{0,120}authoringController\.snapshot\(\)\.body\s*\?\?\s*""[\s\S]{0,80}command/);
   assert.match(source, /onAssetUnlinkConfirm:[\s\S]{0,900}type:\s*"ConfirmUnlink"[\s\S]{0,900}runAssetUnlink/);
   assert.match(source, /mutationState\s*===\s*"Idle"[\s\S]{0,240}loadAuthoringHistory/);
   assert.match(source, /type:\s*"UnlinkSucceeded"/);
   assert.match(source, /type:\s*"UnlinkFailed"/);
   assert.doesNotMatch(source, /summary:\s*`Restore \$\{preview\.targetVersionId\}`/);
   assert.doesNotMatch(source, /Date\.now|Math\.random|localStorage|sessionStorage|process\.env/);
+});
+
+test("desktop entry guards restore preview and apply by operation generation and document identity", async () => {
+  const source = await readFile(new URL("../src/desktop_entry.ts", import.meta.url), "utf8");
+
+  assert.match(source, /const restoreGeneration = useRef\(0\)/);
+  assert.match(source, /\+\+restoreGeneration\.current/);
+  assert.match(source, /isCurrentAuthoringRestoreContext/);
+  assert.match(source, /createDocumentRestoreRequestContext\(\s*requestGeneration,\s*requestRestoreGeneration,\s*requestDocumentId/s);
+  assert.match(source, /if \(!isCurrentAuthoringRestoreContext\(context\)\) return/);
 });

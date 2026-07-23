@@ -596,6 +596,7 @@ pub enum RestoreState {
     Reopening,
     CleanupRequired,
     RollbackRequired,
+    RecoveryRequired,
     Completed,
     Failed,
     Cancelled,
@@ -628,6 +629,8 @@ pub enum RestoreEvent {
     ReopenFailed,
     CleanupCompleted,
     RollbackCompleted,
+    RollbackFailed,
+    RecoveryRequested,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,6 +768,16 @@ impl RestoreWorkflowStateMachine {
             (RestoreState::RollbackRequired, RestoreEvent::RollbackCompleted) => {
                 (RestoreState::RolledBack, None, Some("restore.rolled_back"))
             }
+            (RestoreState::RollbackRequired, RestoreEvent::RollbackFailed) => (
+                RestoreState::RecoveryRequired,
+                None,
+                Some("restore.recovery_required"),
+            ),
+            (RestoreState::RecoveryRequired, RestoreEvent::RecoveryRequested) => (
+                RestoreState::RollbackRequired,
+                Some(RestoreSideEffectRequest::RollbackApply),
+                Some("restore.recovery.started"),
+            ),
             _ => {
                 return Err(RestoreTransitionError {
                     previous_state: state,

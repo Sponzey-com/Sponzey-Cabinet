@@ -61,6 +61,44 @@ test("navigator model maps ready empty and degraded command results", () => {
   assert.equal(degraded.displayState, "Degraded");
 });
 
+test("navigator model carries explicit search metrics and clears them on new work", () => {
+  const loading = createDocumentNavigatorLoadingModel({
+    workspaceId: "workspace-1",
+    view: "Tree",
+    filter: "성능",
+    generation: 10,
+  });
+  const ready = applyDocumentNavigatorResult(loading, 10, {
+    workspaceId: "workspace-1",
+    view: "Tree",
+    state: "Ready",
+    items: [],
+    searchMetrics: { durationMs: 42 },
+    assetResults: [
+      {
+        assetId: "asset-1",
+        fileName: "source.pdf",
+        mediaType: "application/pdf",
+        byteSize: 1024,
+        score: 3,
+      },
+    ],
+  });
+  const filtering = transitionDocumentNavigatorModel(ready, {
+    type: "FilterChanged",
+    filter: "다음 검색",
+    generation: 11,
+  });
+  const closed = transitionDocumentNavigatorModel(ready, { type: "CloseRequested" });
+
+  assert.equal(ready.searchMetrics?.durationMs, 42);
+  assert.equal(ready.assetResults[0]?.assetId, "asset-1");
+  assert.equal(filtering.searchMetrics, undefined);
+  assert.deepEqual(filtering.assetResults, []);
+  assert.equal(closed.searchMetrics, undefined);
+  assert.deepEqual(closed.assetResults, []);
+});
+
 test("navigator query builder normalizes five views and validates keyed views", () => {
   for (const view of ["Tree", "Recent", "Favorite"] as const) {
     assert.deepEqual(

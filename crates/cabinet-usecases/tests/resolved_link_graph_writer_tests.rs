@@ -21,7 +21,9 @@ use cabinet_ports::link_target_resolver::{
     DocumentLinkTargetResolver, LinkTargetResolution, LinkTargetResolverError,
     ResolvedDocumentLinkTarget,
 };
-use cabinet_ports::markdown_parser::{ParsedAssetReference, ParsedMarkdown, ParsedWikilink};
+use cabinet_ports::markdown_parser::{
+    ParsedAssetReference, ParsedDocumentLink, ParsedExternalLink, ParsedMarkdown, ParsedWikilink,
+};
 use cabinet_ports::projection_writer::{ProjectionWriteError, VersionedProjectionWriter};
 use cabinet_usecases::resolved_link_graph_writer::{
     AssetGraphProjectionPolicy, ResolvedLinkGraphProjectionWriter,
@@ -49,12 +51,23 @@ fn writer_maps_only_resolver_results_into_link_and_graph_projections() {
     writer
         .write(&identity(ProjectionKind::Graph, "v2"), &body(), &parsed)
         .unwrap();
-    assert_eq!(links.record.as_ref().unwrap().backlinks().len(), 1);
-    assert_eq!(links.record.as_ref().unwrap().unresolved_links().len(), 1);
+    assert_eq!(links.record.as_ref().unwrap().backlinks().len(), 2);
+    assert_eq!(links.record.as_ref().unwrap().unresolved_links().len(), 2);
     let graph = graphs.record.as_ref().unwrap();
     assert_eq!(graph.freshness_revision(), "v2");
     assert_eq!(graph.graph().status(), GraphProjectionStatus::Clean);
-    assert_eq!(graph.graph().edges().len(), 3);
+    assert_eq!(graph.graph().edges().len(), 6);
+    assert_eq!(
+        graph
+            .graph()
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.kind() == cabinet_domain::graph::GraphEdgeKind::ExternalReference
+            })
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -183,6 +196,26 @@ impl DocumentLinkTargetResolver for Resolver {
         } else {
             Ok(LinkTargetResolution::Unresolved(
                 DocumentSlug::from_title(&DocumentTitle::new(target).unwrap()).unwrap(),
+            ))
+        }
+    }
+
+    fn resolve_relative(
+        &self,
+        _: &WorkspaceId,
+        _: &DocumentId,
+        target: &str,
+    ) -> Result<LinkTargetResolution, LinkTargetResolverError> {
+        if target == "../known.md" {
+            Ok(LinkTargetResolution::Resolved(
+                ResolvedDocumentLinkTarget::new(
+                    DocumentId::new("doc-relative").unwrap(),
+                    DocumentPath::new("known.md").unwrap(),
+                ),
+            ))
+        } else {
+            Ok(LinkTargetResolution::Unresolved(
+                DocumentSlug::from_title(&DocumentTitle::new("Relative Missing").unwrap()).unwrap(),
             ))
         }
     }
@@ -326,4 +359,11 @@ fn parsed() -> ParsedMarkdown {
             .unwrap(),
         ],
     )
+    .with_external_links(vec![
+        ParsedExternalLink::new("https://example.com/docs?q=private", "Example", c).unwrap(),
+    ])
+    .with_document_links(vec![
+        ParsedDocumentLink::new("../known.md", "Known relative", a).unwrap(),
+        ParsedDocumentLink::new("missing.md", "Missing relative", b).unwrap(),
+    ])
 }

@@ -29,6 +29,7 @@ test("local desktop command registry matches the Phase 009 plan exactly", () => 
     "preview_document_restore",
     "restore_document_version",
     "search_documents",
+    "search_assets",
     "get_link_overview",
     "get_graph_projection",
     "list_document_assets",
@@ -100,6 +101,12 @@ test("local desktop command client dispatches typed command names and payloads",
     text: "needle",
     limit: 10,
   });
+  await client.searchAssets({
+    queryName: "search-assets",
+    workspaceId: "workspace-1",
+    text: "attachment needle",
+    limit: 10,
+  });
   await client.getLinkOverview({ queryName: "get-link-overview", workspaceId: "workspace-1", documentId: "doc-1" });
   const graph = await client.getKnowledgeGraph({
     queryName: "get-knowledge-graph",
@@ -124,6 +131,7 @@ test("local desktop command client dispatches typed command names and payloads",
     "preview_document_restore",
     "restore_document_version",
     "search_documents",
+    "search_assets",
     "get_link_overview",
     "get_graph_projection",
     "list_document_assets",
@@ -139,7 +147,13 @@ test("local desktop command client dispatches typed command names and payloads",
   assert.equal(home.state, "Ready");
   assert.equal(home.recentDocuments[0]?.documentId, "doc-1");
   assert.equal(transport.calls[3]?.payload.body, "raw body must stay in payload only");
-  assert.deepEqual(transport.calls[10]?.payload, {
+  assert.deepEqual(transport.calls[9]?.payload, {
+    queryName: "search-assets",
+    workspaceId: "workspace-1",
+    text: "attachment needle",
+    limit: 10,
+  });
+  assert.deepEqual(transport.calls[11]?.payload, {
     queryName: "get-knowledge-graph",
     workspaceId: "workspace-1",
     documentId: "doc-1",
@@ -314,6 +328,24 @@ function commandResponse(commandName: string): LocalDesktopCommandResponse<unkno
       return {
         ok: true,
         data: { queryName: "search-documents", workspaceId: "workspace-1", text: "needle", results: [] },
+      };
+    case "search_assets":
+      return {
+        ok: true,
+        data: {
+          queryName: "search-assets",
+          workspaceId: "workspace-1",
+          text: "attachment needle",
+          results: [
+            {
+              assetId: "asset-1",
+              fileName: "source.pdf",
+              mediaType: "application/pdf",
+              byteSize: 1024,
+              score: 3,
+            },
+          ],
+        },
       };
     case "get_link_overview":
       return {

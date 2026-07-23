@@ -247,6 +247,14 @@ fn local_desktop_command_mapper_covers_remaining_phase009_commands() {
             },
         ),
         (
+            "search_assets",
+            LocalDesktopCommandPayload::Search {
+                workspace_id: "workspace-1".to_string(),
+                text: "needle".to_string(),
+                limit: 10,
+            },
+        ),
+        (
             "get_link_overview",
             LocalDesktopCommandPayload::DocumentIdentity {
                 workspace_id: "workspace-1".to_string(),
@@ -332,6 +340,7 @@ fn local_desktop_command_mapper_covers_remaining_phase009_commands() {
             "PreviewDocumentRestore",
             "RestoreDocumentVersion",
             "SearchDocuments",
+            "SearchAssets",
             "GetLinkOverview",
             "GetGraphProjection",
             "ListDocumentAssets",
@@ -342,6 +351,33 @@ fn local_desktop_command_mapper_covers_remaining_phase009_commands() {
             "ApplyRestore",
         ]
     );
+}
+
+#[test]
+fn asset_search_mapper_and_product_log_summary_hide_raw_query() {
+    let request = LocalDesktopRuntimeCommandRequest::new(
+        "search_assets",
+        LocalDesktopCommandPayload::Search {
+            workspace_id: "workspace-1".to_string(),
+            text: "private attachment query".to_string(),
+            limit: 12,
+        },
+    );
+    let summary = summarize_local_desktop_command_for_product_log(&request);
+    let mapped = map_core_local_desktop_command_request(request).expect("asset search maps");
+
+    assert_eq!(
+        mapped,
+        LocalDesktopUsecaseInput::SearchAssets {
+            workspace_id: "workspace-1".to_string(),
+            text: "private attachment query".to_string(),
+            limit: 12,
+        }
+    );
+    assert_eq!(summary.command_name, "search_assets");
+    assert_eq!(summary.result_limit, Some(12));
+    assert!(summary.workspace_id_present);
+    assert!(!format!("{summary:?}").contains("private attachment query"));
 }
 
 #[test]

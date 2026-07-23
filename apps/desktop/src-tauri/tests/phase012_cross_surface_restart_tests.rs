@@ -170,6 +170,10 @@ fn native_create_edit_projection_asset_canvas_flow_survives_runtime_restart() {
     let detail = detail.data.expect("asset detail");
     assert_eq!(detail.asset_id, asset_id);
     assert_eq!(detail.linked_document_ids, vec!["source-doc"]);
+    assert_eq!(detail.linked_documents.len(), 1);
+    assert_eq!(detail.linked_documents[0].document_id, "source-doc");
+    assert_eq!(detail.linked_documents[0].title.as_deref(), Some("Source"));
+    assert_eq!(detail.linked_documents[0].state, "available");
 
     let canvas = DesktopCanvasRuntime::new(root.path.clone()).expect("restarted canvas");
     let loaded = canvas.execute(DesktopCanvasRequestDto::Get {

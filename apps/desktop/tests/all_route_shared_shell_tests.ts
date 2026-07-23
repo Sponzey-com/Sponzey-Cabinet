@@ -14,3 +14,16 @@ test("home search exploration and backup modules delegate shell rendering to the
     assert.doesNotMatch(source, /const legacy|legacy\.props\.children/, file);
   }
 });
+
+test("routed surfaces do not derive the persistent sidebar list from route-local state", async () => {
+  const forbidden = new Map([
+    ["react_workspace_home.ts", /documentShortcuts:\s*model\.recentDocuments/],
+    ["react_document_navigator.ts", /documentShortcuts:\s*model\.items/],
+    ["react_document_authoring_workbench.ts", /documentShortcuts:\s*\[\{\s*label:\s*snapshot\.title/],
+    ["react_exploration_surfaces.ts", /documentShortcuts:\s*model\.recentDocuments/],
+  ]);
+  for (const [file, pattern] of forbidden) {
+    const source = await readFile(new URL(`../src/${file}`, import.meta.url), "utf8");
+    assert.doesNotMatch(source, pattern, file);
+  }
+});

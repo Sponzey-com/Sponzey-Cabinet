@@ -162,6 +162,25 @@ fn restore_workflow_exposes_cancel_cleanup_and_rollback_paths() {
     );
     let rolled_back = transition(rollback.next_state(), RestoreEvent::RollbackCompleted);
     assert_eq!(rolled_back.next_state(), RestoreState::RolledBack);
+
+    let recovery_required = transition(rollback.next_state(), RestoreEvent::RollbackFailed);
+    assert_eq!(
+        recovery_required.next_state(),
+        RestoreState::RecoveryRequired
+    );
+    assert_eq!(
+        recovery_required.product_log_event_name(),
+        Some("restore.recovery_required")
+    );
+    let retry = transition(
+        recovery_required.next_state(),
+        RestoreEvent::RecoveryRequested,
+    );
+    assert_eq!(retry.next_state(), RestoreState::RollbackRequired);
+    assert_eq!(
+        retry.side_effect_request(),
+        Some(RestoreSideEffectRequest::RollbackApply)
+    );
     assert!(rolled_back.next_state().is_terminal());
 
     assert!(

@@ -17,7 +17,11 @@ export interface WorkspaceShellElementOptions {
   readonly rootAttributes?: Readonly<Record<string, string>>;
   readonly rootClassName?: string;
   readonly onCreateDocument?: () => void;
-  readonly onSearch?: () => void;
+  readonly onSearchOpen?: () => void;
+  readonly onSearch?: (query?: string) => void;
+  readonly onSearchEscape?: (query: string) => void;
+  readonly searchValue?: string;
+  readonly searchAriaLabel?: string;
   readonly searchActionId?: string;
   readonly documentShortcuts?: readonly WorkspaceShellDocumentShortcut[];
   readonly savedStatus?: string;
@@ -33,6 +37,10 @@ const SHELL_ICON_PROPS = Object.freeze({ size: 15, strokeWidth: 2, "aria-hidden"
 export function createWorkspaceShellElement(options: WorkspaceShellElementOptions): React.ReactElement {
   const e = React.createElement;
   const message = options.messages.message;
+  const submitSearch = (query: FormDataEntryValue | null): void => {
+    if (!options.onSearch) return;
+    options.onSearch(typeof query === "string" ? query.trim() : "");
+  };
   const outlet = React.isValidElement(options.content) && options.content.type === "main"
     ? React.cloneElement(options.content as React.ReactElement<{ className?: string }>, {
         className: options.mainClassName ?? (options.content.props as { className?: string }).className ?? "desktop-main",
@@ -45,7 +53,7 @@ export function createWorkspaceShellElement(options: WorkspaceShellElementOption
     {
       className: `desktop-shell cabinet-home-shell workspace-shell-frame${options.rootClassName ? ` ${options.rootClassName}` : ""}`,
       "data-cabinet-react-root": "mounted",
-      "data-design-reference": "penpot-20260713",
+      "data-design-reference": "penpot-20260721",
       "data-shell-route": options.model.route,
       "data-shell-variant": options.model.variant,
       ...options.rootAttributes,
@@ -68,12 +76,62 @@ export function createWorkspaceShellElement(options: WorkspaceShellElementOption
           onClick: action,
         }, e("span", { className: "nav-marker", "aria-hidden": "true" }), item.label);
       })),
-      e("section", { className: "sidebar-document-tree", "aria-label": message("shell.documentTreeLabel") }, e("p", { className: "sidebar-section-label" }, message("shell.documentTreeLabel")), e("strong", { className: "tree-section-heading" }, e(ChevronDown, SHELL_ICON_PROPS), message("shell.gettingStarted")), e("button", { type: "button", "data-action": "navigate-search", onClick: options.onSearch, disabled: !options.onSearch }, message("shell.welcomeDocument")), e("strong", { className: "tree-section-heading" }, e(ChevronDown, SHELL_ICON_PROPS), message("shell.projects")), ...(options.documentShortcuts ?? []).map((shortcut, index) => shortcut.onOpen
-        ? e("button", { key: `${shortcut.label}-${index}`, type: "button", "data-action": shortcut.actionId ?? "open-sidebar-document", onClick: shortcut.onOpen }, shortcut.label)
-        : e("span", { key: `${shortcut.label}-${index}`, className: "sidebar-current-document", "aria-current": "page" }, shortcut.label)), e("strong", { className: "tree-section-heading" }, e(ChevronRight, SHELL_ICON_PROPS), message("shell.reading"))),
+      e(
+        "section",
+        { className: "sidebar-document-tree", "aria-label": message("shell.documentTreeLabel") },
+        e("p", { className: "sidebar-section-label" }, message("shell.documentTreeLabel")),
+        e(
+          "details",
+          { className: "tree-folder", open: true },
+          e("summary", { className: "tree-section-heading" }, e(ChevronDown, SHELL_ICON_PROPS), message("shell.projects")),
+          ...(options.documentShortcuts ?? []).map((shortcut, index) => shortcut.onOpen
+            ? e("button", { key: `${shortcut.label}-${index}`, type: "button", "data-action": shortcut.actionId ?? "open-sidebar-document", onClick: shortcut.onOpen }, shortcut.label)
+            : e("span", { key: `${shortcut.label}-${index}`, className: "sidebar-current-document", "aria-current": "page" }, shortcut.label)),
+        ),
+        e("details", { className: "tree-folder" }, e("summary", { className: "tree-section-heading" }, e(ChevronRight, SHELL_ICON_PROPS), message("shell.reading"))),
+      ),
       e("div", { className: "sidebar-footer" }, e("span", { className: "saved-indicator" }, e("i", { "aria-hidden": "true" }), options.savedStatus ?? message("shell.saved"))),
     ),
-    e("header", { className: `desktop-topbar${options.topbarClassName ? ` ${options.topbarClassName}` : ""}` }, options.topbarContent ?? e("button", { type: "button", className: "topbar-search", "data-action": options.searchActionId ?? "navigate-search", onClick: options.onSearch, disabled: !options.onSearch, "aria-label": message("shell.searchPrompt"), title: options.onSearch ? message("shell.searchPrompt") : message("shell.searchUnavailable") }, e(Search, SHELL_ICON_PROPS), e("span", null, message("shell.searchPlaceholder")))),
+    e("header", { className: `desktop-topbar${options.topbarClassName ? ` ${options.topbarClassName}` : ""}` }, options.topbarContent ?? e(
+      "form",
+      {
+        className: "topbar-search",
+        role: "search",
+        onSubmit: (event: React.FormEvent<HTMLFormElement>) => {
+          event.preventDefault();
+          submitSearch(new FormData(event.currentTarget).get("workspace-search"));
+        },
+      },
+      e("button", {
+        type: "button",
+        className: "topbar-search-submit",
+        "data-action": "submit-workspace-search",
+        disabled: !options.onSearch,
+        "aria-label": message("shell.searchPrompt"),
+        onClick: (event: React.MouseEvent<HTMLButtonElement>) => {
+          submitSearch(new FormData(event.currentTarget.form ?? undefined).get("workspace-search"));
+        },
+      }, e(Search, SHELL_ICON_PROPS)),
+      e("input", {
+        key: options.searchValue ?? "",
+        type: "search",
+        name: "workspace-search",
+        defaultValue: options.searchValue ?? "",
+        "data-action": options.searchActionId ?? "workspace-search-input",
+        placeholder: message("shell.searchPlaceholder"),
+        disabled: !options.onSearch,
+        "aria-label": options.searchAriaLabel ?? message("shell.searchPrompt"),
+        onFocus: () => options.onSearchOpen?.(),
+        onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => {
+          if (event.key !== "Escape" || !options.onSearchEscape) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const query = event.currentTarget.value.trim();
+          if (query) event.currentTarget.value = "";
+          options.onSearchEscape(query);
+        },
+      }),
+    )),
     outlet,
     e("div", { className: "workspace-global-host", "data-workspace-global-host": "mounted" }, options.globalLayer),
   );

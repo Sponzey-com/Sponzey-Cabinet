@@ -106,16 +106,19 @@ export interface ReactUiActionCollection {
 export function collectReactUiActions(node: React.ReactNode): ReactUiActionCollection {
   const actions: RenderedUiAction[] = [];
   let unidentifiedControlCount = 0;
-  visit(node);
+  visit(node, false);
   return Object.freeze({ actions: Object.freeze(actions), unidentifiedControlCount });
 
-  function visit(current: React.ReactNode): void {
+  function visit(current: React.ReactNode, formSubmitConnected: boolean): void {
     if (Array.isArray(current)) {
-      current.forEach(visit);
+      current.forEach((child) => visit(child, formSubmitConnected));
       return;
     }
     if (!React.isValidElement(current)) return;
     const props = current.props as Record<string, unknown>;
+    const childFormSubmitConnected = typeof current.type === "string" && current.type === "form"
+      ? typeof props.onSubmit === "function"
+      : formSubmitConnected;
     if (typeof current.type === "string" && isInteractiveHost(current.type, props)) {
       const actionId = props["data-action"];
       if (typeof actionId !== "string" || actionId.length === 0) {
@@ -124,11 +127,11 @@ export function collectReactUiActions(node: React.ReactNode): ReactUiActionColle
         actions.push(Object.freeze({
           actionId,
           enabled: props.disabled !== true,
-          callbackConnected: hasInteractionCallback(current.type, props),
+          callbackConnected: hasInteractionCallback(current.type, props, formSubmitConnected),
         }));
       }
     }
-    visit(props.children as React.ReactNode);
+    visit(props.children as React.ReactNode, childFormSubmitConnected);
   }
 }
 
@@ -137,11 +140,14 @@ function isInteractiveHost(type: string, props: Record<string, unknown>): boolea
   return type === "a" && typeof props.href === "string";
 }
 
-function hasInteractionCallback(type: string, props: Record<string, unknown>): boolean {
+function hasInteractionCallback(type: string, props: Record<string, unknown>, formSubmitConnected: boolean): boolean {
   if (type === "input" || type === "select" || type === "textarea") {
-    return typeof props.onChange === "function" || typeof props.onInput === "function";
+    return typeof props.onChange === "function"
+      || typeof props.onInput === "function"
+      || (formSubmitConnected && typeof props.name === "string" && props.name.length > 0);
   }
   if (type === "a" && typeof props.href === "string") return true;
+  if (type === "button" && props.type === "submit" && formSubmitConnected) return true;
   return typeof props.onClick === "function";
 }
 

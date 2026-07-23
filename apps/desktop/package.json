@@ -5,12 +5,7 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "run:app": "sh ../../scripts/run_desktop_app.sh",
-    "run:package-smoke": "sh ../../scripts/run_desktop_package_smoke.sh",
-    "run:tauri-build": "sh ../../scripts/run_desktop_tauri_build.sh",
-    "run:packaged-app-smoke": "sh ../../scripts/run_desktop_packaged_app_smoke.sh",
-    "run:packaged-ui-smoke": "sh ../../scripts/run_desktop_packaged_ui_smoke.sh",
-    "run:dist-browser-smoke": "sh ../../scripts/run_desktop_dist_browser_smoke.sh"
+    "run:app": "sh ../../scripts/run_desktop_app.sh"
   },
   "dependencies": {
     "@codemirror/commands": ">=6",
@@ -20,8 +15,11 @@
     "@sponzey-cabinet/client-core": "file:../../packages/client-core",
     "@sponzey-cabinet/editor": "file:../../packages/editor",
     "@sponzey-cabinet/ui": "file:../../packages/ui",
+    "graphology": "0.26.0",
+    "graphology-layout-forceatlas2": "0.10.1",
     "lucide-react": "^0.468.0",
     "react": ">=18",
-    "react-dom": ">=18"
+    "react-dom": ">=18",
+    "sigma": "3.0.3"
   }
 }

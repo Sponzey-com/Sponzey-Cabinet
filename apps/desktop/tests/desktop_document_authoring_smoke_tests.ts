@@ -4,15 +4,16 @@ import test from "node:test";
 import type { CurrentDocumentView, DocumentHistoryPage } from "../../../packages/client-core/src/index.ts";
 import { createDesktopDocumentAuthoringWorkspace } from "../src/index.ts";
 
-test("desktop document authoring smoke exposes split source and preview mode", () => {
+test("desktop document authoring smoke exposes WYSIWYG authoring and plain text source entry", () => {
   const workspace = createDesktopDocumentAuthoringWorkspace(currentDocument(), historyPage());
-  const table = workspace.preview.blocks.find((block) => block.kind === "table");
 
   assert.equal(workspace.mode, "document-authoring-workspace");
-  assert.equal(workspace.viewMode, "split");
+  assert.equal(workspace.editorSurface, "wysiwyg");
+  assert.equal(workspace.sourceEntry, "plain-text-modal");
+  assert.equal("viewMode" in workspace, false);
+  assert.equal("availableModes" in workspace, false);
   assert.equal(workspace.current.queryName, "get-current-document");
   assert.equal(workspace.history.queryName, "get-document-history");
-  assert.equal(table?.kind, "table");
   assert.equal(JSON.stringify(workspace).includes("provider_api_key_fixture"), false);
 });
 

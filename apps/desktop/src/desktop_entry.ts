@@ -13,10 +13,10 @@ import {
   createDocumentNavigatorLoadingModel,
   transitionDocumentNavigatorModel,
   DocumentSaveCoordinatorState,
-  type DocumentEditorViewMode,
   type DocumentNavigatorModel,
   type PersonalWorkspaceHomeModel,
 } from "@sponzey-cabinet/ui";
+import { applyMarkdownFormattingCommand } from "@sponzey-cabinet/editor";
 import type { DocumentDiffQuery, DocumentNavigatorView } from "@sponzey-cabinet/client-core";
 
 import { loadDesktopDocumentNavigator } from "./desktop_navigator_controller.ts";
@@ -25,12 +25,14 @@ import {
   cancelDesktopRestore,
   createDesktopBackupRecoverySnapshot,
   dismissDesktopRestoreConfirmation,
+  loadDesktopBackupCatalog,
   pollDesktopBackupOperation,
   pollDesktopRestoreOperation,
   previewDesktopRestore,
   recoverDesktopBackupStartup,
   startDesktopBackupOperation,
   startDesktopRestoreOperation,
+  selectDesktopBackupCatalogPackage,
   type DesktopBackupRecoverySnapshot,
 } from "./desktop_backup_recovery_controller.ts";
 import {
@@ -40,6 +42,7 @@ import {
   type DesktopLinkOverviewSnapshot,
 } from "./desktop_link_overview_controller.ts";
 import {
+  applyDesktopAssetDragState,
   applyDesktopAssetDetailResult,
   createDesktopAssetPlacementOptions,
   createDesktopAssetSnapshot,
@@ -56,6 +59,10 @@ import {
   requestDesktopAssetPreview,
   requestDesktopAssetOpen,
   requestDesktopWorkspaceAssetLoad,
+  requestDesktopWorkspaceAssetNextPage,
+  repairDesktopAttachmentProjection,
+  setDesktopAssetMediaFilter,
+  setDesktopAssetQuery,
   selectDesktopAsset,
   closeDesktopAssetPreview,
   unlinkDesktopSelectedAsset,
@@ -86,6 +93,22 @@ import {
 import { createDesktopCanvasViewportDebouncer } from "./desktop_canvas_viewport_debouncer.ts";
 import { createDesktopCanvasMutationQueue } from "./desktop_canvas_mutation_queue.ts";
 import {
+  changeCanvasTextEditDraft,
+  closeCanvasTextEditDialog,
+  createClosedCanvasTextEditDialog,
+  openCanvasTextEditDialog,
+} from "./canvas_text_edit_dialog.ts";
+import {
+  createDesktopCanvasCatalogSnapshot,
+  loadDesktopCanvasCatalog,
+  requestDesktopCanvasCatalogLoad,
+  requestDesktopCanvasSelection,
+  resolveDesktopCanvasMenuTarget,
+  selectDesktopCanvas as selectDesktopCanvasCatalog,
+  type DesktopCanvasCatalogSnapshot,
+} from "./desktop_canvas_catalog_controller.ts";
+import {
+  HOME_GRAPH_PROJECTION_LIMIT,
   createDesktopGraphSnapshot,
   loadDesktopKnowledgeGraphWithFreshness,
   loadDesktopGlobalKnowledgeGraph,
@@ -102,6 +125,7 @@ import {
 } from "./desktop_document_authoring_controller.ts";
 import { createDesktopRevisionMetadataGenerator } from "./desktop_revision_metadata_generator.ts";
 import {
+  createDesktopGraphScopeIntent,
   createDesktopRouteControllerState,
   graphQueryScopeForRoute,
   transitionDesktopRoute,
@@ -126,9 +150,27 @@ import {
 import { createTauriDesktopTransport } from "./tauri_desktop_transport.ts";
 import { getGlobalTauriInvoke } from "./tauri_home_transport.ts";
 import { createTauriProjectionTransport } from "./tauri_projection_transport.ts";
+import { synchronizeCurrentDocumentProjections } from "./desktop_projection_synchronizer.ts";
 import { createTauriGlobalGraphTransport } from "./tauri_global_graph_transport.ts";
-import { createTauriAssetImportTransport } from "./tauri_asset_import_transport.ts";
+import { createTauriGraphPreferenceTransport } from "./tauri_graph_preference_transport.ts";
+import {
+  createDefaultDesktopGraphPreference,
+  graphQueryPatchFromPreference,
+  preferenceFromGraphQuery,
+} from "./desktop_graph_preference.ts";
+import { createDesktopGraphCameraSaveScheduler } from "./desktop_graph_camera_save_scheduler.ts";
+import {
+  applyDesktopGraphPreferenceLoad,
+  applyDesktopGraphPreferenceSave,
+  applyDesktopGraphPreferenceSaveFailure,
+  createDesktopGraphPreferenceSnapshot,
+  requestDesktopGraphPreferenceLoad,
+  requestDesktopGraphPreferenceSave,
+} from "./desktop_graph_preference_controller.ts";
+import { createTauriAssetImportTransport, type DesktopAssetImportSelection } from "./tauri_asset_import_transport.ts";
+import { getGlobalTauriEventListen, subscribeTauriAssetDrop } from "./tauri_asset_drop_transport.ts";
 import { createTauriCanvasTransport, type DesktopCanvasMutationDraft } from "./tauri_canvas_transport.ts";
+import { createTauriCanvasCatalogTransport } from "./tauri_canvas_catalog_transport.ts";
 import { createTauriBackupRecoveryTransport } from "./tauri_backup_recovery_transport.ts";
 import { createTauriDocumentDiffOperationTransport } from "./tauri_document_diff_operation_transport.ts";
 import {
@@ -148,6 +190,32 @@ import { runPackagedUiSmoke } from "./packaged_ui_smoke.ts";
 import { isMacDocumentSaveShortcut } from "./desktop_authoring_shortcut.ts";
 import { isMacWorkspaceSearchShortcut } from "./desktop_shell_shortcut.ts";
 import {
+  createDesktopSearchNavigationIntent,
+  focusDesktopWorkspaceSearch,
+} from "./desktop_search_navigation.ts";
+import {
+  captureDesktopSearchViewport,
+  createDesktopSearchReturnContext,
+  restoreDesktopSearchViewport,
+  transitionDesktopSearchReturnContext,
+  type DesktopSearchReturnContext,
+} from "./desktop_search_return_context.ts";
+import {
+  beginDesktopRouteQuery,
+  canApplyDesktopRouteQuery,
+  createDesktopRouteQueryLifecycle,
+  transitionDesktopRouteQueryLifecycle,
+} from "./desktop_route_query_lifecycle.ts";
+import {
+  createDesktopSearchResultWindow,
+  transitionDesktopSearchResultWindow,
+} from "./desktop_search_result_window.ts";
+import { createDesktopSearchEscapeIntent } from "./desktop_search_escape_intent.ts";
+import {
+  createGlobalSearchOverlayLifecycle,
+  transitionGlobalSearchOverlay,
+} from "./global_search_overlay_lifecycle.ts";
+import {
   createKoKrHistoryDateFormatter,
   presentDocumentHistory,
 } from "./document_history_presenter.ts";
@@ -163,6 +231,17 @@ import {
   transitionDocumentHistoryCompareSelection,
 } from "./document_history_compare_selection.ts";
 import {
+  applyDocumentAssetLibraryLoad,
+  beginDocumentAssetLibraryLink,
+  closeDocumentAssetLibrary,
+  completeDocumentAssetLibraryLink,
+  createDocumentAssetLibraryState,
+  requestDocumentAssetLibraryOpen,
+  requestDocumentAssetLibraryMore,
+  selectDocumentAssetLibraryItem,
+  type DocumentAssetLibraryState,
+} from "./document_asset_library_state.ts";
+import {
   beginRestoreApply,
   beginRestorePreview,
   cancelRestoreConfirmation,
@@ -172,6 +251,11 @@ import {
   requestRestoreConfirmation,
   retryRestoreRecovery,
 } from "./document_restore_presentation.ts";
+import {
+  createDocumentRestoreRequestContext,
+  isCurrentDocumentRestoreRequest,
+  type DocumentRestoreRequestContext,
+} from "./document_restore_request_context.ts";
 
 const profile = createPersonalLocalDesktopCapabilityProfile();
 const homeQuery = Object.freeze({
@@ -188,8 +272,10 @@ const desktopClient = bootstrapInvoke
   : undefined;
 const projectionClient = bootstrapInvoke ? createTauriProjectionTransport(bootstrapInvoke) : undefined;
 const globalGraphClient = bootstrapInvoke ? createTauriGlobalGraphTransport(bootstrapInvoke) : undefined;
+const graphPreferenceClient = bootstrapInvoke ? createTauriGraphPreferenceTransport(bootstrapInvoke) : undefined;
 const assetImportClient = bootstrapInvoke ? createTauriAssetImportTransport(bootstrapInvoke) : undefined;
 const canvasClient = bootstrapInvoke ? createTauriCanvasTransport(bootstrapInvoke) : undefined;
+const canvasCatalogClient = bootstrapInvoke ? createTauriCanvasCatalogTransport(bootstrapInvoke) : undefined;
 const backupClient = bootstrapInvoke ? createTauriBackupRecoveryTransport(bootstrapInvoke) : undefined;
 const documentDiffOperationClient = bootstrapInvoke
   ? createTauriDocumentDiffOperationTransport(bootstrapInvoke)
@@ -231,6 +317,8 @@ function DesktopApp(): React.ReactElement {
       originRoute: "Home",
     }),
   );
+  const routeStateRef = useRef(routeState);
+  const routeQueryLifecycleRef = useRef(createDesktopRouteQueryLifecycle("Home"));
   const generation = useRef(0);
   const [navigatorModel, setNavigatorModel] = useState<DocumentNavigatorModel>(() =>
     createDocumentNavigatorLoadingModel({
@@ -239,8 +327,23 @@ function DesktopApp(): React.ReactElement {
       generation: 0,
     }),
   );
+  const [searchReturnContext, setSearchReturnContext] = useState<DesktopSearchReturnContext>(
+    () => createDesktopSearchReturnContext(),
+  );
+  const [searchResultWindow, setSearchResultWindow] = useState(() =>
+    createDesktopSearchResultWindow(0, 0),
+  );
+  const [globalSearchOverlay, setGlobalSearchOverlay] = useState(() =>
+    createGlobalSearchOverlayLifecycle(),
+  );
+  const globalSearchOverlayRef = useRef(globalSearchOverlay);
+  const [searchOriginContext, setSearchOriginContext] = useState<Readonly<{
+    route: DesktopRoute;
+    selection: DesktopSelectionContext;
+  }>>(() => ({ route: { kind: "Home" }, selection: { workspaceId: "workspace-1", originRoute: "Home" } }));
   const authoringGeneration = useRef(0);
   const diffGeneration = useRef(0);
+  const restoreGeneration = useRef(0);
   const diffOperationSnapshotRef = useRef<DesktopDocumentDiffOperationSnapshot>(
     createDesktopDocumentDiffOperationSnapshot(),
   );
@@ -257,6 +360,16 @@ function DesktopApp(): React.ReactElement {
     status: "Idle",
     entries: [],
   }));
+  const isCurrentAuthoringRestoreContext = useCallback((context: DocumentRestoreRequestContext) => (
+    isCurrentDocumentRestoreRequest(
+      context,
+      createDocumentRestoreRequestContext(
+        authoringGeneration.current,
+        restoreGeneration.current,
+        authoringController?.snapshot().documentId ?? "",
+      ),
+    )
+  ), []);
   const beginAuthoringDiffGeneration = useCallback(() => {
     const active = diffOperationSnapshotRef.current;
     if (documentDiffOperationClient && (active.state === "Accepted" || active.state === "Running")) {
@@ -270,27 +383,52 @@ function DesktopApp(): React.ReactElement {
   const [documentInspectorState, setDocumentInspectorState] = useState<DocumentInspectorState>(() =>
     createDocumentInspectorState(),
   );
+  const documentInspectorStateRef = useRef(documentInspectorState);
+  useEffect(() => {
+    routeStateRef.current = routeState;
+  }, [routeState]);
+  useEffect(() => {
+    documentInspectorStateRef.current = documentInspectorState;
+  }, [documentInspectorState]);
   const [linkOverviewSnapshot, setLinkOverviewSnapshot] = useState<DesktopLinkOverviewSnapshot>(
     () => createDesktopLinkOverviewSnapshot("workspace-1", "unloaded"),
   );
-  const [editorViewMode, setEditorViewMode] = useState<DocumentEditorViewMode>("split");
+  const [plainTextEditorOpen, setPlainTextEditorOpen] = useState(false);
   const [graphSnapshot, setGraphSnapshot] = useState<DesktopGraphSurfaceSnapshot>(() =>
     createDesktopGraphSnapshot("workspace-1"),
   );
+  const [graphVisualSearch, setGraphVisualSearch] = useState("");
+  const [graphIncludeExternal, setGraphIncludeExternal] = useState(false);
   const graphSnapshotRef = useRef(graphSnapshot);
+  const graphPreferenceSnapshotRef = useRef(createDesktopGraphPreferenceSnapshot(homeQuery.workspaceId));
+  const graphCameraSaveSchedulerRef = useRef(createDesktopGraphCameraSaveScheduler({
+    delayMs: 180,
+    schedule: (run, delayMs) => globalThis.setTimeout(run, delayMs),
+    cancel: (handle) => globalThis.clearTimeout(handle as number),
+  }));
   const [assetSnapshot, setAssetSnapshot] = useState<DesktopAssetSurfaceSnapshot>(() =>
     createDesktopAssetSnapshot("workspace-1"),
   );
   const assetSnapshotRef = useRef(assetSnapshot);
+  const [documentAssetLibraryState, setDocumentAssetLibraryState] = useState<DocumentAssetLibraryState>(() =>
+    createDocumentAssetLibraryState("workspace-1"),
+  );
+  const documentAssetLibraryStateRef = useRef(documentAssetLibraryState);
   const [canvasSnapshot, setCanvasSnapshot] = useState<DesktopCanvasSurfaceSnapshot>(() =>
     createDesktopCanvasSnapshot("workspace-1"),
+  );
+  const [canvasCatalogSnapshot, setCanvasCatalogSnapshot] = useState<DesktopCanvasCatalogSnapshot>(() =>
+    createDesktopCanvasCatalogSnapshot("workspace-1"),
   );
   const [canvasArchiveConfirmationOpen, setCanvasArchiveConfirmationOpen] = useState(false);
   const [canvasRenameDialogOpen, setCanvasRenameDialogOpen] = useState(false);
   const [canvasRenameDraft, setCanvasRenameDraft] = useState("");
+  const [canvasTextEditDialog, setCanvasTextEditDialog] = useState(createClosedCanvasTextEditDialog);
   const [canvasDocumentPlacementId, setCanvasDocumentPlacementId] = useState<string>();
   const [canvasAssetPlacementId, setCanvasAssetPlacementId] = useState<string>();
   const canvasSnapshotRef = useRef(canvasSnapshot);
+  const canvasCatalogSnapshotRef = useRef(canvasCatalogSnapshot);
+  const canvasCatalogSignatureRef = useRef<string>();
   const [backupSnapshot, setBackupSnapshot] = useState<DesktopBackupRecoverySnapshot>(() =>
     createDesktopBackupRecoverySnapshot("workspace-1"),
   );
@@ -308,7 +446,9 @@ function DesktopApp(): React.ReactElement {
     ? activeRoute.centerDocumentId
       ?? currentSelection(routeState).documentId
       ?? homeModel.recentDocuments[0]?.documentId
-    : undefined;
+    : activeRoute.kind === "Document"
+      ? activeRoute.documentId
+      : undefined;
   const graphQueryScope = activeRoute.kind === "Graph" ? graphQueryScopeForRoute(activeRoute) : "local";
   const assetDocumentId = activeRoute.kind === "Assets"
     ? activeRoute.documentId
@@ -317,6 +457,15 @@ function DesktopApp(): React.ReactElement {
       : undefined;
   const requestedAssetId = activeRoute.kind === "Assets" ? activeRoute.assetId : undefined;
   const activeCanvasId = activeRoute.kind === "Canvas" ? activeRoute.canvasId : undefined;
+  useEffect(() => {
+    const activeDocumentId = activeRoute.kind === "Document" ? activeRoute.documentId : undefined;
+    const current = documentAssetLibraryStateRef.current;
+    if (current.status === "Closed") return;
+    if (activeDocumentId && activeDocumentId === current.documentId) return;
+    const closed = closeDocumentAssetLibrary(current);
+    documentAssetLibraryStateRef.current = closed;
+    setDocumentAssetLibraryState(closed);
+  }, [activeRoute.kind, activeRoute.kind === "Document" ? activeRoute.documentId : undefined]);
 
   const commitGraphSnapshot = useCallback((snapshot: DesktopGraphSurfaceSnapshot) => {
     graphSnapshotRef.current = snapshot;
@@ -327,6 +476,12 @@ function DesktopApp(): React.ReactElement {
     if (snapshot.generation < canvasSnapshotRef.current.generation) return;
     canvasSnapshotRef.current = snapshot;
     setCanvasSnapshot(snapshot);
+  }, []);
+
+  const commitCanvasCatalogSnapshot = useCallback((snapshot: DesktopCanvasCatalogSnapshot) => {
+    if (snapshot.generation < canvasCatalogSnapshotRef.current.generation) return;
+    canvasCatalogSnapshotRef.current = snapshot;
+    setCanvasCatalogSnapshot(snapshot);
   }, []);
 
   const commitBackupSnapshot = useCallback((snapshot: DesktopBackupRecoverySnapshot) => {
@@ -352,6 +507,14 @@ function DesktopApp(): React.ReactElement {
     ));
   }, [commitBackupSnapshot]);
 
+  const runBackupCatalogLoad = useCallback(async (cursor?: string) => {
+    if (!backupClient) return;
+    const current = backupSnapshotRef.current;
+    const next = await loadDesktopBackupCatalog(backupClient, current, { cursor, limit: 20 });
+    if (backupSnapshotRef.current.generation !== current.generation) return;
+    commitBackupSnapshot(next);
+  }, [commitBackupSnapshot]);
+
   const runBackupPoll = useCallback(async () => {
     if (!backupClient) return;
     const current = backupSnapshotRef.current;
@@ -359,7 +522,8 @@ function DesktopApp(): React.ReactElement {
     if (backupSnapshotRef.current.generation !== current.generation
       || backupSnapshotRef.current.operationId !== current.operationId) return;
     commitBackupSnapshot(next);
-  }, [commitBackupSnapshot]);
+    if (next.state === "Ready") await runBackupCatalogLoad();
+  }, [commitBackupSnapshot, runBackupCatalogLoad]);
 
   const runBackupOperationCancel = useCallback(async () => {
     if (!backupClient) return;
@@ -510,16 +674,44 @@ function DesktopApp(): React.ReactElement {
     commitCanvasSnapshot(await runDesktopCanvasMutation(canvasClient, mutating));
   }, [commitCanvasSnapshot]);
 
-  const runGraphQuery = useCallback(async (patch: Partial<DesktopGraphQueryState>) => {
+  const runGraphQuery = useCallback(async (
+    patch: Partial<DesktopGraphQueryState>,
+    globalProjectionLimit?: number,
+  ) => {
     const loading = requestDesktopGraphLoad(graphSnapshotRef.current, {
       centerDocumentId: graphCenterDocumentId,
       ...patch,
     });
     commitGraphSnapshot(loading);
+    const preferenceFieldsChanged = ["depth", "direction", "includeUnresolved", "includeAssets"]
+      .some((key) => Object.prototype.hasOwnProperty.call(patch, key));
+    if (graphPreferenceClient && preferenceFieldsChanged) {
+      const currentPreference = graphPreferenceSnapshotRef.current.preference;
+      const candidate = preferenceFromGraphQuery(loading.query, currentPreference.camera, currentPreference.includeExternal);
+      const saving = requestDesktopGraphPreferenceSave(graphPreferenceSnapshotRef.current, candidate);
+      graphPreferenceSnapshotRef.current = saving;
+      if (saving.state === "Saving") {
+        void graphPreferenceClient.save(saving.workspaceId, saving.preference)
+          .then(() => {
+            graphPreferenceSnapshotRef.current = applyDesktopGraphPreferenceSave(
+              graphPreferenceSnapshotRef.current, saving.generation, saving.workspaceId,
+            );
+          })
+          .catch(() => {
+            graphPreferenceSnapshotRef.current = applyDesktopGraphPreferenceSaveFailure(
+              graphPreferenceSnapshotRef.current, saving.generation, saving.workspaceId,
+            );
+          });
+      }
+    }
     if (loading.state !== "Loading") return;
     if (loading.query.scope === "global") {
       if (!globalGraphClient) return;
-      const result = await loadDesktopGlobalKnowledgeGraph(globalGraphClient, loading);
+      const result = await loadDesktopGlobalKnowledgeGraph(
+        globalGraphClient,
+        loading,
+        globalProjectionLimit,
+      );
       if (graphSnapshotRef.current.generation === result.generation) commitGraphSnapshot(result);
       return;
     }
@@ -535,6 +727,47 @@ function DesktopApp(): React.ReactElement {
     if (graphSnapshotRef.current.generation === result.generation) commitGraphSnapshot(result);
   }, [commitGraphSnapshot, graphCenterDocumentId]);
 
+  const queueGraphCameraPreference = useCallback((camera: ReturnType<typeof createDefaultDesktopGraphPreference>["camera"]) => {
+    const current = graphPreferenceSnapshotRef.current;
+    const candidate = preferenceFromGraphQuery(current.preference, camera, current.preference.includeExternal);
+    const saving = requestDesktopGraphPreferenceSave(current, candidate);
+    graphPreferenceSnapshotRef.current = saving;
+    graphCameraSaveSchedulerRef.current.queue(camera, () => {
+      const latest = graphPreferenceSnapshotRef.current;
+      if (!graphPreferenceClient || latest.state !== "Saving") return;
+      void graphPreferenceClient.save(latest.workspaceId, latest.preference)
+        .then(() => {
+          graphPreferenceSnapshotRef.current = applyDesktopGraphPreferenceSave(
+            graphPreferenceSnapshotRef.current, latest.generation, latest.workspaceId,
+          );
+        })
+        .catch(() => {
+          graphPreferenceSnapshotRef.current = applyDesktopGraphPreferenceSaveFailure(
+            graphPreferenceSnapshotRef.current, latest.generation, latest.workspaceId,
+          );
+        });
+    });
+  }, []);
+
+  const updateGraphIncludeExternal = useCallback((includeExternal: boolean) => {
+    setGraphIncludeExternal(includeExternal);
+    const current = graphPreferenceSnapshotRef.current;
+    const saving = requestDesktopGraphPreferenceSave(current, Object.freeze({ ...current.preference, includeExternal }));
+    graphPreferenceSnapshotRef.current = saving;
+    if (!graphPreferenceClient || saving.state !== "Saving") return;
+    void graphPreferenceClient.save(saving.workspaceId, saving.preference)
+      .then(() => {
+        graphPreferenceSnapshotRef.current = applyDesktopGraphPreferenceSave(
+          graphPreferenceSnapshotRef.current, saving.generation, saving.workspaceId,
+        );
+      })
+      .catch(() => {
+        graphPreferenceSnapshotRef.current = applyDesktopGraphPreferenceSaveFailure(
+          graphPreferenceSnapshotRef.current, saving.generation, saving.workspaceId,
+        );
+      });
+  }, []);
+
   const runGraphRepair = useCallback(async () => {
     const repairing = requestDesktopGraphRepair(graphSnapshotRef.current);
     commitGraphSnapshot(repairing);
@@ -543,10 +776,107 @@ function DesktopApp(): React.ReactElement {
     if (graphSnapshotRef.current.generation === result.generation) commitGraphSnapshot(result);
   }, [commitGraphSnapshot]);
 
+  const refreshVisibleKnowledgeSurfaces = useCallback((documentId: string) => {
+    const visible = visibleRoute(routeState);
+    if (visible.kind === "Home") {
+      void runGraphQuery({ scope: "global", globalCursor: undefined }, HOME_GRAPH_PROJECTION_LIMIT);
+      return;
+    }
+    if (visible.kind === "Graph") {
+      if (graphSnapshotRef.current.query.scope === "global") {
+        void runGraphQuery({ scope: "global", globalCursor: undefined }, HOME_GRAPH_PROJECTION_LIMIT);
+        return;
+      }
+      void runGraphQuery({
+        scope: "local",
+        centerDocumentId: graphSnapshotRef.current.query.centerDocumentId ?? documentId,
+      });
+      return;
+    }
+    if (visible.kind === "Document") {
+      void runGraphQuery({ scope: "local", centerDocumentId: documentId });
+    }
+  }, [routeState, runGraphQuery]);
+
+  const synchronizeDocumentKnowledgeSurfaces = useCallback(async (workspaceId: string, documentId: string) => {
+    if (!projectionClient) return undefined;
+    const result = await synchronizeCurrentDocumentProjections(
+      projectionClient,
+      workspaceId,
+      documentId,
+    );
+    if (result.state === "Completed") refreshVisibleKnowledgeSurfaces(documentId);
+    return result;
+  }, [projectionClient, refreshVisibleKnowledgeSurfaces]);
+
   const commitAssetSnapshot = useCallback((snapshot: DesktopAssetSurfaceSnapshot) => {
     assetSnapshotRef.current = snapshot;
     setAssetSnapshot(snapshot);
   }, []);
+
+  const commitDocumentAssetLibraryState = useCallback((state: DocumentAssetLibraryState) => {
+    documentAssetLibraryStateRef.current = state;
+    setDocumentAssetLibraryState(state);
+  }, []);
+
+  const synchronizeAssetProjection = useCallback(async (snapshot: DesktopAssetSurfaceSnapshot) => {
+    if (snapshot.scope !== "Document" || !snapshot.documentId || !projectionClient) return;
+    return synchronizeDocumentKnowledgeSurfaces(
+      snapshot.workspaceId,
+      snapshot.documentId,
+    );
+  }, [synchronizeDocumentKnowledgeSurfaces]);
+
+  const openDocumentAssetLibrary = useCallback(async (documentId: string | undefined) => {
+    const loading = requestDocumentAssetLibraryOpen(documentAssetLibraryStateRef.current, documentId);
+    if (loading === documentAssetLibraryStateRef.current) return;
+    commitDocumentAssetLibraryState(loading);
+    const result = assetImportClient
+      ? await loadDesktopWorkspaceAssets(assetImportClient, loading.assets)
+      : Object.freeze({ ...loading.assets, state: "Failed" as const, errorCode: "COMMAND_BRIDGE_FAILED", retryable: false });
+    const completed = applyDocumentAssetLibraryLoad(loading, loading.generation, result);
+    if (documentAssetLibraryStateRef.current.generation === loading.generation) {
+      commitDocumentAssetLibraryState(completed);
+    }
+  }, [commitDocumentAssetLibraryState]);
+
+  const linkDocumentAssetLibrarySelection = useCallback(async () => {
+    const linking = beginDocumentAssetLibraryLink(documentAssetLibraryStateRef.current);
+    if (linking === documentAssetLibraryStateRef.current) return;
+    commitDocumentAssetLibraryState(linking);
+    const generation = linking.generation;
+    const linked = assetImportClient && desktopClient && bootstrapUuidSource
+      ? await linkDesktopSelectedAsset(
+          assetImportClient,
+          desktopClient,
+          linking.assets,
+          () => `document-asset-link-${bootstrapUuidSource()}`,
+        )
+      : Object.freeze({ ...linking.assets, mutationState: "Failed" as const });
+    const completion = completeDocumentAssetLibraryLink(linking, generation, linked);
+    if (documentAssetLibraryStateRef.current.generation !== generation) return;
+    commitDocumentAssetLibraryState(completion.library);
+    if (completion.documentAssets) {
+      commitAssetSnapshot(completion.documentAssets);
+      if (completion.documentAssets.mutationState === "Idle") {
+        await synchronizeAssetProjection(completion.documentAssets);
+      }
+    }
+    return completion;
+  }, [commitAssetSnapshot, commitDocumentAssetLibraryState, synchronizeAssetProjection]);
+
+  const loadMoreDocumentAssetLibrary = useCallback(async () => {
+    const loading = requestDocumentAssetLibraryMore(documentAssetLibraryStateRef.current);
+    if (loading === documentAssetLibraryStateRef.current) return;
+    commitDocumentAssetLibraryState(loading);
+    const result = assetImportClient
+      ? await loadDesktopWorkspaceAssets(assetImportClient, loading.assets)
+      : Object.freeze({ ...loading.assets, state: "Failed" as const, errorCode: "COMMAND_BRIDGE_FAILED", retryable: false });
+    const completed = applyDocumentAssetLibraryLoad(loading, loading.generation, result);
+    if (documentAssetLibraryStateRef.current.generation === loading.generation) {
+      commitDocumentAssetLibraryState(completed);
+    }
+  }, [commitDocumentAssetLibraryState]);
 
   const runAssetQuery = useCallback(async () => {
     const loading = requestDesktopAssetLoad(assetSnapshotRef.current, assetDocumentId);
@@ -584,7 +914,17 @@ function DesktopApp(): React.ReactElement {
     if (assetSnapshotRef.current.generation === result.generation) commitAssetSnapshot(result);
   }, [commitAssetSnapshot]);
 
-  const runAssetImport = useCallback(async () => {
+  const runAssetLoadMore = useCallback(async () => {
+    const loading = requestDesktopWorkspaceAssetNextPage(assetSnapshotRef.current);
+    if (loading === assetSnapshotRef.current) return;
+    commitAssetSnapshot(loading);
+    const result = assetImportClient
+      ? await loadDesktopWorkspaceAssets(assetImportClient, loading)
+      : Object.freeze({ ...loading, state: "Failed" as const, errorCode: "COMMAND_BRIDGE_FAILED", retryable: false });
+    if (assetSnapshotRef.current.generation === result.generation) commitAssetSnapshot(result);
+  }, [commitAssetSnapshot]);
+
+  const runAssetImport = useCallback(async (preparedSelection?: DesktopAssetImportSelection) => {
     const selecting = beginDesktopAssetImport(assetSnapshotRef.current);
     if (selecting === assetSnapshotRef.current) return;
     commitAssetSnapshot(selecting);
@@ -606,10 +946,59 @@ function DesktopApp(): React.ReactElement {
       (progress) => {
         if (assetSnapshotRef.current.importGeneration === importGeneration) commitAssetSnapshot(progress);
       },
+      preparedSelection,
     );
     if (assetSnapshotRef.current.importGeneration === importGeneration) commitAssetSnapshot(result);
+    if (result.importState === "Completed") await synchronizeAssetProjection(result);
     return result;
-  }, [commitAssetSnapshot]);
+  }, [commitAssetSnapshot, synchronizeAssetProjection]);
+
+  useEffect(() => {
+    return () => graphCameraSaveSchedulerRef.current.dispose();
+  }, []);
+
+  useEffect(() => {
+    const listen = getGlobalTauriEventListen();
+    if (!listen) return undefined;
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    const acceptsDocumentAttachmentDrop = () =>
+      visibleRoute(routeStateRef.current).kind === "Document"
+      && documentInspectorStateRef.current.tab === "attachments"
+      && assetSnapshotRef.current.scope === "Document"
+      && Boolean(assetSnapshotRef.current.documentId);
+    void subscribeTauriAssetDrop(listen, {
+      onState(state) {
+        if (!acceptsDocumentAttachmentDrop()) return;
+        commitAssetSnapshot(applyDesktopAssetDragState(assetSnapshotRef.current, state));
+      },
+      onSelection(selection) {
+        if (!acceptsDocumentAttachmentDrop()) return;
+        commitAssetSnapshot(applyDesktopAssetDragState(assetSnapshotRef.current, {
+          state: "dropped",
+          fileCount: selection.files.length,
+        }));
+        void runAssetImport(selection);
+      },
+      onError(errorCode) {
+        if (!acceptsDocumentAttachmentDrop()) return;
+        commitAssetSnapshot(Object.freeze({
+          ...assetSnapshotRef.current,
+          dropState: "Idle",
+          dropFileCount: 0,
+          importState: "Failed",
+          importErrorCode: errorCode,
+        }));
+      },
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unsubscribe = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [commitAssetSnapshot, runAssetImport]);
 
   const selectAndLoadAssetDetail = useCallback(async (assetId: string) => {
     const selected = selectDesktopAsset(assetSnapshotRef.current, assetId);
@@ -633,8 +1022,9 @@ function DesktopApp(): React.ReactElement {
       () => bootstrapUuidSource ? `document-attachment-unlink-${bootstrapUuidSource()}` : "",
     );
     if (assetSnapshotRef.current.selectedAssetId === current.selectedAssetId) commitAssetSnapshot(result);
+    if (result.mutationState === "Idle") await synchronizeAssetProjection(result);
     return result;
-  }, [commitAssetSnapshot]);
+  }, [commitAssetSnapshot, synchronizeAssetProjection]);
 
   const runAssetLink = useCallback(async () => {
     const current = assetSnapshotRef.current;
@@ -647,13 +1037,35 @@ function DesktopApp(): React.ReactElement {
       () => bootstrapUuidSource ? `document-attachment-link-${bootstrapUuidSource()}` : "",
     );
     if (assetSnapshotRef.current.selectedAssetId === current.selectedAssetId) commitAssetSnapshot(result);
-  }, [commitAssetSnapshot]);
+    if (result.mutationState === "Idle") await synchronizeAssetProjection(result);
+    return result;
+  }, [commitAssetSnapshot, synchronizeAssetProjection]);
 
   const runAssetImportCancel = useCallback(async () => {
     if (!assetImportClient) return;
     const current = assetSnapshotRef.current;
     const result = await cancelDesktopAssetImport(assetImportClient, current);
     if (assetSnapshotRef.current.importOperationId === current.importOperationId) commitAssetSnapshot(result);
+  }, [commitAssetSnapshot]);
+
+  const runAssetProjectionRepair = useCallback(async (operationId: string) => {
+    if (!projectionClient || !desktopClient) return;
+    const current = assetSnapshotRef.current;
+    const result = await repairDesktopAttachmentProjection(
+      projectionClient,
+      desktopClient,
+      current,
+      operationId,
+      (progress) => {
+        const stillCurrent = assetSnapshotRef.current.documentId === current.documentId
+          && assetSnapshotRef.current.importOperations?.some((operation) => operation.operationId === operationId);
+        if (stillCurrent) commitAssetSnapshot(progress);
+      },
+    );
+    const stillCurrent = assetSnapshotRef.current.documentId === current.documentId
+      && assetSnapshotRef.current.importOperations?.some((operation) => operation.operationId === operationId);
+    if (stillCurrent) commitAssetSnapshot(result);
+    return result;
   }, [commitAssetSnapshot]);
 
   const runAssetPreview = useCallback(async () => {
@@ -693,6 +1105,7 @@ function DesktopApp(): React.ReactElement {
     const current = visibleRoute(routeState);
     const dirtyDocument = current.kind === "Document" && ![
       DocumentSaveCoordinatorState.NoDocument,
+      DocumentSaveCoordinatorState.Clean,
       DocumentSaveCoordinatorState.Saved,
     ].includes(authoringSnapshot.saveState);
     let result = transitionDesktopRoute(routeState, {
@@ -716,16 +1129,138 @@ function DesktopApp(): React.ReactElement {
       }
     }
     setRouteState(result.state);
+    if (result.state.status === "Stable") {
+      routeQueryLifecycleRef.current = transitionDesktopRouteQueryLifecycle(
+        routeQueryLifecycleRef.current,
+        { type: "RouteActivated", route: visibleRoute(result.state).kind },
+      );
+    }
     return result.state.status === "Stable";
   }, [authoringSnapshot.documentId, authoringSnapshot.saveState, routeState]);
 
-  const loadHome = useCallback(async () => {
-    setHomeModel(createPersonalWorkspaceHomeModel({ profile, healthState: "Loading" }));
-    if (!desktopClient) {
-      setHomeModel(createPersonalWorkspaceHomeFailedModel(profile, "COMMAND_BRIDGE_FAILED", false));
+  const openCanvas = useCallback((documentId?: string) => {
+    const selectedCanvasId = resolveDesktopCanvasMenuTarget({
+      catalogState: canvasCatalogSnapshotRef.current.state,
+      selectedCanvasId: canvasCatalogSnapshotRef.current.selectedCanvasId,
+      entries: canvasCatalogSnapshotRef.current.entries,
+      displayedCanvasId: canvasSnapshotRef.current.canvasId,
+      displayedLifecycle: canvasSnapshotRef.current.canvas?.lifecycle,
+    });
+    requestDesktopRoute(
+      { kind: "Canvas", ...(selectedCanvasId ? { canvasId: selectedCanvasId } : {}) },
+      {
+        workspaceId: "workspace-1",
+        ...(documentId ? { documentId } : {}),
+        ...(selectedCanvasId ? { canvasId: selectedCanvasId } : {}),
+        originRoute: visibleRoute(routeStateRef.current).kind,
+      },
+    );
+  }, [requestDesktopRoute]);
+
+  const runCanvasCatalogLoad = useCallback(async () => {
+    const loading = requestDesktopCanvasCatalogLoad(canvasCatalogSnapshotRef.current);
+    commitCanvasCatalogSnapshot(loading);
+    if (!canvasCatalogClient) return;
+    const result = await loadDesktopCanvasCatalog(canvasCatalogClient, loading, 20);
+    if (canvasCatalogSnapshotRef.current.generation !== loading.generation) return;
+    commitCanvasCatalogSnapshot(result);
+    const route = visibleRoute(routeStateRef.current);
+    if (route.kind !== "Canvas" || route.canvasId || result.state !== "Ready" || !result.selectedCanvasId) return;
+    requestDesktopRoute(
+      { kind: "Canvas", canvasId: result.selectedCanvasId },
+      {
+        workspaceId: result.workspaceId,
+        canvasId: result.selectedCanvasId,
+        ...(currentSelection(routeStateRef.current).documentId
+          ? { documentId: currentSelection(routeStateRef.current).documentId }
+          : {}),
+        originRoute: "Canvas",
+      },
+    );
+  }, [commitCanvasCatalogSnapshot, requestDesktopRoute]);
+
+  const chooseCanvas = useCallback(async (canvasId: string) => {
+    if (!canvasCatalogClient) return;
+    const entry = canvasCatalogSnapshotRef.current.entries.find(
+      (candidate) => candidate.canvasId === canvasId,
+    );
+    if (entry?.lifecycle === "archived") {
+      requestDesktopRoute(
+        { kind: "Canvas", canvasId },
+        { workspaceId: "workspace-1", canvasId, originRoute: "Canvas" },
+      );
       return;
     }
-    setHomeModel(await loadDesktopWorkspaceHome(desktopClient, homeQuery));
+    const selecting = requestDesktopCanvasSelection(canvasCatalogSnapshotRef.current, canvasId);
+    if (selecting.state !== "Selecting") {
+      if (canvasCatalogSnapshotRef.current.selectedCanvasId === canvasId) {
+        requestDesktopRoute(
+          { kind: "Canvas", canvasId },
+          { workspaceId: "workspace-1", canvasId, originRoute: "Canvas" },
+        );
+      }
+      return;
+    }
+    commitCanvasCatalogSnapshot(selecting);
+    const result = await selectDesktopCanvasCatalog(canvasCatalogClient, selecting);
+    if (canvasCatalogSnapshotRef.current.generation !== selecting.generation) return;
+    commitCanvasCatalogSnapshot(result);
+    if (result.state !== "Ready" || !result.selectedCanvasId) return;
+    requestDesktopRoute(
+      { kind: "Canvas", canvasId: result.selectedCanvasId },
+      { workspaceId: result.workspaceId, canvasId: result.selectedCanvasId, originRoute: "Canvas" },
+    );
+  }, [commitCanvasCatalogSnapshot, requestDesktopRoute]);
+
+  const createCanvasFromCatalog = useCallback(async () => {
+    if (!canvasClient || !canvasCatalogClient || !bootstrapUuidSource) return;
+    const canvasId = `canvas-${bootstrapUuidSource()}`;
+    const loading = requestDesktopCanvasLoad(canvasSnapshotRef.current, canvasId);
+    commitCanvasSnapshot(loading);
+    const created = await createDesktopCanvas(canvasClient, loading, "새 캔버스");
+    if (canvasSnapshotRef.current.generation !== loading.generation) return;
+    commitCanvasSnapshot(created);
+    if (created.state !== "Ready") return;
+    const catalogLoading = requestDesktopCanvasCatalogLoad(canvasCatalogSnapshotRef.current);
+    commitCanvasCatalogSnapshot(catalogLoading);
+    const catalog = await loadDesktopCanvasCatalog(canvasCatalogClient, catalogLoading, 20);
+    if (canvasCatalogSnapshotRef.current.generation !== catalogLoading.generation) return;
+    commitCanvasCatalogSnapshot(catalog);
+    const selecting = requestDesktopCanvasSelection(catalog, canvasId);
+    const selected = selecting.state === "Selecting"
+      ? await selectDesktopCanvasCatalog(canvasCatalogClient, selecting)
+      : catalog;
+    commitCanvasCatalogSnapshot(selected);
+    if (selected.state !== "Ready" || selected.selectedCanvasId !== canvasId) return;
+    requestDesktopRoute(
+      { kind: "Canvas", canvasId },
+      { workspaceId: selected.workspaceId, canvasId, originRoute: "Canvas" },
+    );
+  }, [commitCanvasCatalogSnapshot, commitCanvasSnapshot, requestDesktopRoute]);
+
+  const changeGraphScope = useCallback((scope: "local" | "global") => {
+    const intent = createDesktopGraphScopeIntent(
+      scope,
+      homeQuery.workspaceId,
+      graphCenterDocumentId,
+    );
+    requestDesktopRoute(intent.route, intent.selection);
+  }, [graphCenterDocumentId, requestDesktopRoute]);
+
+  const loadHome = useCallback(async () => {
+    const started = beginDesktopRouteQuery(routeQueryLifecycleRef.current, "Home");
+    routeQueryLifecycleRef.current = started.state;
+    if (!started.ticket) return;
+    const ticket = started.ticket;
+    setHomeModel(createPersonalWorkspaceHomeModel({ profile, healthState: "Loading" }));
+    if (!desktopClient) {
+      if (canApplyDesktopRouteQuery(routeQueryLifecycleRef.current, ticket)) {
+        setHomeModel(createPersonalWorkspaceHomeFailedModel(profile, "COMMAND_BRIDGE_FAILED", false));
+      }
+      return;
+    }
+    const result = await loadDesktopWorkspaceHome(desktopClient, homeQuery);
+    if (canApplyDesktopRouteQuery(routeQueryLifecycleRef.current, ticket)) setHomeModel(result);
   }, []);
 
   const loadNavigator = useCallback((next: DocumentNavigatorModel) => {
@@ -749,11 +1284,22 @@ function DesktopApp(): React.ReactElement {
     });
   }, []);
 
-  const openNavigator = useCallback(() => {
+  const openGlobalSearchOverlay = useCallback(() => {
+    const origin = Object.freeze({
+      route: visibleRoute(routeState),
+      selection: currentSelection(routeState),
+    });
+    const opened = transitionGlobalSearchOverlay(globalSearchOverlayRef.current, {
+      type: "OpenRequested",
+      originRoute: origin.route,
+    });
     if (!requestDesktopRoute({ kind: "Search" }, {
       workspaceId: "workspace-1",
-      originRoute: visibleRoute(routeState).kind,
+      originRoute: origin.route.kind,
     })) return;
+    setSearchOriginContext(origin);
+    globalSearchOverlayRef.current = opened.state;
+    setGlobalSearchOverlay(opened.state);
     generation.current += 1;
     loadNavigator(createDocumentNavigatorLoadingModel({
       workspaceId: "workspace-1",
@@ -762,15 +1308,49 @@ function DesktopApp(): React.ReactElement {
     }));
   }, [loadNavigator, requestDesktopRoute, routeState]);
 
+  const openNavigator = useCallback((query?: string) => {
+    const origin = Object.freeze({
+      route: visibleRoute(routeState),
+      selection: currentSelection(routeState),
+    });
+    const opened = transitionGlobalSearchOverlay(globalSearchOverlayRef.current, {
+      type: "OpenRequested",
+      originRoute: origin.route,
+      query,
+    });
+    globalSearchOverlayRef.current = opened.state;
+    setGlobalSearchOverlay(opened.state);
+    const intent = createDesktopSearchNavigationIntent(
+      query,
+      "workspace-1",
+      visibleRoute(routeState).kind,
+    );
+    if (intent.kind === "NoOp") return;
+    if (!requestDesktopRoute(intent.route, intent.selection)) return;
+    setSearchOriginContext(origin);
+    setSearchReturnContext((current) => transitionDesktopSearchReturnContext(current, {
+      type: "SearchStarted",
+      query: intent.route.query,
+    }));
+    generation.current += 1;
+    loadNavigator(createDocumentNavigatorLoadingModel({
+      workspaceId: "workspace-1",
+      view: "Tree",
+      filter: intent.route.query,
+      generation: generation.current,
+    }));
+  }, [loadNavigator, requestDesktopRoute, routeState]);
+
   useEffect(() => {
     const handleSearchShortcut = (event: KeyboardEvent) => {
       if (!isMacWorkspaceSearchShortcut(event)) return;
       event.preventDefault();
-      openNavigator();
+      openGlobalSearchOverlay();
+      focusDesktopWorkspaceSearch(document);
     };
     window.addEventListener("keydown", handleSearchShortcut);
     return () => window.removeEventListener("keydown", handleSearchShortcut);
-  }, [openNavigator]);
+  }, [openGlobalSearchOverlay]);
 
   const selectNavigatorView = useCallback((view: DocumentNavigatorView, viewKey?: string) => {
     generation.current += 1;
@@ -801,12 +1381,79 @@ function DesktopApp(): React.ReactElement {
     }));
   }, [loadNavigator, navigatorModel]);
 
+  const closeSearchWithEscape = useCallback((query: string) => {
+    const closed = transitionGlobalSearchOverlay(globalSearchOverlayRef.current, { type: "EscapePressed" });
+    globalSearchOverlayRef.current = closed.state;
+    setGlobalSearchOverlay(closed.state);
+    const intent = createDesktopSearchEscapeIntent(query, searchOriginContext.route);
+    if (intent.kind === "ClearQuery") {
+      setSearchReturnContext(createDesktopSearchReturnContext());
+      filterNavigator("");
+      return;
+    }
+    requestDesktopRoute(intent.route, searchOriginContext.selection);
+  }, [filterNavigator, requestDesktopRoute, searchOriginContext]);
+
+  useEffect(() => {
+    setSearchResultWindow((current) => transitionDesktopSearchResultWindow(current, {
+      type: "Reconcile",
+      generation: navigatorModel.generation,
+      total: navigatorModel.items.length,
+    }));
+  }, [navigatorModel.generation, navigatorModel.items.length]);
+
+  useEffect(() => {
+    if (globalSearchOverlayRef.current.status !== "Searching") return;
+    if (navigatorModel.displayState === "Ready" || navigatorModel.displayState === "EmptyResult") {
+      const resolved = transitionGlobalSearchOverlay(globalSearchOverlayRef.current, {
+        type: "SearchSucceeded",
+        resultCount: navigatorModel.items.length,
+      });
+      globalSearchOverlayRef.current = resolved.state;
+      setGlobalSearchOverlay(resolved.state);
+      return;
+    }
+    if (navigatorModel.displayState === "Failed") {
+      const failed = transitionGlobalSearchOverlay(globalSearchOverlayRef.current, {
+        type: "SearchFailed",
+        errorCode: "GLOBAL_SEARCH_QUERY_FAILED",
+      });
+      globalSearchOverlayRef.current = failed.state;
+      setGlobalSearchOverlay(failed.state);
+    }
+  }, [navigatorModel.displayState, navigatorModel.items.length]);
+
   const openDocument = useCallback((documentId: string) => {
+    const openingFromSearch = visibleRoute(routeState).kind === "Search"
+      && searchReturnContext.status === "Results";
+    let nextSearchReturnContext = searchReturnContext;
+    const selected = transitionGlobalSearchOverlay(globalSearchOverlayRef.current, {
+      type: "ResultOpened",
+      result: { kind: "Document", documentId },
+    });
+    if (openingFromSearch && typeof document !== "undefined") {
+      const viewport = captureDesktopSearchViewport(document, documentId);
+      nextSearchReturnContext = transitionDesktopSearchReturnContext(searchReturnContext, {
+        type: "ViewportCaptured",
+        query: searchReturnContext.query,
+        ...viewport,
+      });
+      nextSearchReturnContext = transitionDesktopSearchReturnContext(nextSearchReturnContext, {
+        type: "ResultOpened",
+        query: searchReturnContext.query,
+        documentId,
+      });
+    }
     if (!requestDesktopRoute({ kind: "Document", documentId }, {
       workspaceId: "workspace-1",
       documentId,
       originRoute: visibleRoute(routeState).kind,
     })) return;
+    if (openingFromSearch) {
+      setSearchReturnContext(nextSearchReturnContext);
+      globalSearchOverlayRef.current = selected.state;
+      setGlobalSearchOverlay(selected.state);
+    }
     beginAuthoringDiffGeneration();
     setHistoryState({ status: "Idle", entries: [] });
     authoringGeneration.current += 1;
@@ -832,7 +1479,33 @@ function DesktopApp(): React.ReactElement {
           setAuthoringSnapshot(failedAuthoringSnapshot("COMMAND_BRIDGE_FAILED"));
         }
       });
-  }, [beginAuthoringDiffGeneration, requestDesktopRoute, routeState]);
+  }, [beginAuthoringDiffGeneration, requestDesktopRoute, routeState, searchReturnContext]);
+
+  const openSearchAsset = useCallback((assetId: string) => {
+    const selected = transitionGlobalSearchOverlay(globalSearchOverlayRef.current, {
+      type: "ResultOpened",
+      result: { kind: "Asset", assetId },
+    });
+    if (!requestDesktopRoute({ kind: "Assets", assetId }, {
+      workspaceId: "workspace-1",
+      assetId,
+      originRoute: visibleRoute(routeState).kind,
+    })) return;
+    globalSearchOverlayRef.current = selected.state;
+    setGlobalSearchOverlay(selected.state);
+  }, [requestDesktopRoute, routeState]);
+
+  const returnToSearch = useCallback(() => {
+    if (searchReturnContext.status !== "DocumentOpen") return;
+    const restored = transitionDesktopSearchReturnContext(searchReturnContext, { type: "ReturnRequested" });
+    if (restored.status !== "Results") return;
+    if (!requestDesktopRoute({ kind: "Search", query: restored.query }, {
+      workspaceId: "workspace-1",
+      documentId: searchReturnContext.documentId,
+      originRoute: "Document",
+    })) return;
+    setSearchReturnContext(restored);
+  }, [requestDesktopRoute, searchReturnContext]);
 
   const createNewDocument = useCallback(() => {
     beginAuthoringDiffGeneration();
@@ -867,9 +1540,13 @@ function DesktopApp(): React.ReactElement {
           documentId,
         }),
       )
-      .then((snapshot) => {
+      .then(async (snapshot) => {
         if (authoringGeneration.current === requestGeneration) {
           setAuthoringSnapshot(snapshot);
+          await synchronizeDocumentKnowledgeSurfaces("workspace-1", documentId);
+          if (authoringGeneration.current === requestGeneration) {
+            void runGraphQuery({ scope: "local", centerDocumentId: documentId });
+          }
         }
       })
       .catch(() => {
@@ -877,7 +1554,7 @@ function DesktopApp(): React.ReactElement {
           setAuthoringSnapshot(failedAuthoringSnapshot("COMMAND_BRIDGE_FAILED"));
         }
       });
-  }, [beginAuthoringDiffGeneration, requestDesktopRoute, routeState]);
+  }, [beginAuthoringDiffGeneration, requestDesktopRoute, routeState, runGraphQuery, synchronizeDocumentKnowledgeSurfaces]);
 
   const resumeDocument = useCallback(() => {
     const target = resolveDesktopDocumentMenuTarget(
@@ -899,10 +1576,19 @@ function DesktopApp(): React.ReactElement {
     const pending = kind === "retry"
       ? authoringController.retrySave()
       : authoringController.manualSave();
-    void pending.then(setAuthoringSnapshot);
+    void pending.then(async (snapshot) => {
+      setAuthoringSnapshot(snapshot);
+      if (
+        snapshot.workspaceId &&
+        snapshot.documentId &&
+        snapshot.saveState === DocumentSaveCoordinatorState.Saved
+      ) {
+        await synchronizeDocumentKnowledgeSurfaces(snapshot.workspaceId, snapshot.documentId);
+      }
+    });
     setAuthoringSnapshot(authoringController.snapshot());
     return pending;
-  }, []);
+  }, [synchronizeDocumentKnowledgeSurfaces]);
 
   useEffect(() => {
     if (surface !== "Authoring") return undefined;
@@ -1011,6 +1697,14 @@ function DesktopApp(): React.ReactElement {
   const previewAuthoringRestore = useCallback((versionId: string) => {
     const snapshot = authoringController?.snapshot();
     if (!desktopClient || !snapshot?.workspaceId || !snapshot.documentId) return;
+    const requestGeneration = authoringGeneration.current;
+    const requestRestoreGeneration = ++restoreGeneration.current;
+    const requestDocumentId = snapshot.documentId;
+    const context = createDocumentRestoreRequestContext(
+      requestGeneration,
+      requestRestoreGeneration,
+      requestDocumentId,
+    );
     const targetVersionLabel = historyState.entries.find((entry) => entry.versionId === versionId)
       ?.versionLabel ?? "선택한 버전";
     const previewing = beginRestorePreview(versionId);
@@ -1023,6 +1717,7 @@ function DesktopApp(): React.ReactElement {
         targetVersionId: versionId,
       })
       .then((preview) => {
+        if (!isCurrentAuthoringRestoreContext(context)) return;
         const restore = completeRestorePreview(previewing, {
           targetVersionId: preview.targetVersionId,
           expectedCurrentVersionId: preview.expectedCurrentVersionId,
@@ -1042,13 +1737,14 @@ function DesktopApp(): React.ReactElement {
         }));
       })
       .catch(() => {
+        if (!isCurrentAuthoringRestoreContext(context)) return;
         setHistoryState((current) => ({
           ...current,
           status: "Failed",
           errorCode: "COMMAND_BRIDGE_FAILED",
         }));
       });
-  }, [historyState.entries]);
+  }, [historyState.entries, isCurrentAuthoringRestoreContext]);
 
   const isCurrentAuthoringDiffContext = useCallback((context: NonNullable<typeof diffOperationContextRef.current>) => (
     authoringGeneration.current === context.authoringGeneration
@@ -1354,6 +2050,14 @@ function DesktopApp(): React.ReactElement {
       ? retryRestoreRecovery(restore)
       : beginRestoreApply(restore, `document-restore-${bootstrapUuidSource()}`);
     if (applying.status !== "Applying") return;
+    const requestGeneration = authoringGeneration.current;
+    const requestRestoreGeneration = ++restoreGeneration.current;
+    const requestDocumentId = snapshot.documentId;
+    const context = createDocumentRestoreRequestContext(
+      requestGeneration,
+      requestRestoreGeneration,
+      requestDocumentId,
+    );
     const preview = applying;
     let primaryCommitted = false;
     setHistoryState((current) => ({ ...current, status: "Applying", restore: applying }));
@@ -1370,11 +2074,13 @@ function DesktopApp(): React.ReactElement {
       })
       .then(async (restored) => {
         primaryCommitted = true;
+        if (!isCurrentAuthoringRestoreContext(context)) return undefined;
         const current = await desktopClient.getCurrentDocument({
           queryName: "get-current-document",
           workspaceId: snapshot.workspaceId,
           documentId: snapshot.documentId,
         });
+        if (!isCurrentAuthoringRestoreContext(context)) return undefined;
         if (restored.restoredVersionId !== current.versionId) {
           throw new Error("restore readback mismatch");
         }
@@ -1383,6 +2089,7 @@ function DesktopApp(): React.ReactElement {
           workspaceId: snapshot.workspaceId,
           documentId: snapshot.documentId,
         });
+        if (!isCurrentAuthoringRestoreContext(context)) return undefined;
         if (nextSnapshot.expectedVersionId !== restored.restoredVersionId) {
           throw new Error("restore controller mismatch");
         }
@@ -1392,13 +2099,18 @@ function DesktopApp(): React.ReactElement {
           documentId: snapshot.documentId,
           limit: 50,
         });
+        if (!isCurrentAuthoringRestoreContext(context)) return undefined;
+        await synchronizeDocumentKnowledgeSurfaces(snapshot.workspaceId, snapshot.documentId);
+        if (!isCurrentAuthoringRestoreContext(context)) return undefined;
         return {
           nextSnapshot,
           entries: presentDocumentHistory(history.entries, historyDateFormatter),
           nextCursor: history.nextCursor,
         };
       })
-      .then(({ nextSnapshot, entries, nextCursor }) => {
+      .then((result) => {
+        if (!result || !isCurrentAuthoringRestoreContext(context)) return;
+        const { nextSnapshot, entries, nextCursor } = result;
         setAuthoringSnapshot(nextSnapshot);
         setHistoryState({
           status: "Applied",
@@ -1408,6 +2120,7 @@ function DesktopApp(): React.ReactElement {
         });
       })
       .catch((error: unknown) => {
+        if (!isCurrentAuthoringRestoreContext(context)) return;
         const failure = error instanceof LocalDesktopCommandClientError
           ? { code: error.code, retryable: error.retryable, repairRequired: error.repairRequired }
           : {
@@ -1423,7 +2136,7 @@ function DesktopApp(): React.ReactElement {
           restore: failRestoreApply(applying, failure),
         }));
       });
-  }, [historyState.restore]);
+  }, [historyState.restore, isCurrentAuthoringRestoreContext, synchronizeDocumentKnowledgeSurfaces]);
 
   const requestAuthoringRestoreConfirmation = useCallback(() => {
     setHistoryState((current) => ({
@@ -1458,32 +2171,80 @@ function DesktopApp(): React.ReactElement {
     }
     const requestGeneration = authoringGeneration.current;
     const runAuthoringAutosave = () => {
-      void authoringController.autosaveElapsed(800).then((snapshot) => {
+      void authoringController.autosaveElapsed(800).then(async (snapshot) => {
         if (authoringGeneration.current === requestGeneration) {
           setAuthoringSnapshot(snapshot);
+          if (
+            snapshot.workspaceId &&
+            snapshot.documentId &&
+            snapshot.saveState === DocumentSaveCoordinatorState.Saved
+          ) {
+            await synchronizeDocumentKnowledgeSurfaces(snapshot.workspaceId, snapshot.documentId);
+          }
         }
       });
       setAuthoringSnapshot(authoringController.snapshot());
     };
     const timer = setTimeout(runAuthoringAutosave, 800);
     return () => clearTimeout(timer);
-  }, [surface, authoringSnapshot.revision, authoringSnapshot.saveState]);
+  }, [surface, authoringSnapshot.revision, authoringSnapshot.saveState, authoringController, synchronizeDocumentKnowledgeSurfaces]);
 
   useEffect(() => {
-    let active = true;
-    if (!desktopClient) {
-      setHomeModel(createPersonalWorkspaceHomeFailedModel(profile, "COMMAND_BRIDGE_FAILED", false));
-      return () => {
-        active = false;
-      };
+    const initial = graphPreferenceSnapshotRef.current;
+    const loading = requestDesktopGraphPreferenceLoad(initial);
+    graphPreferenceSnapshotRef.current = loading;
+    if (!graphPreferenceClient) {
+      const defaulted = applyDesktopGraphPreferenceLoad(
+        loading, loading.generation, loading.workspaceId, createDefaultDesktopGraphPreference(),
+      );
+      graphPreferenceSnapshotRef.current = defaulted;
+      setGraphIncludeExternal(defaulted.preference.includeExternal);
+      commitGraphSnapshot(Object.freeze({
+        ...graphSnapshotRef.current,
+        query: Object.freeze({ ...graphSnapshotRef.current.query, ...graphQueryPatchFromPreference(defaulted.preference) }),
+      }));
+      return;
     }
-    void loadDesktopWorkspaceHome(desktopClient, homeQuery).then((next) => {
-      if (active) setHomeModel(next);
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+    let active = true;
+    void graphPreferenceClient.load(homeQuery.workspaceId)
+      .then((preference) => {
+        if (!active) return;
+        const loaded = applyDesktopGraphPreferenceLoad(
+          graphPreferenceSnapshotRef.current, loading.generation, loading.workspaceId, preference,
+        );
+        graphPreferenceSnapshotRef.current = loaded;
+        setGraphIncludeExternal(loaded.preference.includeExternal);
+        commitGraphSnapshot(Object.freeze({
+          ...graphSnapshotRef.current,
+          query: Object.freeze({ ...graphSnapshotRef.current.query, ...graphQueryPatchFromPreference(loaded.preference) }),
+        }));
+      })
+      .catch(() => {
+        if (!active) return;
+        const defaulted = applyDesktopGraphPreferenceLoad(
+          graphPreferenceSnapshotRef.current, loading.generation, loading.workspaceId, { invalid: true },
+        );
+        graphPreferenceSnapshotRef.current = defaulted;
+        setGraphIncludeExternal(defaulted.preference.includeExternal);
+        commitGraphSnapshot(Object.freeze({
+          ...graphSnapshotRef.current,
+          query: Object.freeze({ ...graphSnapshotRef.current.query, ...graphQueryPatchFromPreference(defaulted.preference) }),
+        }));
+      });
+    return () => { active = false; };
+  }, [commitGraphSnapshot]);
+
+  useEffect(() => {
+    void loadHome();
+  }, [loadHome]);
+
+  useEffect(() => {
+    if (routeQueryLifecycleRef.current.activeRoute === activeRoute.kind) return;
+    routeQueryLifecycleRef.current = transitionDesktopRouteQueryLifecycle(
+      routeQueryLifecycleRef.current,
+      { type: "RouteActivated", route: activeRoute.kind },
+    );
+  }, [activeRoute.kind]);
 
   useEffect(() => {
     if (surface === "Home" && previousSurface.current !== "Home") void loadHome();
@@ -1491,7 +2252,12 @@ function DesktopApp(): React.ReactElement {
   }, [surface, loadHome]);
 
   useEffect(() => {
+    if (surface === "Home") void runGraphQuery(
+      { scope: "global", globalCursor: undefined },
+      HOME_GRAPH_PROJECTION_LIMIT,
+    );
     if (surface === "Graph") void runGraphQuery({ scope: graphQueryScope });
+    if (surface === "Authoring") void runGraphQuery({ scope: "local" });
   }, [surface, graphCenterDocumentId, graphQueryScope]);
 
   useEffect(() => {
@@ -1499,14 +2265,45 @@ function DesktopApp(): React.ReactElement {
   }, [surface, assetDocumentId, requestedAssetId]);
 
   useEffect(() => {
-    if (surface === "Canvas") void runCanvasLoad();
-    if (surface === "Backup") void runBackupRecovery();
+    if (surface === "Canvas") {
+      void runCanvasCatalogLoad();
+      if (activeCanvasId) void runCanvasLoad();
+    }
+    if (surface === "Backup") {
+      void (async () => {
+        await runBackupRecovery();
+        await runBackupCatalogLoad();
+      })();
+    }
   }, [surface, activeCanvasId]);
+
+  useEffect(() => {
+    const canvas = canvasSnapshot.canvas;
+    if (surface !== "Canvas" || canvasSnapshot.state !== "Ready" || !canvas) return;
+    const signature = `${canvas.canvasId}\u0000${canvas.title}\u0000${canvas.lifecycle}`;
+    if (canvasCatalogSignatureRef.current === signature) return;
+    canvasCatalogSignatureRef.current = signature;
+    const catalogEntry = canvasCatalogSnapshotRef.current.entries.find(
+      (entry) => entry.canvasId === canvas.canvasId,
+    );
+    if (catalogEntry?.title === canvas.title && catalogEntry.lifecycle === canvas.lifecycle) return;
+    void runCanvasCatalogLoad();
+  }, [surface, canvasSnapshot.state, canvasSnapshot.canvas?.canvasId, canvasSnapshot.canvas?.title, canvasSnapshot.canvas?.lifecycle]);
 
   useEffect(() => {
     if (routeState.status !== "Stable" || typeof document === "undefined") return;
     globalThis.queueMicrotask(() => focusWorkspaceRouteMain(document));
   }, [routeState.status, activeRoute.kind]);
+
+  useEffect(() => {
+    if (surface !== "Navigator" || searchReturnContext.status !== "Results" || typeof document === "undefined") return;
+    globalThis.queueMicrotask(() => restoreDesktopSearchViewport(document, searchReturnContext));
+  }, [surface, searchReturnContext]);
+
+  useEffect(() => {
+    if (activeRoute.kind === "Document" || activeRoute.kind === "Search" || searchReturnContext.status === "Inactive") return;
+    setSearchReturnContext(createDesktopSearchReturnContext());
+  }, [activeRoute.kind, searchReturnContext.status]);
 
   useEffect(() => {
     if (surface !== "Backup" || backupSnapshot.state !== "Creating") return undefined;
@@ -1541,17 +2338,32 @@ function DesktopApp(): React.ReactElement {
     setDocumentInspectorState(createDocumentInspectorState());
   }, [authoringSnapshot.documentId]);
 
+  const sidebarDocumentShortcuts = homeModel.recentDocuments.slice(0, 5).map((document) => ({
+    label: document.title,
+    actionId: "open-sidebar-document",
+    onOpen: () => openDocument(document.documentId),
+  }));
+
   if (surface === "Home") {
     return createDesktopWorkspaceHomeElement(homeModel, {
+        documentShortcuts: sidebarDocumentShortcuts,
         onRetry: loadHome,
         onCreateDocument: createNewDocument,
+        onOpenSearchOverlay: openGlobalSearchOverlay,
         onOpenNavigator: openNavigator,
         onResumeDocument: resumeDocument,
         onOpenGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Global" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
-        onOpenCanvas: () => requestDesktopRoute({ kind: "Canvas", canvasId: "default-canvas" }, { workspaceId: "workspace-1", canvasId: "default-canvas", originRoute: activeRoute.kind }),
+        onOpenCanvas: () => openCanvas(),
         onOpenAssets: () => requestDesktopRoute({ kind: "Assets" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
         onOpenBackup: () => requestDesktopRoute({ kind: "Backup" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
         onOpenDocument: openDocument,
+        knowledgeGraph: graphSnapshot,
+        onRetryKnowledgeGraph: () => {
+          void runGraphQuery(
+            { scope: "global", globalCursor: undefined },
+            HOME_GRAPH_PROJECTION_LIMIT,
+          );
+        },
       });
   }
   if (surface === "Navigator") {
@@ -1560,22 +2372,32 @@ function DesktopApp(): React.ReactElement {
         onHome: () => requestDesktopRoute({ kind: "Home" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
         onDocument: resumeDocument,
         onView: selectNavigatorView,
+        onSearchOpen: openGlobalSearchOverlay,
         onFilter: filterNavigator,
+        onSearchEscape: closeSearchWithEscape,
         onRetry: retryNavigator,
         onOpenDocument: openDocument,
+        onOpenAsset: openSearchAsset,
+        onPreviousResults: () => setSearchResultWindow((current) => transitionDesktopSearchResultWindow(current, { type: "Previous" })),
+        onNextResults: () => setSearchResultWindow((current) => transitionDesktopSearchResultWindow(current, { type: "Next" })),
         onGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Global" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
-        onCanvas: () => requestDesktopRoute({ kind: "Canvas", canvasId: "default-canvas" }, { workspaceId: "workspace-1", canvasId: "default-canvas", originRoute: activeRoute.kind }),
+        onCanvas: () => openCanvas(),
         onAssets: () => requestDesktopRoute({ kind: "Assets" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
         onBackup: () => requestDesktopRoute({ kind: "Backup" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
+      }, {
+        resultWindow: searchResultWindow,
+        documentShortcuts: sidebarDocumentShortcuts,
       });
   }
   const explorationCallbacks = {
+    documentShortcuts: sidebarDocumentShortcuts,
     onCreateDocument: createNewDocument,
     onHome: () => requestDesktopRoute({ kind: "Home" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
+    onSearchOpen: openGlobalSearchOverlay,
     onSearch: openNavigator,
     onDocument: resumeDocument,
     onGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Global" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
-    onCanvas: () => requestDesktopRoute({ kind: "Canvas", canvasId: "default-canvas" }, { workspaceId: "workspace-1", canvasId: "default-canvas", originRoute: activeRoute.kind }),
+    onCanvas: () => openCanvas(),
     onAssets: () => requestDesktopRoute({ kind: "Assets" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
     onBackup: () => requestDesktopRoute({ kind: "Backup" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
     onOpenDocument: openDocument,
@@ -1585,30 +2407,38 @@ function DesktopApp(): React.ReactElement {
     return createDesktopDocumentEmptyStateElement({
       onCreateDocument: createNewDocument,
       onHome: explorationCallbacks.onHome,
+      onSearchOpen: explorationCallbacks.onSearchOpen,
       onSearch: explorationCallbacks.onSearch,
       onGraph: explorationCallbacks.onGraph,
       onCanvas: explorationCallbacks.onCanvas,
       onAssets: explorationCallbacks.onAssets,
       onBackup: explorationCallbacks.onBackup,
-    });
+    }, { documentShortcuts: sidebarDocumentShortcuts });
   }
   if (surface === "Graph") {
     return createDesktopKnowledgeGraphElement(homeModel, graphSnapshot, {
       ...explorationCallbacks,
       onGraphQuery: (patch) => { void runGraphQuery(patch); },
+      onGraphScopeChange: changeGraphScope,
       onGraphNodeSelect: (nodeId) => commitGraphSnapshot(selectDesktopGraphNode(graphSnapshotRef.current, nodeId)),
       onGraphRetry: () => { void runGraphQuery({}); },
       onGraphReindex: () => { void runGraphRepair(); },
+      graphVisualSearch,
+      onGraphVisualSearch: setGraphVisualSearch,
+      graphCameraPreference: graphPreferenceSnapshotRef.current.preference.camera,
+      onGraphCameraPreferenceChanged: queueGraphCameraPreference,
+      graphIncludeExternal,
+      onGraphIncludeExternalChange: updateGraphIncludeExternal,
     });
   }
   if (surface === "Canvas") {
     return createDesktopCanvasElement(homeModel, canvasSnapshot, {
       ...explorationCallbacks,
-      onCanvasCreate: () => {
-        if (!canvasClient) return;
-        void createDesktopCanvas(canvasClient, canvasSnapshotRef.current, "Cabinet 제품 지도")
-          .then(commitCanvasSnapshot);
-      },
+      canvasCatalog: canvasCatalogSnapshot,
+      displayedCanvasId: activeCanvasId,
+      onCanvasCatalogRetry: () => { void runCanvasCatalogLoad(); },
+      onCanvasSelect: (canvasId) => { void chooseCanvas(canvasId); },
+      onCanvasCreate: () => { void createCanvasFromCatalog(); },
       onCanvasRetry: () => { void runCanvasLoad(); },
       onCanvasRecover: () => { void runCanvasRecovery(); },
       onCanvasAddNote: () => {
@@ -1674,6 +2504,22 @@ function DesktopApp(): React.ReactElement {
         setCanvasRenameDialogOpen(false);
         void runCanvasMutation({ kind: "rename", title: normalizedTitle });
       },
+      canvasTextEditDialog,
+      onCanvasTextEditRequest: (nodeId, text) => setCanvasTextEditDialog((current) =>
+        openCanvasTextEditDialog(
+          current,
+          nodeId,
+          text,
+          canvasSnapshotRef.current.state === "Ready"
+            && canvasSnapshotRef.current.canvas?.lifecycle !== "archived",
+        )),
+      onCanvasTextEditDraftChange: (text) => setCanvasTextEditDialog((current) =>
+        changeCanvasTextEditDraft(current, text)),
+      onCanvasTextEditCancel: () => setCanvasTextEditDialog((current) => closeCanvasTextEditDialog(current)),
+      onCanvasTextEdit: (nodeId, text) => {
+        setCanvasTextEditDialog((current) => closeCanvasTextEditDialog(current));
+        void runCanvasMutation({ kind: "update_text_card", nodeId, text });
+      },
       onCanvasArchive: () => {
         setCanvasArchiveConfirmationOpen(false);
         void runCanvasMutation({ kind: "archive" });
@@ -1718,16 +2564,21 @@ function DesktopApp(): React.ReactElement {
       onAssetPreview: () => { void runAssetPreview(); },
       onAssetPreviewClose: closeAssetPreview,
       onAssetOpen: () => { void runAssetExternalOpen(); },
+      onAssetQueryChange: (query) => commitAssetSnapshot(setDesktopAssetQuery(assetSnapshotRef.current, query)),
+      onAssetMediaFilterChange: (filter) => commitAssetSnapshot(setDesktopAssetMediaFilter(assetSnapshotRef.current, filter)),
+      onAssetLoadMore: () => { void runAssetLoadMore(); },
+      onAssetRepair: (operationId) => { void runAssetProjectionRepair(operationId); },
     });
   }
   if (surface === "Backup") {
     return createDesktopBackupRecoveryElement(backupSnapshot, {
       onCreateDocument: createNewDocument,
       onHome: () => requestDesktopRoute({ kind: "Home" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
+      onSearchOpen: openGlobalSearchOverlay,
       onSearch: openNavigator,
       onDocument: resumeDocument,
       onGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Global" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
-      onCanvas: () => requestDesktopRoute({ kind: "Canvas", canvasId: "default-canvas" }, { workspaceId: "workspace-1", canvasId: "default-canvas", originRoute: activeRoute.kind }),
+      onCanvas: () => openCanvas(),
       onAssets: () => requestDesktopRoute({ kind: "Assets" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind }),
       onCreateBackup: () => { void runBackupCreate(); },
       onCancelBackup: () => { void runBackupOperationCancel(); },
@@ -1735,7 +2586,10 @@ function DesktopApp(): React.ReactElement {
       onConfirmRestore: () => { void runBackupConfirm(); },
       onCancelRestore: () => { void runBackupCancel(); },
       onRecover: () => { void runBackupRecovery(); },
-    });
+      onReloadCatalog: () => { void runBackupCatalogLoad(); },
+      onLoadMoreCatalog: () => { void runBackupCatalogLoad(backupSnapshotRef.current.catalogNextCursor); },
+      onSelectCatalogPackage: (packageId) => commitBackupSnapshot(selectDesktopBackupCatalogPackage(backupSnapshotRef.current, packageId)),
+    }, { documentShortcuts: sidebarDocumentShortcuts });
   }
   return createDesktopDocumentAuthoringWorkbenchElement(
     authoringSnapshot,
@@ -1743,11 +2597,23 @@ function DesktopApp(): React.ReactElement {
       onHome() {
         requestDesktopRoute({ kind: "Home" }, { workspaceId: "workspace-1", originRoute: activeRoute.kind });
       },
-      onMode: setEditorViewMode,
+      onReturnToSearch: searchReturnContext.status === "DocumentOpen" ? returnToSearch : undefined,
+      onOpenPlainTextEditor() {
+        setPlainTextEditorOpen(true);
+      },
+      onClosePlainTextEditor() {
+        setPlainTextEditorOpen(false);
+      },
       onBodyChange(body) {
         if (authoringController) {
           setAuthoringSnapshot(authoringController.changeContent(body));
         }
+      },
+      onFormatCommand(command) {
+        if (!authoringController) return;
+        setAuthoringSnapshot(authoringController.changeContent(
+          applyMarkdownFormattingCommand(authoringController.snapshot().body ?? "", command),
+        ));
       },
       onSave() {
         runAuthoringSave("manual");
@@ -1803,14 +2669,24 @@ function DesktopApp(): React.ReactElement {
       onApplyRestore: applyAuthoringRestore,
       onRefreshRestorePreview: refreshAuthoringRestorePreview,
       onContinueRestoreRecovery: applyAuthoringRestore,
+      onSearchOpen: openGlobalSearchOverlay,
       onSearch: openNavigator,
-      onGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Global" }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, originRoute: activeRoute.kind }),
-      onCanvas: () => requestDesktopRoute({ kind: "Canvas", canvasId: "default-canvas" }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, canvasId: "default-canvas", originRoute: activeRoute.kind }),
+      onGraph: () => requestDesktopRoute({ kind: "Graph", scope: "Local", centerDocumentId: authoringSnapshot.documentId }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, originRoute: activeRoute.kind }),
+      onLocalGraphNodeSelect: (nodeId) => commitGraphSnapshot(selectDesktopGraphNode(graphSnapshotRef.current, nodeId)),
+      onLocalGraphQuery: (patch) => { void runGraphQuery(patch); },
+      onLocalGraphVisualSearch: setGraphVisualSearch,
+      onLocalGraphCameraPreferenceChanged: queueGraphCameraPreference,
+      onLocalGraphIncludeExternalChange: updateGraphIncludeExternal,
+      onOpenLocalGraphAsset: (assetId) => requestDesktopRoute({ kind: "Assets", documentId: authoringSnapshot.documentId, assetId }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, assetId, originRoute: activeRoute.kind }),
+      onLocalGraphRetry: () => { void runGraphQuery({ scope: "local" }); },
+      onLocalGraphRepair: () => { void runGraphRepair(); },
+      onCanvas: () => openCanvas(authoringSnapshot.documentId),
       onAssets: () => requestDesktopRoute({ kind: "Assets", documentId: authoringSnapshot.documentId }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, originRoute: activeRoute.kind }),
       onBackup: () => requestDesktopRoute({ kind: "Backup" }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, originRoute: activeRoute.kind }),
       onOpenLinkedDocument: openDocument,
       onInspectorTab: (tab) => {
         setDocumentInspectorState((current) => transitionDocumentInspector(current, { type: "SelectTab", tab }));
+        if (tab === "attachments") void runAssetQuery();
       },
       onAssetImport: () => {
         void (async () => {
@@ -1820,6 +2696,12 @@ function DesktopApp(): React.ReactElement {
       },
       onAssetRetry: () => { void runAssetQuery(); },
       onAssetCancel: () => { void runAssetImportCancel(); },
+      onAssetRepair: (operationId) => {
+        void (async () => {
+          const result = await runAssetProjectionRepair(operationId);
+          if (result?.importState === "Completed") await loadAuthoringHistory();
+        })();
+      },
       onAssetSelect: (assetId) => { void selectAndLoadAssetDetail(assetId); },
       onAssetPreview: () => { void runAssetPreview(); },
       onAssetPreviewClose: closeAssetPreview,
@@ -1850,14 +2732,29 @@ function DesktopApp(): React.ReactElement {
           setDocumentInspectorState((current) => transitionDocumentInspector(current, { type: "UnlinkFailed" }));
         })();
       },
-      onOpenLibrary: () => requestDesktopRoute({ kind: "Assets", documentId: authoringSnapshot.documentId }, { workspaceId: "workspace-1", documentId: authoringSnapshot.documentId, originRoute: activeRoute.kind }),
+      onOpenLibrary: () => { void openDocumentAssetLibrary(authoringSnapshot.documentId); },
+      onAssetLibraryClose: () => commitDocumentAssetLibraryState(closeDocumentAssetLibrary(documentAssetLibraryStateRef.current)),
+      onAssetLibraryRetry: () => { void openDocumentAssetLibrary(documentAssetLibraryStateRef.current.documentId); },
+      onAssetLibrarySelect: (assetId) => commitDocumentAssetLibraryState(selectDocumentAssetLibraryItem(documentAssetLibraryStateRef.current, assetId)),
+      onAssetLibraryLoadMore: () => { void loadMoreDocumentAssetLibrary(); },
+      onAssetLibraryLink: () => {
+        void linkDocumentAssetLibrarySelection().then((completion) => {
+          if (completion?.documentAssets) void loadAuthoringHistory();
+        });
+      },
     },
     {
-      viewMode: editorViewMode,
+      documentShortcuts: sidebarDocumentShortcuts,
+      plainTextEditorOpen,
       history: historyState,
       links: linkOverviewSnapshot,
       assets: assetSnapshot,
+      assetLibrary: documentAssetLibraryState,
       inspector: documentInspectorState,
+      graph: graphSnapshot,
+      graphVisualSearch,
+      graphCameraPreference: graphPreferenceSnapshotRef.current.preference.camera,
+      graphIncludeExternal,
     },
   );
 }

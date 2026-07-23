@@ -9,6 +9,7 @@ use cabinet_domain::document_revision::{
     DocumentExpectedCurrentVersion, DocumentMutationFingerprint, DocumentMutationKind,
     DocumentOperationId, DocumentOperationIdentity,
 };
+use cabinet_domain::projection_work::ProjectionChangeKind;
 use cabinet_domain::version::{DocumentRevisionNumber, VersionId};
 use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::document_revision_commit::{
@@ -33,6 +34,32 @@ pub struct LocalCommittedRestoreCandidate {
     workspace_id: WorkspaceId,
     document_id: DocumentId,
     version_id: VersionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalCommittedAttachmentMutationCandidate {
+    workspace_id: WorkspaceId,
+    document_id: DocumentId,
+    version_id: VersionId,
+    change_kind: ProjectionChangeKind,
+}
+
+impl LocalCommittedAttachmentMutationCandidate {
+    pub const fn workspace_id(&self) -> &WorkspaceId {
+        &self.workspace_id
+    }
+
+    pub const fn document_id(&self) -> &DocumentId {
+        &self.document_id
+    }
+
+    pub const fn version_id(&self) -> &VersionId {
+        &self.version_id
+    }
+
+    pub const fn change_kind(&self) -> ProjectionChangeKind {
+        self.change_kind
+    }
 }
 
 impl LocalCommittedRestoreCandidate {
@@ -105,6 +132,65 @@ impl LocalDocumentOperationJournal {
                 workspace_id: record.identity().workspace_id().clone(),
                 document_id: record.identity().document_id().clone(),
                 version_id: result.version_id().clone(),
+            });
+            if candidates.len() == limit {
+                break;
+            }
+        }
+        Ok(candidates)
+    }
+
+    pub fn list_committed_attachment_mutation_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LocalCommittedAttachmentMutationCandidate>, LocalRestoreCandidateScanError>
+    {
+        if !(1..=1000).contains(&limit) {
+            return Err(LocalRestoreCandidateScanError::InvalidLimit);
+        }
+        let entries = match fs::read_dir(self.journal_dir()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err(LocalRestoreCandidateScanError::StorageUnavailable),
+        };
+        let mut paths = entries
+            .map(|entry| {
+                entry
+                    .map(|value| value.path())
+                    .map_err(|_| LocalRestoreCandidateScanError::StorageUnavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        paths.retain(|path| path.extension().and_then(|value| value.to_str()) == Some("json"));
+        paths.sort();
+        let mut candidates = Vec::new();
+        for path in paths {
+            let content = fs::read_to_string(path)
+                .map_err(|_| LocalRestoreCandidateScanError::StorageUnavailable)?;
+            let file: JournalRecordFile = serde_json::from_str(&content)
+                .map_err(|_| LocalRestoreCandidateScanError::CorruptedJournal)?;
+            let operation_id = DocumentOperationId::new(&file.operation_id)
+                .map_err(|_| LocalRestoreCandidateScanError::CorruptedJournal)?;
+            let record = file
+                .into_domain(&operation_id)
+                .map_err(|_| LocalRestoreCandidateScanError::CorruptedJournal)?;
+            let change_kind = match record.identity().kind() {
+                DocumentMutationKind::AttachAsset | DocumentMutationKind::LinkAsset => {
+                    ProjectionChangeKind::AssetAttached
+                }
+                DocumentMutationKind::UnlinkAsset => ProjectionChangeKind::AssetDetached,
+                _ => continue,
+            };
+            if record.state() != DocumentOperationJournalState::Committed {
+                continue;
+            }
+            let result = record
+                .result()
+                .ok_or(LocalRestoreCandidateScanError::CorruptedJournal)?;
+            candidates.push(LocalCommittedAttachmentMutationCandidate {
+                workspace_id: record.identity().workspace_id().clone(),
+                document_id: record.identity().document_id().clone(),
+                version_id: result.version_id().clone(),
+                change_kind,
             });
             if candidates.len() == limit {
                 break;

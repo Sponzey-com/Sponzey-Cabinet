@@ -118,6 +118,73 @@ impl DocumentLinkTargetResolver for DurableDocumentLinkCatalog {
             _ => Err(LinkTargetResolverError::Ambiguous),
         }
     }
+
+    fn resolve_relative(
+        &self,
+        workspace_id: &WorkspaceId,
+        source_document_id: &DocumentId,
+        target: &str,
+    ) -> Result<LinkTargetResolution, LinkTargetResolverError> {
+        let records = self
+            .list(workspace_id)
+            .map_err(|_| LinkTargetResolverError::Unavailable)?;
+        let source = records
+            .iter()
+            .find(|record| record.document_id() == source_document_id)
+            .ok_or(LinkTargetResolverError::InvalidTarget)?;
+        let normalized = normalize_relative_document_path(source.path(), target)?;
+        if let Some(record) = records.iter().find(|record| record.path() == &normalized) {
+            return Ok(LinkTargetResolution::Resolved(
+                ResolvedDocumentLinkTarget::new(
+                    record.document_id().clone(),
+                    record.path().clone(),
+                ),
+            ));
+        }
+        let file_stem = normalized
+            .as_str()
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.strip_suffix(".md"))
+            .ok_or(LinkTargetResolverError::InvalidTarget)?;
+        let title =
+            DocumentTitle::new(file_stem).map_err(|_| LinkTargetResolverError::InvalidTarget)?;
+        let slug =
+            DocumentSlug::from_title(&title).map_err(|_| LinkTargetResolverError::InvalidTarget)?;
+        Ok(LinkTargetResolution::Unresolved(slug))
+    }
+}
+
+fn normalize_relative_document_path(
+    source_path: &DocumentPath,
+    target: &str,
+) -> Result<DocumentPath, LinkTargetResolverError> {
+    let target = target.trim();
+    let target = target.split_once('#').map_or(target, |(path, _)| path);
+    if target.is_empty()
+        || target.starts_with('/')
+        || target.contains('\\')
+        || target.contains('?')
+        || target.contains(':')
+        || !target.to_ascii_lowercase().ends_with(".md")
+    {
+        return Err(LinkTargetResolverError::InvalidTarget);
+    }
+    let mut segments = source_path.as_str().split('/').collect::<Vec<_>>();
+    segments.pop();
+    for segment in target.split('/') {
+        match segment {
+            "" => return Err(LinkTargetResolverError::InvalidTarget),
+            "." => {}
+            ".." => {
+                segments
+                    .pop()
+                    .ok_or(LinkTargetResolverError::InvalidTarget)?;
+            }
+            value => segments.push(value),
+        }
+    }
+    DocumentPath::new(&segments.join("/")).map_err(|_| LinkTargetResolverError::InvalidTarget)
 }
 
 fn encode(records: &[DocumentLinkCatalogRecord]) -> String {

@@ -1,17 +1,25 @@
 import React from "react";
 
 import { KO_KR_MESSAGES } from "./ko_kr_catalog.ts";
-import { createWorkspaceShellElement } from "./react_workspace_shell.ts";
+import {
+  createWorkspaceShellElement,
+  type WorkspaceShellDocumentShortcut,
+} from "./react_workspace_shell.ts";
 import { createWorkspaceShellModel, type WorkspaceShellRouteKind } from "./workspace_shell_contract.ts";
 
 export interface DesktopDocumentEmptyStateCallbacks {
   readonly onCreateDocument: () => void;
   readonly onHome: () => void;
-  readonly onSearch: () => void;
+  readonly onSearchOpen?: () => void;
+  readonly onSearch: (query?: string) => void;
   readonly onGraph?: () => void;
   readonly onCanvas?: () => void;
   readonly onAssets?: () => void;
   readonly onBackup?: () => void;
+}
+
+export interface DesktopDocumentEmptyStateOptions {
+  readonly documentShortcuts?: readonly WorkspaceShellDocumentShortcut[];
 }
 
 const shellRoutes: readonly WorkspaceShellRouteKind[] = [
@@ -26,6 +34,7 @@ const shellRoutes: readonly WorkspaceShellRouteKind[] = [
 
 export function createDesktopDocumentEmptyStateElement(
   callbacks: DesktopDocumentEmptyStateCallbacks,
+  options: DesktopDocumentEmptyStateOptions = {},
 ): React.ReactElement {
   const e = React.createElement;
   const message = KO_KR_MESSAGES.message;
@@ -46,7 +55,9 @@ export function createDesktopDocumentEmptyStateElement(
     },
     rootAttributes: { "data-document-empty-state": "true" },
     onCreateDocument: callbacks.onCreateDocument,
+    onSearchOpen: callbacks.onSearchOpen,
     onSearch: callbacks.onSearch,
+    documentShortcuts: options.documentShortcuts,
     content: e(
       "main",
       { className: "document-empty-main" },

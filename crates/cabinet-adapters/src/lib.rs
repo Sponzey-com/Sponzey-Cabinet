@@ -1,12 +1,15 @@
 //! Adapter implementations for external boundaries.
 
+pub mod composite_graph_projection;
 pub mod deterministic_embedding_provider;
 pub mod durable_asset_association_catalog;
 pub mod durable_asset_import_operation_repository;
 pub mod durable_asset_metadata_catalog;
 pub mod durable_backup_package_store;
+pub mod durable_canvas_graph_projection;
 pub mod durable_canvas_repository;
 pub mod durable_document_link_catalog;
+pub mod durable_last_canvas_selection;
 pub mod durable_local_graph_projection;
 pub mod durable_local_link_index;
 pub mod durable_local_search_index;
@@ -22,6 +25,7 @@ pub mod local_asset_availability_resolver;
 pub mod local_asset_external_opener;
 pub mod local_asset_import_source;
 pub mod local_asset_preview_reader;
+pub mod local_asset_search_index;
 pub mod local_asset_staging_writer;
 pub mod local_asset_store;
 pub mod local_atomic_file;
@@ -74,6 +78,7 @@ pub mod local_user_repository;
 pub mod local_vector_index;
 pub mod local_version_store;
 pub mod local_workspace_home_projection;
+pub mod local_workspace_home_query;
 pub mod local_workspace_reopener;
 pub mod phase011_upgrade_migrator;
 pub mod process_local_document_diff_operation_registry;

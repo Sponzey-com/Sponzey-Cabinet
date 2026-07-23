@@ -6,8 +6,8 @@ use cabinet_domain::workspace::WorkspaceId;
 use cabinet_ports::workspace_home::{
     WorkspaceHomeBackupStatus, WorkspaceHomeChangeProjection, WorkspaceHomeDocumentProjection,
     WorkspaceHomeHealthStatus, WorkspaceHomeProjection, WorkspaceHomeProjectionError,
-    WorkspaceHomeProjectionLimits, WorkspaceHomeProjectionPort, WorkspaceHomeTagProjection,
-    WorkspaceHomeUnfinishedProjection,
+    WorkspaceHomeProjectionLimits, WorkspaceHomeProjectionPort, WorkspaceHomeSummaryProjection,
+    WorkspaceHomeTagProjection, WorkspaceHomeUnfinishedProjection,
 };
 
 #[test]
@@ -35,6 +35,9 @@ fn local_workspace_home_projection_persists_restarts_and_applies_independent_lim
     assert_eq!(loaded.unfinished_items().len(), 1);
     assert_eq!(loaded.backup_status(), WorkspaceHomeBackupStatus::Fresh);
     assert_eq!(loaded.health_status(), WorkspaceHomeHealthStatus::Healthy);
+    assert_eq!(loaded.summary().document_count(), 10_000);
+    assert_eq!(loaded.summary().asset_count(), 2_500);
+    assert_eq!(loaded.summary().canvas_count(), 24);
 
     let files = fs::read_dir(root.join("home-projections"))
         .expect("projection directory")
@@ -122,6 +125,50 @@ fn local_workspace_home_projection_rejects_corrupted_or_unknown_schema_snapshot(
 }
 
 #[test]
+fn local_workspace_home_projection_defaults_legacy_summary_and_rejects_malformed_counts() {
+    let root = temp_root("summary-compatibility");
+    let workspace_id = workspace("workspace-1");
+    let store = LocalWorkspaceHomeProjectionStore::new(root.clone());
+    store
+        .replace_projection(&workspace_id, &projection("a"))
+        .expect("projection write");
+    let snapshot = fs::read_dir(root.join("home-projections"))
+        .expect("projection directory")
+        .next()
+        .expect("snapshot entry")
+        .expect("snapshot path")
+        .path();
+    let encoded = fs::read_to_string(&snapshot).expect("encoded projection");
+    let legacy = encoded
+        .lines()
+        .filter(|line| !line.starts_with("summary\t"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&snapshot, format!("{legacy}\n")).expect("legacy projection");
+
+    let loaded = store
+        .load_workspace_home(
+            &workspace_id,
+            WorkspaceHomeProjectionLimits::new(10, 10, 10, 10, 10).expect("limits"),
+        )
+        .expect("legacy projection remains readable");
+    assert_eq!(loaded.summary(), WorkspaceHomeSummaryProjection::default());
+
+    fs::write(
+        &snapshot,
+        encoded.replace("summary\t10000\t2500\t24", "summary\tinvalid\t2500\t24"),
+    )
+    .expect("malformed projection");
+    let error = store
+        .load_workspace_home(
+            &workspace_id,
+            WorkspaceHomeProjectionLimits::new(10, 10, 10, 10, 10).expect("limits"),
+        )
+        .expect_err("malformed summary must fail");
+    assert_eq!(error, WorkspaceHomeProjectionError::CorruptedProjection);
+}
+
+#[test]
 fn local_workspace_home_projection_maps_invalid_root_to_storage_unavailable() {
     let root = temp_root("write-failure");
     fs::create_dir_all(&root).expect("root");
@@ -193,6 +240,7 @@ fn projection(prefix: &str) -> WorkspaceHomeProjection {
         WorkspaceHomeBackupStatus::Fresh,
         WorkspaceHomeHealthStatus::Healthy,
     )
+    .with_summary(WorkspaceHomeSummaryProjection::new(10_000, 2_500, 24))
 }
 
 fn document(prefix: &str, index: u8) -> WorkspaceHomeDocumentProjection {

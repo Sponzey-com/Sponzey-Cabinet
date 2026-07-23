@@ -5,7 +5,8 @@ import { KO_KR_CATALOG, MessageCatalogError, formatBytesKoKr, formatCountKoKr, f
 
 test("bundled catalog exposes immutable canonical workspace terminology", () => {
   assert.equal(Object.isFrozen(KO_KR_CATALOG), true);
-  assert.deepEqual([messageKoKr("route.home"), messageKoKr("route.search"), messageKoKr("route.document"), messageKoKr("route.graph"), messageKoKr("route.canvas"), messageKoKr("route.assets"), messageKoKr("route.backup")], ["홈", "검색", "문서", "지식 지도", "캔버스", "첨부 파일", "백업 및 복원"]);
+  assert.deepEqual([messageKoKr("route.home"), messageKoKr("route.search"), messageKoKr("route.document"), messageKoKr("route.graph"), messageKoKr("route.canvas"), messageKoKr("route.assets"), messageKoKr("route.backup")], ["홈", "검색", "문서", "지식 지도", "캔버스", "첨부 파일", "백업과 복원"]);
+  assert.equal(messageKoKr("shell.searchPlaceholder"), "문서와 첨부 파일 검색");
   assert.equal(messageKoKr("action.save"), "저장");
   assert.equal(messageKoKr("status.saved"), "모든 변경 저장됨");
 });

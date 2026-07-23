@@ -134,6 +134,40 @@ test("authoring controller ignores a stale native completion revision", async ()
   assert.equal(controller.snapshot().saveState, DocumentSaveCoordinatorState.Saving);
 });
 
+test("authoring controller keeps the latest document when concurrent opens complete out of order", async () => {
+  const pending = new Map<string, (value: CurrentDocumentView) => void>();
+  const controller = createDesktopDocumentAuthoringController({
+    client: {
+      getCurrentDocument(query) {
+        return new Promise<CurrentDocumentView>((resolve) => pending.set(query.documentId, resolve));
+      },
+      async saveDocumentRevision() {
+        throw new Error("save must not run");
+      },
+    },
+    operationIdSource: () => "operation-unused",
+  });
+
+  const first = controller.open({ ...identity(), documentId: "doc-first" });
+  const second = controller.open({ ...identity(), documentId: "doc-second" });
+  pending.get("doc-second")?.({
+    ...currentDocument(),
+    documentId: "doc-second",
+    title: "두 번째 문서",
+  });
+  await second;
+  pending.get("doc-first")?.({
+    ...currentDocument(),
+    documentId: "doc-first",
+    title: "첫 번째 문서",
+  });
+  const staleResult = await first;
+
+  assert.equal(staleResult.documentId, "doc-second");
+  assert.equal(controller.snapshot().documentId, "doc-second");
+  assert.equal(controller.snapshot().title, "두 번째 문서");
+});
+
 test("authoring controller verifies the durable document before reporting saved", async () => {
   let persisted = currentDocument();
   const controller = controllerWith({

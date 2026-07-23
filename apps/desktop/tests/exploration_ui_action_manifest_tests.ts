@@ -22,12 +22,12 @@ test("exploration action manifest has unique reviewable identities and explicit 
 test("manifest covers all required exploration routes mutations and disabled pending controls", () => {
   const byId = new Map(EXPLORATION_UI_ACTION_MANIFEST.map((entry) => [entry.actionId, entry]));
   for (const id of [
-    "navigate-home", "navigate-search", "navigate-graph", "navigate-canvas", "navigate-assets",
-    "open-graph-document", "reindex-graph", "create-canvas", "add-canvas-document",
+    "navigate-home", "workspace-search-input", "submit-workspace-search", "navigate-graph", "navigate-canvas", "navigate-assets",
+    "open-graph-document", "open-graph-asset", "reindex-graph", "create-canvas", "add-canvas-document",
     "add-canvas-note", "add-canvas-asset", "connect-canvas-nodes", "remove-canvas-edge",
     "open-canvas-document", "open-canvas-asset", "recover-canvas",
     "rename-canvas", "cancel-canvas-rename", "confirm-canvas-rename", "archive-canvas", "cancel-canvas-archive", "confirm-canvas-archive",
-    "graph-zoom-in", "graph-zoom-out", "graph-fit-view",
+    "graph-zoom-in", "graph-zoom-out", "graph-fit-view", "graph-reset-layout", "graph-pause-layout", "graph-resume-layout",
     "import-asset", "cancel-asset-import", "link-asset", "unlink-asset", "open-linked-document",
   ]) {
     assert.equal(byId.get(id)?.state, "connected", `${id} must be connected`);

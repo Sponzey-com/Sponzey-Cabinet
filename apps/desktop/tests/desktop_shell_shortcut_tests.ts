@@ -12,10 +12,11 @@ test("workspace search shortcut accepts only non-repeating macOS Cmd+K", () => {
   assert.equal(isMacWorkspaceSearchShortcut({ key: "k", metaKey: true, ctrlKey: false, altKey: false, shiftKey: true, repeat: false }), false);
 });
 
-test("desktop entry routes the workspace shortcut through the existing navigator action", async () => {
+test("desktop entry routes the workspace shortcut to the shared search input without navigation", async () => {
   const source = await readFile(new URL("../src/desktop_entry.ts", import.meta.url), "utf8");
   assert.match(source, /isMacWorkspaceSearchShortcut/);
   assert.match(source, /addEventListener\("keydown", handleSearchShortcut\)/);
-  assert.match(source, /handleSearchShortcut[\s\S]*openNavigator\(\)/);
+  assert.match(source, /handleSearchShortcut[\s\S]*focusDesktopWorkspaceSearch\(document\)/);
+  assert.doesNotMatch(source, /handleSearchShortcut[\s\S]{0,180}openNavigator\(\)/);
   assert.match(source, /removeEventListener\("keydown", handleSearchShortcut\)/);
 });
